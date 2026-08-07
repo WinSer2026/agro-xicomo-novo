@@ -2350,26 +2350,25 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           </div>
 
           {(() => {
-            const getLocalDateStr = (dateStr: string) => {
-              if (!dateStr) return '';
+            const isSameDay = (dateStr: string, targetDateStr: string) => {
+              if (!dateStr || !targetDateStr) return false;
+              if (dateStr.startsWith(targetDateStr)) return true;
               try {
                 const d = new Date(dateStr);
                 if (!isNaN(d.getTime())) {
                   const y = d.getFullYear();
                   const m = String(d.getMonth() + 1).padStart(2, '0');
                   const day = String(d.getDate()).padStart(2, '0');
-                  return `${y}-${m}-${day}`;
+                  return `${y}-${m}-${day}` === targetDateStr;
                 }
               } catch {}
-              if (dateStr.includes('T')) return dateStr.split('T')[0];
-              if (dateStr.includes(' ')) return dateStr.split(' ')[0];
-              return dateStr.substring(0, 10);
+              return false;
             };
 
             const salesOnDate = sales.filter(s => {
               if (s.status === 'Cancelada' || s.status === 'canceled') return false;
               if (!s.date) return false;
-              return getLocalDateStr(s.date) === selectedReportDate;
+              return isSameDay(s.date, selectedReportDate);
             });
             const totalRevenue = salesOnDate.reduce((acc, s) => acc + s.total, 0);
 
@@ -2378,10 +2377,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
             let totalMPesa = 0;
             let totalEMola = 0;
             let totalTransferencia = 0;
+            let totalCredito = 0;
 
             salesOnDate.forEach(s => {
               const pm = (s.paymentMethod || '').trim().toLowerCase();
-              if (pm === 'dinheiro' || pm === 'numerario') {
+              if (pm === 'dinheiro' || pm === 'numerario' || pm === 'cash') {
                 totalNumerario += s.total;
               } else if (pm === 'm-pesa' || pm === 'mpesa') {
                 totalMPesa += s.total;
@@ -2389,14 +2389,17 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 totalEMola += s.total;
               } else if (pm === 'transferência' || pm === 'transferencia' || pm === 'banco') {
                 totalTransferencia += s.total;
+              } else if (pm === 'crédito' || pm === 'credit') {
+                totalCredito += s.total;
               } else if (pm === 'múltiplo' || pm === 'multiplo') {
                 if (s.paymentBreakdown && Array.isArray(s.paymentBreakdown)) {
                   s.paymentBreakdown.forEach(b => {
                     const bpm = (b.method || '').trim().toLowerCase();
-                    if (bpm === 'dinheiro' || bpm === 'numerario') totalNumerario += b.amount;
+                    if (bpm === 'dinheiro' || bpm === 'numerario' || bpm === 'cash') totalNumerario += b.amount;
                     else if (bpm === 'm-pesa' || bpm === 'mpesa') totalMPesa += b.amount;
                     else if (bpm === 'e-mola' || bpm === 'emola') totalEMola += b.amount;
                     else if (bpm === 'transferência' || bpm === 'transferencia' || bpm === 'banco') totalTransferencia += b.amount;
+                    else if (bpm === 'crédito' || bpm === 'credit') totalCredito += b.amount;
                     else totalNumerario += b.amount;
                   });
                 } else {
@@ -2434,7 +2437,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
             return (
               <div className="space-y-6">
                 {/* Financial Dashboard Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
                   
                   {/* Total Faturado Card */}
                   <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 p-4 rounded-xl text-white shadow-md flex flex-col justify-between min-h-[100px]">
@@ -2500,6 +2503,20 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                     <div className="flex items-center gap-1 text-[9px] text-blue-500 font-bold mt-3">
                       <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
                       Conta Bancária
+                    </div>
+                  </div>
+
+                  {/* Crédito Card */}
+                  <div className="bg-slate-50 border border-gray-200 p-4 rounded-xl flex flex-col justify-between shadow-sm min-h-[100px]">
+                    <div>
+                      <p className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Vendas a Crédito</p>
+                      <h3 className="text-base font-black font-mono tracking-tight text-gray-800 mt-1">
+                        {totalCredito.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs text-gray-500">MT</span>
+                      </h3>
+                    </div>
+                    <div className="flex items-center gap-1 text-[9px] text-purple-500 font-bold mt-3">
+                      <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
+                      Contas a Receber
                     </div>
                   </div>
 

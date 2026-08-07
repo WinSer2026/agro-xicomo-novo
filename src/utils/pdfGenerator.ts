@@ -1187,26 +1187,25 @@ export async function downloadDailySalesReportPDF(
   const co = getCompanyDefaults(settings);
   const logoBase64 = await getLogoBase64(settings.logoUrl || '/logo.png');
 
-  const getLocalDateStr = (dateStr: string) => {
-    if (!dateStr) return '';
+  const isSameDay = (dateStr: string, targetDateStr: string) => {
+    if (!dateStr || !targetDateStr) return false;
+    if (dateStr.startsWith(targetDateStr)) return true;
     try {
       const d = new Date(dateStr);
       if (!isNaN(d.getTime())) {
         const y = d.getFullYear();
         const m = String(d.getMonth() + 1).padStart(2, '0');
         const day = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}`;
+        return `${y}-${m}-${day}` === targetDateStr;
       }
     } catch {}
-    if (dateStr.includes('T')) return dateStr.split('T')[0];
-    if (dateStr.includes(' ')) return dateStr.split(' ')[0];
-    return dateStr.substring(0, 10);
+    return false;
   };
 
   const dailySales = sales.filter(s => {
     if (s.status === 'Cancelada') return false;
     if (!s.date) return false;
-    return getLocalDateStr(s.date) === selectedDate;
+    return isSameDay(s.date, selectedDate);
   });
 
   let totalRevenue = 0;
@@ -1214,13 +1213,14 @@ export async function downloadDailySalesReportPDF(
   let totalMPesa = 0;
   let totalEMola = 0;
   let totalTransferencia = 0;
+  let totalCredito = 0;
 
   const productAgg: Record<string, { name: string; category: string; qty: number; unit: string; revenue: number }> = {};
 
   dailySales.forEach(sale => {
     totalRevenue += sale.total;
     const pm = (sale.paymentMethod || '').trim().toLowerCase();
-    if (pm === 'dinheiro' || pm === 'numerario') {
+    if (pm === 'dinheiro' || pm === 'numerario' || pm === 'cash') {
       totalNumerario += sale.total;
     } else if (pm === 'm-pesa' || pm === 'mpesa') {
       totalMPesa += sale.total;
@@ -1228,14 +1228,17 @@ export async function downloadDailySalesReportPDF(
       totalEMola += sale.total;
     } else if (pm === 'transferência' || pm === 'transferencia' || pm === 'banco') {
       totalTransferencia += sale.total;
+    } else if (pm === 'crédito' || pm === 'credit') {
+      totalCredito += sale.total;
     } else if (pm === 'múltiplo' || pm === 'multiplo') {
       if (sale.paymentBreakdown && Array.isArray(sale.paymentBreakdown)) {
         sale.paymentBreakdown.forEach(b => {
           const bpm = (b.method || '').trim().toLowerCase();
-          if (bpm === 'dinheiro' || bpm === 'numerario') totalNumerario += b.amount;
+          if (bpm === 'dinheiro' || bpm === 'numerario' || bpm === 'cash') totalNumerario += b.amount;
           else if (bpm === 'm-pesa' || bpm === 'mpesa') totalMPesa += b.amount;
           else if (bpm === 'e-mola' || bpm === 'emola') totalEMola += b.amount;
           else if (bpm === 'transferência' || bpm === 'transferencia' || bpm === 'banco') totalTransferencia += b.amount;
+          else if (bpm === 'crédito' || bpm === 'credit') totalCredito += b.amount;
           else totalNumerario += b.amount;
         });
       } else {
@@ -1303,14 +1306,15 @@ export async function downloadDailySalesReportPDF(
     ['M-Pesa:', fmtMT(totalMPesa)],
     ['E-Mola:', fmtMT(totalEMola)],
     ['Transferência:', fmtMT(totalTransferencia)],
+    ['Crédito:', fmtMT(totalCredito)],
   ];
   methods.forEach((m, i) => {
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(100, 116, 139);
-    doc.text(m[0], 110, cy + 7 + (i * 4));
+    doc.text(m[0], 110, cy + 5 + (i * 3.8));
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(15, 23, 42);
-    doc.text(`${m[1]} MT`, 160, cy + 7 + (i * 4));
+    doc.text(`${m[1]} MT`, 160, cy + 5 + (i * 3.8));
   });
 
   // Products table
