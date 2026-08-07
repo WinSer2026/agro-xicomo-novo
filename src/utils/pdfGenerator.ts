@@ -1187,9 +1187,26 @@ export async function downloadDailySalesReportPDF(
   const co = getCompanyDefaults(settings);
   const logoBase64 = await getLogoBase64(settings.logoUrl || '/logo.png');
 
+  const getLocalDateStr = (dateStr: string) => {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+    } catch {}
+    if (dateStr.includes('T')) return dateStr.split('T')[0];
+    if (dateStr.includes(' ')) return dateStr.split(' ')[0];
+    return dateStr.substring(0, 10);
+  };
+
   const dailySales = sales.filter(s => {
     if (s.status === 'Cancelada') return false;
-    return s.date.split('T')[0] === selectedDate;
+    if (!s.date) return false;
+    return getLocalDateStr(s.date) === selectedDate;
   });
 
   let totalRevenue = 0;
@@ -1202,19 +1219,30 @@ export async function downloadDailySalesReportPDF(
 
   dailySales.forEach(sale => {
     totalRevenue += sale.total;
-    if (sale.paymentMethod === 'Dinheiro') totalNumerario += sale.total;
-    else if (sale.paymentMethod === 'M-Pesa') totalMPesa += sale.total;
-    else if (sale.paymentMethod === 'E-Mola') totalEMola += sale.total;
-    else if (sale.paymentMethod === 'Transferência') totalTransferencia += sale.total;
-
-    // Handle multiple payments
-    if (sale.paymentMethod === 'Múltiplo' && sale.paymentBreakdown) {
-      sale.paymentBreakdown.forEach(b => {
-        if (b.method === 'Dinheiro') totalNumerario += b.amount;
-        else if (b.method === 'M-Pesa') totalMPesa += b.amount;
-        else if (b.method === 'E-Mola') totalEMola += b.amount;
-        else if (b.method === 'Transferência') totalTransferencia += b.amount;
-      });
+    const pm = (sale.paymentMethod || '').trim().toLowerCase();
+    if (pm === 'dinheiro' || pm === 'numerario') {
+      totalNumerario += sale.total;
+    } else if (pm === 'm-pesa' || pm === 'mpesa') {
+      totalMPesa += sale.total;
+    } else if (pm === 'e-mola' || pm === 'emola') {
+      totalEMola += sale.total;
+    } else if (pm === 'transferência' || pm === 'transferencia' || pm === 'banco') {
+      totalTransferencia += sale.total;
+    } else if (pm === 'múltiplo' || pm === 'multiplo') {
+      if (sale.paymentBreakdown && Array.isArray(sale.paymentBreakdown)) {
+        sale.paymentBreakdown.forEach(b => {
+          const bpm = (b.method || '').trim().toLowerCase();
+          if (bpm === 'dinheiro' || bpm === 'numerario') totalNumerario += b.amount;
+          else if (bpm === 'm-pesa' || bpm === 'mpesa') totalMPesa += b.amount;
+          else if (bpm === 'e-mola' || bpm === 'emola') totalEMola += b.amount;
+          else if (bpm === 'transferência' || bpm === 'transferencia' || bpm === 'banco') totalTransferencia += b.amount;
+          else totalNumerario += b.amount;
+        });
+      } else {
+        totalNumerario += sale.total;
+      }
+    } else {
+      totalNumerario += sale.total;
     }
 
     sale.items.forEach(item => {

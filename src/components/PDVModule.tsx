@@ -2350,23 +2350,62 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           </div>
 
           {(() => {
-            const salesOnDate = sales.filter(s => {
-              if (s.status === 'Cancelada') return false;
-              if (!s.date) return false;
-              if (s.date.startsWith(selectedReportDate)) return true;
+            const getLocalDateStr = (dateStr: string) => {
+              if (!dateStr) return '';
               try {
-                return new Date(s.date).toISOString().split('T')[0] === selectedReportDate;
-              } catch {
-                return false;
-              }
+                const d = new Date(dateStr);
+                if (!isNaN(d.getTime())) {
+                  const y = d.getFullYear();
+                  const m = String(d.getMonth() + 1).padStart(2, '0');
+                  const day = String(d.getDate()).padStart(2, '0');
+                  return `${y}-${m}-${day}`;
+                }
+              } catch {}
+              if (dateStr.includes('T')) return dateStr.split('T')[0];
+              if (dateStr.includes(' ')) return dateStr.split(' ')[0];
+              return dateStr.substring(0, 10);
+            };
+
+            const salesOnDate = sales.filter(s => {
+              if (s.status === 'Cancelada' || s.status === 'canceled') return false;
+              if (!s.date) return false;
+              return getLocalDateStr(s.date) === selectedReportDate;
             });
             const totalRevenue = salesOnDate.reduce((acc, s) => acc + s.total, 0);
 
             // Payment Methods Breakdown
-            const totalNumerario = salesOnDate.filter(s => s.paymentMethod === 'Dinheiro').reduce((acc, s) => acc + s.total, 0);
-            const totalMPesa = salesOnDate.filter(s => s.paymentMethod === 'M-Pesa').reduce((acc, s) => acc + s.total, 0);
-            const totalEMola = salesOnDate.filter(s => s.paymentMethod === 'E-Mola').reduce((acc, s) => acc + s.total, 0);
-            const totalTransferencia = salesOnDate.filter(s => s.paymentMethod === 'Transferência').reduce((acc, s) => acc + s.total, 0);
+            let totalNumerario = 0;
+            let totalMPesa = 0;
+            let totalEMola = 0;
+            let totalTransferencia = 0;
+
+            salesOnDate.forEach(s => {
+              const pm = (s.paymentMethod || '').trim().toLowerCase();
+              if (pm === 'dinheiro' || pm === 'numerario') {
+                totalNumerario += s.total;
+              } else if (pm === 'm-pesa' || pm === 'mpesa') {
+                totalMPesa += s.total;
+              } else if (pm === 'e-mola' || pm === 'emola') {
+                totalEMola += s.total;
+              } else if (pm === 'transferência' || pm === 'transferencia' || pm === 'banco') {
+                totalTransferencia += s.total;
+              } else if (pm === 'múltiplo' || pm === 'multiplo') {
+                if (s.paymentBreakdown && Array.isArray(s.paymentBreakdown)) {
+                  s.paymentBreakdown.forEach(b => {
+                    const bpm = (b.method || '').trim().toLowerCase();
+                    if (bpm === 'dinheiro' || bpm === 'numerario') totalNumerario += b.amount;
+                    else if (bpm === 'm-pesa' || bpm === 'mpesa') totalMPesa += b.amount;
+                    else if (bpm === 'e-mola' || bpm === 'emola') totalEMola += b.amount;
+                    else if (bpm === 'transferência' || bpm === 'transferencia' || bpm === 'banco') totalTransferencia += b.amount;
+                    else totalNumerario += b.amount;
+                  });
+                } else {
+                  totalNumerario += s.total;
+                }
+              } else {
+                totalNumerario += s.total;
+              }
+            });
 
             // Grouping products
             const productAggregates: Record<string, { name: string; qty: number; unit: string; total: number; category: string }> = {};
