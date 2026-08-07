@@ -11,14 +11,20 @@ const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export class FirebaseDBService {
   private initPromise: Promise<void> | null = null;
   private productsCache: Product[] | null = null;
-  private unsubscribeProducts: (() => void) | null = null;
+  private salesCache: Sale[] | null = null;
+  private customersCache: Customer[] | null = null;
+  private unsubscribers: (() => void)[] = [];
 
   public async init(): Promise<void> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = Promise.resolve();
 
-    // Set up realtime products listener
-    this.unsubscribeProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
+    // Clear previous listeners if any
+    this.unsubscribers.forEach(unsub => unsub());
+    this.unsubscribers = [];
+
+    // Realtime products listener
+    this.unsubscribers.push(onSnapshot(collection(db, 'products'), (snapshot) => {
       const products: Product[] = [];
       snapshot.forEach(doc => {
         products.push(doc.data() as Product);
@@ -26,7 +32,27 @@ export class FirebaseDBService {
       this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
       safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products' } }));
-    });
+    }));
+
+    // Realtime sales listener
+    this.unsubscribers.push(onSnapshot(collection(db, 'sales'), (snapshot) => {
+      const sales: Sale[] = [];
+      snapshot.forEach(doc => {
+        sales.push(doc.data() as Sale);
+      });
+      this.salesCache = sales.sort((a, b) => b.date.localeCompare(a.date));
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales' } }));
+    }));
+
+    // Realtime customers listener
+    this.unsubscribers.push(onSnapshot(collection(db, 'customers'), (snapshot) => {
+      const customers: Customer[] = [];
+      snapshot.forEach(doc => {
+        customers.push(doc.data() as Customer);
+      });
+      this.customersCache = customers.sort((a, b) => a.name.localeCompare(b.name));
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'customers' } }));
+    }));
     
     return this.initPromise;
   }
@@ -81,16 +107,21 @@ export class FirebaseDBService {
     if (cached) {
       try {
         const parsed = JSON.parse(cached);
-        if (parsed.length > 0) return parsed;
+        if (parsed.length > 0) {
+          this.productsCache = parsed;
+          return parsed;
+        }
       } catch (e) {}
     }
     const products = await this.getAll<Product>('products');
     if (products.length === 0) {
       const seeded = INITIAL_PRODUCTS.map(p => ({ ...p }));
       await this.upsertBatch('products', seeded);
+      this.productsCache = seeded;
       return seeded;
     }
-    return products.sort((a, b) => a.name.localeCompare(b.name));
+    this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+    return this.productsCache;
   }
 
   public async saveProduct(p: Product): Promise<void> {
@@ -98,46 +129,25 @@ export class FirebaseDBService {
   }
 
   public async deductProductStock(cartItems: any[]): Promise<void> {
-
     if (cartItems.length === 0) return;
-
     try {
-
-
       const batch = writeBatch(db);
-
       for (const item of cartItems) {
-
         const docRef = doc(db, "products", item.productId);
-
         if (item.hasConversion) {
-
           if (item.sellingUnit === "Bulk") {
-
             batch.update(docRef, { stockQtyBulk: increment(-item.qtyToReduce), stockQty: increment(-item.equivalentBaseQty) });
-
           } else {
-
             batch.update(docRef, { stockQtyRetail: increment(-item.qtyToReduce), stockQty: increment(-item.qtyToReduce) });
-
           }
-
         } else {
-
           batch.update(docRef, { stockQty: increment(-item.qtyToReduce) });
-
         }
-
       }
-
       await batch.commit();
-
     } catch (e) {
-
       console.error("Error deducting stock:", e);
-
     }
-
   }
 
   public async saveProducts(list: Product[]): Promise<void> {
@@ -150,8 +160,10 @@ export class FirebaseDBService {
 
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
+    if (this.salesCache) return this.salesCache;
     const list = await this.getAll<Sale>('sales');
-    return list.sort((a, b) => b.date.localeCompare(a.date));
+    this.salesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    return this.salesCache;
   }
 
   public async addSale(s: Sale): Promise<void> {
@@ -250,8 +262,10 @@ export class FirebaseDBService {
 
   // --- Customers ---
   public async getCustomers(): Promise<Customer[]> {
+    if (this.customersCache) return this.customersCache;
     const list = await this.getAll<Customer>('customers');
-    return list.sort((a, b) => a.name.localeCompare(b.name));
+    this.customersCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    return this.customersCache;
   }
   public async saveCustomer(c: Customer): Promise<void> { await this.upsert('customers', c.id, c); }
   public async deleteCustomer(id: string): Promise<void> { await this.deleteRow('customers', id); }
