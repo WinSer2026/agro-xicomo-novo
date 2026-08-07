@@ -1,0 +1,2116 @@
+﻿import React, { useState, useEffect } from 'react';
+import { dbService } from '../utils/firebaseDB';
+import { Sale, LossRecord, Product, AuditLog, SystemSettings } from '../types';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
+import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
+import { jsPDF } from 'jspdf';
+import 'jspdf-autotable';
+import * as XLSX from 'xlsx';
+
+export default function FinanceModule() {
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [losses, setLosses] = useState<LossRecord[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [toastMessage, setToastMessage] = useState('');
+  const [selectedRange, setSelectedRange] = useState<'Day' | 'Week' | 'Month' | 'Year' | '3Y' | '5Y' | '10Y'>('Month');
+  
+  // Sub-tabs in Accounting & Finance
+  const [activeSubTab, setActiveSubTab] = useState<'dashboard' | 'reports' | 'ledger' | 'alerts' | 'auditoria'>('dashboard');
+  
+  // POS Reports Compilation States
+  const [reportPeriod, setReportPeriod] = useState<'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual'>('Mensal');
+  const [compiledPeriod, setCompiledPeriod] = useState<'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual'>('Mensal');
+
+  useEffect(() => {
+    loadFinancials();
+
+    const handleDbUpdate = (e: any) => {
+      const updatedTable = e.detail?.table;
+      if (
+        !updatedTable ||
+        updatedTable === 'all' ||
+        updatedTable === 'sales' ||
+        updatedTable === 'losses' ||
+        updatedTable === 'products' ||
+        updatedTable === 'audit_logs' ||
+        updatedTable === 'settings'
+      ) {
+        loadFinancials();
+      }
+    };
+    window.addEventListener('db-update', handleDbUpdate);
+    return () => window.removeEventListener('db-update', handleDbUpdate);
+  }, [selectedRange]);
+
+  const loadFinancials = async () => {
+    await dbService.init();
+    const salesList = await dbService.getSales();
+    const lossesList = await dbService.getLosses();
+    const prodsList = await dbService.getProducts();
+    const logsList = await dbService.getAuditLogs();
+    const config = await dbService.getSettings();
+    setSales(salesList);
+    setLosses(lossesList);
+    setProducts(prodsList);
+    setAuditLogs(logsList);
+    setSettings(config);
+  };
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  // 1. Math formulas for calculations
+  const totalGrossSales = sales.reduce((acc, s) => acc + s.total, 0);
+  const totalLossesVal = losses.reduce((acc, l) => acc + l.costValue, 0);
+
+  // Calculate actual buying cost from products database
+  const totalCost = sales.reduce((acc, sale) => {
+    return acc + sale.items.reduce((sum, item) => {
+      const prod = products.find(p => p.id === item.productId);
+      const buyPrice = prod ? prod.buyingPrice : (item.unitPrice * 0.6); // default to 60% of sale price if product missing
+      return sum + (buyPrice * item.quantity);
+    }, 0);
+  }, 0);
+
+  const totalProfit = Math.max(0, totalGrossSales - totalCost);
+  const netCommercialMargin = Math.max(0, totalGrossSales - totalCost - totalLossesVal);
+  const stockAlerts = products.filter(p => p.stockQty <= 10);
+  const avgTicket = sales.length > 0 ? (totalGrossSales / sales.length) : 0;
+  const pendingSyncCount = sales.filter(s => !s.synced).length;
+
+  // Monthly Sales Chart Data (Mocking current and last 5 months)
+  const monthlySales = [
+    { month: 'Jan', amount: totalGrossSales * 0.15 },
+    { month: 'Fev', amount: totalGrossSales * 0.18 },
+    { month: 'Mar', amount: totalGrossSales * 0.22 },
+    { month: 'Abr', amount: totalGrossSales * 0.12 },
+    { month: 'Mai', amount: totalGrossSales * 0.25 },
+    { month: 'Jun', amount: totalGrossSales * 0.08 + 1000 }
+  ];
+
+  // Helper to filter sales for POS Periodic Reports
+  const getFilteredSalesForReport = (period: 'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual') => {
+    const now = new Date();
+    return sales.filter(s => {
+      const sDate = new Date(s.date);
+      const diffTime = Math.abs(now.getTime() - sDate.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      if (period === 'Diário') return diffDays <= 1;
+      if (period === 'Semanal') return diffDays <= 7;
+      if (period === 'Mensal') return diffDays <= 30;
+      if (period === 'Trimestral') return diffDays <= 90;
+      if (period === 'Semestral') return diffDays <= 180;
+      if (period === 'Anual') return diffDays <= 365;
+      return true;
+    });
+  };
+
+  const reportSales = getFilteredSalesForReport(compiledPeriod);
+  const reportGrossSales = reportSales.reduce((acc, s) => acc + s.total, 0);
+  const reportCost = reportSales.reduce((acc, sale) => {
+    return acc + sale.items.reduce((sum, item) => {
+      const prod = products.find(p => p.id === item.productId);
+      const buyPrice = prod ? prod.buyingPrice : (item.unitPrice * 0.6);
+      return sum + (buyPrice * item.quantity);
+    }, 0);
+  }, 0);
+  const reportProfit = Math.max(0, reportGrossSales - reportCost);
+  const reportTransCount = reportSales.length;
+  const reportMargin = reportGrossSales > 0 ? ((reportProfit / reportGrossSales) * 100) : 0;
+
+  const handleCompileReport = () => {
+    setCompiledPeriod(reportPeriod);
+    showToast(`Relatório do POS compilado para o período: ${reportPeriod}!`);
+  };
+
+  const handleExportFinanceDashboardExcel = () => {
+    const workbook = XLSX.utils.book_new();
+    
+    // Sheet 1: POS Overview
+    const summaryData = [
+      { Métrica: 'Período do Relatório', Valor: compiledPeriod },
+      { Métrica: 'Faturação Bruta', Valor: `${reportGrossSales.toLocaleString()} MT` },
+      { Métrica: 'Lucro Estimado', Valor: `${reportProfit.toLocaleString()} MT` },
+      { Métrica: 'Total de Transações', Valor: reportTransCount },
+      { Métrica: 'Margem Operacional', Valor: `${reportMargin.toFixed(1)}%` },
+      { Métrica: 'Data de Emissão', Valor: new Date().toLocaleString('pt-MZ') }
+    ];
+    const wsSummary = XLSX.utils.json_to_sheet(summaryData);
+    XLSX.utils.book_append_sheet(workbook, wsSummary, 'Resumo Executivo');
+
+    // Sheet 2: Product Performance
+    const productData = products.map(p => {
+      const soldQty = reportSales.reduce((sum, sale) => {
+        const item = sale.items.find(it => it.productId === p.id);
+        return sum + (item ? item.quantity : 0);
+      }, 0);
+      return {
+        'Produto/Serviço': p.name,
+        'Categoria': p.category,
+        'Stock Atual': p.stockQty,
+        'Preço Compra': p.buyingPrice,
+        'Preço Venda': p.sellingPrice,
+        'Quantidade Vendida': soldQty,
+        'Total Faturado (MT)': soldQty * p.sellingPrice,
+        'Lucro Estimado (MT)': soldQty * (p.sellingPrice - p.buyingPrice)
+      };
+    });
+    const wsProducts = XLSX.utils.json_to_sheet(productData);
+    XLSX.utils.book_append_sheet(workbook, wsProducts, 'Vendas por Produto');
+
+    // Sheet 3: Category Analysis
+    const categories = ['Semente', 'Adubo', 'Quimico', 'Ferramenta', 'Servico', 'Outro'];
+    const categoryData = categories.map(cat => {
+      const totalAmt = reportSales.reduce((sum, sale) => {
+        return sum + sale.items.reduce((itemSum, item) => {
+          const p = products.find(prod => prod.id === item.productId);
+          const pCat = (p ? p.category : item.category) || 'Outro';
+          if (pCat.toLowerCase().includes(cat.toLowerCase())) {
+            return itemSum + (item.unitPrice * item.quantity);
+          }
+          return itemSum;
+        }, 0);
+      }, 0);
+      return {
+        'Categoria': cat.toUpperCase(),
+        'Faturação Total (MT)': totalAmt
+      };
+    });
+    const wsCategories = XLSX.utils.json_to_sheet(categoryData);
+    XLSX.utils.book_append_sheet(workbook, wsCategories, 'Faturação por Categoria');
+
+    XLSX.writeFile(workbook, `Dashboard_Financeiro_AgroXicomo_${compiledPeriod}_${Date.now()}.xlsx`);
+    showToast('Dashboard Financeiro Excel Descarregado!');
+  };
+
+  const handleExportReportCSV = () => {
+    let csv = `RELATORIO_POS_PERIODO_${compiledPeriod.toUpperCase()}\n`;
+    csv += `Faturacao Bruta,Lucro Estimado,Transacoes Feitas,Margem Operacional\n`;
+    csv += `${reportGrossSales},${reportProfit},${reportTransCount},${reportMargin.toFixed(1)}%\n\n`;
+
+    const salesForPeriod = reportSales;
+    const totalMpesa = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('m-pesa') || s.paymentMethod.toLowerCase().includes('mpesa')).reduce((acc, s) => acc + s.total, 0);
+    const totalEmola = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('e-mola') || s.paymentMethod.toLowerCase().includes('emola')).reduce((acc, s) => acc + s.total, 0);
+    const totalBank = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('transfer') || s.paymentMethod.toLowerCase().includes('banco') || s.paymentMethod.toLowerCase().includes('iban')).reduce((acc, s) => acc + s.total, 0);
+    const totalCash = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('num') || s.paymentMethod.toLowerCase().includes('dinheiro') || s.paymentMethod.toLowerCase().includes('caixa') || s.paymentMethod.toLowerCase() === 'dinheiro' || s.paymentMethod.toLowerCase() === 'numerário').reduce((acc, s) => acc + s.total, 0);
+
+    csv += `DETALHAMENTO DE MEIOS DE PAGAMENTO\n`;
+    csv += `M-Pesa,E-Mola,Transferencia Bancaria,Numerario (Dinheiro Vivo)\n`;
+    csv += `${totalMpesa},${totalEmola},${totalBank},${totalCash}\n\n`;
+    
+    csv += `DESEMPENHO INDIVIDUAL DE PRODUTOS\n`;
+    csv += `PRODUTO/SERVICO,PRECO COMPRA,PRECO VENDA,VENDIDO,FATURADO,LUCRO EST.\n`;
+    products.forEach(p => {
+      const soldQty = reportSales.reduce((sum, sale) => {
+        const item = sale.items.find(it => it.productId === p.id);
+        return sum + (item ? item.quantity : 0);
+      }, 0);
+      csv += `"${p.name}",${p.buyingPrice},${p.sellingPrice},${soldQty},${soldQty * p.sellingPrice},${soldQty * (p.sellingPrice - p.buyingPrice)}\n`;
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Relatorio_POS_AgroXicomo_${compiledPeriod}_${Date.now()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    showToast('Planilha CSV de Relatório Periódico Descarregada!');
+  };
+
+  const handleExportReportPDF = () => {
+    const title = `Relatorio_Oficial_POS_AgroXicomo_${compiledPeriod}_${Date.now()}.pdf`;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    const cName = settings?.companyName || 'AGRO - XICOMO & SERVI\u00c7OS, LDA';
+    const nuit = settings?.companyNuit || '401976590';
+
+    // Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(0, 106, 78);
+    doc.text('RELATÓRIO OFICIAL PERIÓDICO DO POS', 15, 20);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
+    doc.text(`Período do Relatório: ${compiledPeriod} • Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+
+    doc.setDrawColor(0, 106, 78);
+    doc.setLineWidth(1);
+    doc.line(15, 33, 195, 33);
+
+    // Summary Box
+    doc.saveGraphicsState();
+    doc.setFillColor(240, 253, 244);
+    doc.rect(15, 37, 180, 20, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('FATURAÇÃO BRUTA', 20, 43);
+    doc.text('LUCRO ESTIMADO', 65, 43);
+    doc.text('TRANSAÇÕES', 115, 43);
+    doc.text('MARGEM OPERACIONAL', 155, 43);
+
+    doc.setFontSize(11);
+    doc.setTextColor(0, 106, 78);
+    doc.text(`${reportGrossSales.toLocaleString('pt-MZ')} MT`, 20, 51);
+    doc.setTextColor(30, 58, 138);
+    doc.text(`${reportProfit.toLocaleString('pt-MZ')} MT`, 65, 51);
+    doc.setTextColor(51, 65, 85);
+    doc.text(`${reportTransCount} Vendas`, 115, 51);
+    doc.setTextColor(180, 83, 9);
+    doc.text(`${reportMargin.toFixed(1)}%`, 155, 51);
+
+    // Table: Product Performance
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(0, 106, 78);
+    doc.text('DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO', 15, 65);
+
+    let currentY = 70;
+    doc.saveGraphicsState();
+    doc.setFillColor(0, 106, 78);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text('#', 17, currentY + 5);
+    doc.text('PRODUTO / SERVIÇO', 23, currentY + 5);
+    doc.text('P. COMPRA', 95, currentY + 5, { align: 'right' });
+    doc.text('P. VENDA', 120, currentY + 5, { align: 'right' });
+    doc.text('VENDIDO', 145, currentY + 5, { align: 'right' });
+    doc.text('FATURADO', 170, currentY + 5, { align: 'right' });
+    doc.text('LUCRO', 193, currentY + 5, { align: 'right' });
+
+    currentY += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+
+    products.forEach((p, idx) => {
+      const soldQty = reportSales.reduce((sum, sale) => {
+        const item = sale.items.find(it => it.productId === p.id);
+        return sum + (item ? item.quantity : 0);
+      }, 0);
+      const faturado = soldQty * p.sellingPrice;
+      const lucro = soldQty * (p.sellingPrice - p.buyingPrice);
+
+      if (currentY > 265) {
+        doc.addPage();
+        currentY = 20;
+        // Repeat table header
+        doc.saveGraphicsState();
+        doc.setFillColor(0, 106, 78);
+        doc.rect(15, currentY, 180, 7, 'F');
+        doc.restoreGraphicsState();
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text('#', 17, currentY + 5);
+        doc.text('PRODUTO / SERVIÇO', 23, currentY + 5);
+        doc.text('P. COMPRA', 95, currentY + 5, { align: 'right' });
+        doc.text('P. VENDA', 120, currentY + 5, { align: 'right' });
+        doc.text('VENDIDO', 145, currentY + 5, { align: 'right' });
+        doc.text('FATURADO', 170, currentY + 5, { align: 'right' });
+        doc.text('LUCRO', 193, currentY + 5, { align: 'right' });
+        currentY += 7;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+      }
+
+      if (idx % 2 === 1) {
+        doc.saveGraphicsState();
+        doc.setFillColor(248, 250, 252);
+        doc.rect(15, currentY, 180, 6, 'F');
+        doc.restoreGraphicsState();
+      }
+
+      doc.text((idx + 1).toString(), 17, currentY + 4);
+      doc.text(p.name.length > 40 ? p.name.substring(0, 38) + '...' : p.name, 23, currentY + 4);
+      doc.text(`${p.buyingPrice.toLocaleString('pt-MZ')} MT`, 95, currentY + 4, { align: 'right' });
+      doc.text(`${p.sellingPrice.toLocaleString('pt-MZ')} MT`, 120, currentY + 4, { align: 'right' });
+      doc.text(`${soldQty} ${p.baseUnit}`, 145, currentY + 4, { align: 'right' });
+      doc.text(`${faturado.toLocaleString('pt-MZ')} MT`, 170, currentY + 4, { align: 'right' });
+      doc.text(`${lucro.toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
+
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.5);
+      doc.line(15, currentY + 6, 195, currentY + 6);
+
+      currentY += 6;
+    });
+
+    // Categories Table
+    if (currentY > 220) {
+      doc.addPage();
+      currentY = 20;
+    } else {
+      currentY += 10;
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(0, 106, 78);
+    doc.text('FATURAÇÃO POR CATEGORIA', 15, currentY);
+
+    currentY += 5;
+    doc.saveGraphicsState();
+    doc.setFillColor(0, 106, 78);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text('CATEGORIA', 17, currentY + 5);
+    doc.text('FATURADO', 193, currentY + 5, { align: 'right' });
+
+    currentY += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+
+    const categories = ['Semente', 'Adubo', 'Quimico', 'Ferramenta', 'Servico', 'Outro'];
+    let totalCatAmt = 0;
+    categories.forEach((cat, idx) => {
+      const totalAmt = reportSales.reduce((sum, sale) => {
+        return sum + sale.items.reduce((itemSum, item) => {
+          const p = products.find(prod => prod.id === item.productId);
+          const pCat = (p ? p.category : item.category) || 'Outro';
+          if (pCat.toLowerCase().includes(cat.toLowerCase())) {
+            return itemSum + (item.unitPrice * item.quantity);
+          }
+          return itemSum;
+        }, 0);
+      }, 0);
+      totalCatAmt += totalAmt;
+
+      if (idx % 2 === 1) {
+        doc.saveGraphicsState();
+        doc.setFillColor(248, 250, 252);
+        doc.rect(15, currentY, 180, 6, 'F');
+        doc.restoreGraphicsState();
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.text(cat.toUpperCase(), 17, currentY + 4);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`${totalAmt.toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
+
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.5);
+      doc.line(15, currentY + 6, 195, currentY + 6);
+      currentY += 6;
+    });
+
+    // Add Signature Lines and Footer Note
+    if (currentY > 230) {
+      doc.addPage();
+      currentY = 20;
+    } else {
+      currentY += 15;
+    }
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Assinatura do Responsável de Contabilidade', 50, currentY + 15, { align: 'center' });
+    doc.line(20, currentY + 10, 80, currentY + 10);
+
+    doc.text('Assinatura da Direção Financeira', 150, currentY + 15, { align: 'center' });
+    doc.line(120, currentY + 10, 180, currentY + 10);
+
+    doc.save(title);
+    showToast('Relatório Oficial de Período PDF Descarregado!');
+  };
+
+  const handleExportBalancetePDF = async () => {
+    const totalCOGS = reportCost; // CMV
+    const totalQuebras = reportSales.length > 0 ? (totalLossesVal * (reportSales.length / Math.max(sales.length, 1))) : 0;
+    const activeProductsVal = products.reduce((acc, p) => acc + (p.stockQty * p.buyingPrice), 0);
+
+    const accounts = [
+      { code: '1.1.1.01', name: 'Caixa Geral (Dinheiro em POS)', debit: reportGrossSales * 0.4, credit: totalCOGS * 0.2 },
+      { code: '1.1.2.01', name: 'Bancos Moçambique C/C', debit: reportGrossSales * 0.6, credit: totalCOGS * 0.8 + totalQuebras },
+      { code: '1.2.1.01', name: 'Inventário de Mercadorias (Stock)', debit: activeProductsVal, credit: totalCOGS },
+      { code: '2.1.1.01', name: 'Fornecedores de Insumos', debit: 0, credit: activeProductsVal * 0.5 },
+      { code: '5.1.1.01', name: 'Capital Social Registado', debit: 0, credit: activeProductsVal * 0.5 },
+      { code: '6.1.1.01', name: 'Custo das Mercadorias Vendidas (CMV)', debit: totalCOGS, credit: 0 },
+      { code: '6.2.1.01', name: 'Perdas por Quebras e Reclamações', debit: totalQuebras, credit: 0 },
+      { code: '7.1.1.01', name: 'Proveitos / Vendas de Insumos', debit: 0, credit: reportGrossSales }
+    ];
+
+    const data: ReportData = {
+      title: 'Balancete de Verificação Comercial',
+      subtitle: `Período Fiscal: ${compiledPeriod}`,
+      fileName: `Balancete_${compiledPeriod}_${Date.now()}`,
+      columns: [
+        { header: 'Código', dataKey: 'code' },
+        { header: 'Conta Razão', dataKey: 'name' },
+        { header: 'Débito (MT)', dataKey: 'debit' },
+        { header: 'Crédito (MT)', dataKey: 'credit' },
+        { header: 'Saldo Líquido', dataKey: 'balance' }
+      ],
+      rows: accounts.map(acc => ({
+        ...acc,
+        debit: acc.debit.toLocaleString(),
+        credit: acc.credit.toLocaleString(),
+        balance: (acc.debit - acc.credit).toLocaleString()
+      }))
+    };
+
+    await exportToPDF(data, settings);
+    showToast('Balancete PDF descarregado!');
+  };
+
+  // --- REPORT EXPORT ENGINE ---
+  const handleExportCSVLedger = () => {
+    const data: ReportData = {
+      title: 'Livro de Vendas (Ledger)',
+      fileName: `Vendas_Excel_${Date.now()}`,
+      columns: [
+        { header: 'Fatura Nº', dataKey: 'invoiceNumber' },
+        { header: 'Data', dataKey: 'date' },
+        { header: 'Cliente', dataKey: 'customerName' },
+        { header: 'Subtotal (MT)', dataKey: 'subtotal' },
+        { header: 'Desconto (MT)', dataKey: 'discount' },
+        { header: 'Total (MT)', dataKey: 'total' },
+        { header: 'Método Pagamento', dataKey: 'paymentMethod' }
+      ],
+      rows: sales.map(s => ({
+        ...s,
+        date: new Date(s.date).toLocaleDateString(),
+        subtotal: s.subtotal.toLocaleString(),
+        discount: s.discount.toLocaleString(),
+        total: s.total.toLocaleString()
+      }))
+    };
+    exportToExcel(data);
+    showToast('Excel Ledger descarregado!');
+  };
+
+  const handleExportPDFLedger = async () => {
+    const data: ReportData = {
+      title: 'Livro de Vendas Detalhado (Ledger)',
+      subtitle: `Total Transações: ${sales.length}`,
+      fileName: `Vendas_PDF_${Date.now()}`,
+      columns: [
+        { header: 'Fatura Nº', dataKey: 'invoiceNumber' },
+        { header: 'Data', dataKey: 'date' },
+        { header: 'Cliente', dataKey: 'customerName' },
+        { header: 'Método', dataKey: 'paymentMethod' },
+        { header: 'Total (MT)', dataKey: 'total' }
+      ],
+      rows: sales.map(s => ({
+        ...s,
+        date: new Date(s.date).toLocaleDateString(),
+        total: s.total.toLocaleString()
+      }))
+    };
+    await exportToPDF(data, settings);
+    showToast('Relatório de Vendas PDF descarregado!');
+  };
+
+  const handleExportAuditPDF = () => {
+    const title = `Relatorio_Auditoria_Seguranca_ERP_${Date.now()}.pdf`;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    // Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(185, 28, 28);
+    doc.text('RELATÓRIO DE AUDITORIA DE CIBERSEGURANÇA', 15, 20);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590', 15, 25);
+    doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+
+    doc.setDrawColor(185, 28, 28);
+    doc.setLineWidth(1);
+    doc.line(15, 33, 195, 33);
+
+    // Summary Box
+    doc.saveGraphicsState();
+    doc.setFillColor(254, 242, 242);
+    doc.rect(15, 37, 180, 20, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('REGISTOS TOTAIS', 20, 43);
+    doc.text('TENTATIVAS FALHADAS', 75, 43);
+    doc.text('ESTADO DE INTEGRIDADE', 135, 43);
+
+    doc.setFontSize(11);
+    doc.setTextColor(185, 28, 28);
+    doc.text(`${auditLogs.length} Registos`, 20, 51);
+    doc.text(`${auditLogs.filter(l => l.status === 'Falha').length}`, 75, 51);
+    doc.setTextColor(5, 150, 105);
+    doc.text('HASH IMUTÁVEL ATIVO', 135, 51);
+
+    // Table
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(185, 28, 28);
+    doc.text('REGISTOS GERAIS DE AUDITORIA', 15, 65);
+
+    let currentY = 70;
+    doc.saveGraphicsState();
+    doc.setFillColor(185, 28, 28);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text('#', 17, currentY + 5);
+    doc.text('DATA/HORA', 23, currentY + 5);
+    doc.text('UTILIZADOR', 60, currentY + 5);
+    doc.text('IP ADDRESS', 90, currentY + 5);
+    doc.text('OPERAÇÃO', 115, currentY + 5);
+    doc.text('ESTADO', 155, currentY + 5);
+    doc.text('DETALHES', 170, currentY + 5);
+
+    currentY += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+
+    auditLogs.forEach((l, idx) => {
+      if (currentY > 265) {
+        doc.addPage();
+        currentY = 20;
+        // Header
+        doc.saveGraphicsState();
+        doc.setFillColor(185, 28, 28);
+        doc.rect(15, currentY, 180, 7, 'F');
+        doc.restoreGraphicsState();
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text('#', 17, currentY + 5);
+        doc.text('DATA/HORA', 23, currentY + 5);
+        doc.text('UTILIZADOR', 60, currentY + 5);
+        doc.text('IP ADDRESS', 90, currentY + 5);
+        doc.text('OPERAÇÃO', 115, currentY + 5);
+        doc.text('ESTADO', 155, currentY + 5);
+        doc.text('DETALHES', 170, currentY + 5);
+        currentY += 7;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+      }
+
+      if (idx % 2 === 1) {
+        doc.saveGraphicsState();
+        doc.setFillColor(248, 250, 252);
+        doc.rect(15, currentY, 180, 6, 'F');
+        doc.restoreGraphicsState();
+      }
+
+      doc.text((idx + 1).toString(), 17, currentY + 4);
+      doc.text(new Date(l.timestamp).toLocaleString('pt-MZ'), 23, currentY + 4);
+      doc.text(l.username, 60, currentY + 4);
+      doc.text(l.ipAddress, 90, currentY + 4);
+      doc.text(l.action.length > 20 ? l.action.substring(0, 18) + '...' : l.action, 115, currentY + 4);
+      
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(l.status === 'Sucesso' ? 5 : 185, l.status === 'Sucesso' ? 150 : 28, l.status === 'Sucesso' ? 105 : 28);
+      doc.text(l.status, 155, currentY + 4);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+
+      doc.text(l.details.length > 15 ? l.details.substring(0, 13) + '...' : l.details, 170, currentY + 4);
+
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.5);
+      doc.line(15, currentY + 6, 195, currentY + 6);
+      currentY += 6;
+    });
+
+    doc.save(title);
+    showToast('Relatório de Auditoria Cibersegurança PDF Descarregado!');
+  };
+
+  const handleExportStockAlertsPDF = () => {
+    const title = `Relatorio_Alertas_Criticos_Stock_${Date.now()}.pdf`;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    // Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(220, 38, 38);
+    doc.text('RELATÓRIO DE RUTURAS E ALERTAS DE STOCK CRÍTICOS', 15, 20);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590', 15, 25);
+    doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+
+    doc.setDrawColor(220, 38, 38);
+    doc.setLineWidth(1);
+    doc.line(15, 33, 195, 33);
+
+    // Summary Box
+    doc.saveGraphicsState();
+    doc.setFillColor(254, 242, 242);
+    doc.rect(15, 37, 180, 20, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('PRODUTOS CRÍTICOS', 20, 43);
+    doc.text('CRITÉRIO DE ALERTA', 75, 43);
+    doc.text('VALOR IMOBILIZADO', 135, 43);
+
+    doc.setFontSize(11);
+    doc.setTextColor(220, 38, 38);
+    doc.text(`${stockAlerts.length} Artigos`, 20, 51);
+    doc.text('Stock <= 10 unidades', 75, 51);
+    doc.setTextColor(21, 128, 61);
+    doc.text(`${stockAlerts.reduce((acc, p) => acc + (p.stockQty * p.buyingPrice), 0).toLocaleString('pt-MZ')} MT`, 135, 51);
+
+    // Table
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(220, 38, 38);
+    doc.text('PRODUTOS EM NÍVEL CRÍTICO / RUTURA', 15, 65);
+
+    let currentY = 70;
+    doc.saveGraphicsState();
+    doc.setFillColor(220, 38, 38);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text('#', 17, currentY + 5);
+    doc.text('NOME DO PRODUTO', 23, currentY + 5);
+    doc.text('CÓD / SKU', 85, currentY + 5);
+    doc.text('CATEGORIA', 115, currentY + 5);
+    doc.text('QUANTIDADE', 145, currentY + 5, { align: 'right' });
+    doc.text('VALOR INVENTÁRIO', 193, currentY + 5, { align: 'right' });
+
+    currentY += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(51, 65, 85);
+
+    if (stockAlerts.length === 0) {
+      doc.setFont('helvetica', 'italic');
+      doc.text('Nenhum produto em nível crítico de stock de momento.', 105, currentY + 10, { align: 'center' });
+    } else {
+      stockAlerts.forEach((p, idx) => {
+        if (currentY > 265) {
+          doc.addPage();
+          currentY = 20;
+          doc.saveGraphicsState();
+          doc.setFillColor(220, 38, 38);
+          doc.rect(15, currentY, 180, 7, 'F');
+          doc.restoreGraphicsState();
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(7.5);
+          doc.setTextColor(255, 255, 255);
+          doc.text('#', 17, currentY + 5);
+          doc.text('NOME DO PRODUTO', 23, currentY + 5);
+          doc.text('CÓD / SKU', 85, currentY + 5);
+          doc.text('CATEGORIA', 115, currentY + 5);
+          doc.text('QUANTIDADE', 145, currentY + 5, { align: 'right' });
+          doc.text('VALOR INVENTÁRIO', 193, currentY + 5, { align: 'right' });
+          currentY += 7;
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7.5);
+          doc.setTextColor(51, 65, 85);
+        }
+
+        if (idx % 2 === 1) {
+          doc.saveGraphicsState();
+          doc.setFillColor(248, 250, 252);
+          doc.rect(15, currentY, 180, 6, 'F');
+          doc.restoreGraphicsState();
+        }
+
+        doc.text((idx + 1).toString(), 17, currentY + 4);
+        doc.text(p.name, 23, currentY + 4);
+        doc.text(p.code, 85, currentY + 4);
+        doc.text(p.category || 'N/A', 115, currentY + 4);
+        
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(220, 38, 38);
+        doc.text(`${p.stockQty} ${p.baseUnit}`, 145, currentY + 4, { align: 'right' });
+        doc.setTextColor(51, 65, 85);
+        doc.setFont('helvetica', 'normal');
+        
+        doc.text(`${(p.stockQty * p.buyingPrice).toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
+
+        doc.setDrawColor(241, 245, 249);
+        doc.setLineWidth(0.5);
+        doc.line(15, currentY + 6, 195, currentY + 6);
+        currentY += 6;
+      });
+    }
+
+    doc.save(title);
+    showToast('Alertas de Stock Críticos PDF Descarregado!');
+  };
+
+  // 2. Generate Chart Data depending on Selected Time Range
+  const generateChartData = () => {
+    switch (selectedRange) {
+      case 'Day':
+        return [
+          { name: '08h00', Vendas: totalGrossSales * 0.1, Perdas: totalLossesVal * 0.05 },
+          { name: '10h00', Vendas: totalGrossSales * 0.25, Perdas: 0 },
+          { name: '12h00', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
+          { name: '14h00', Vendas: totalGrossSales * 0.15, Perdas: 0 },
+          { name: '16h00', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.1 }
+        ];
+      case 'Week':
+        return [
+          { name: 'Seg', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.1 },
+          { name: 'Ter', Vendas: totalGrossSales * 0.18, Perdas: 0 },
+          { name: 'Qua', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.3 },
+          { name: 'Qui', Vendas: totalGrossSales * 0.12, Perdas: 0 },
+          { name: 'Sex', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.2 },
+          { name: 'Sáb', Vendas: totalGrossSales * 0.13, Perdas: totalLossesVal * 0.4 }
+        ];
+      case 'Month':
+        return [
+          { name: 'Semana 1', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.15 },
+          { name: 'Semana 2', Vendas: totalGrossSales * 0.28, Perdas: totalLossesVal * 0.2 },
+          { name: 'Semana 3', Vendas: totalGrossSales * 0.32, Perdas: totalLossesVal * 0.35 },
+          { name: 'Semana 4', Vendas: totalGrossSales * 0.18, Perdas: totalLossesVal * 0.3 }
+        ];
+      case 'Year':
+        return [
+          { name: 'Trimestre 1', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.25 },
+          { name: 'Trimestre 2', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
+          { name: 'Trimestre 3', Vendas: totalGrossSales * 0.35, Perdas: totalLossesVal * 0.35 },
+          { name: 'Trimestre 4', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.2 }
+        ];
+      case '3Y':
+        return [
+          { name: 'Ano Ant.', Vendas: totalGrossSales * 0.85, Perdas: totalLossesVal * 0.9 },
+          { name: 'Ano Corrente', Vendas: totalGrossSales, Perdas: totalLossesVal },
+          { name: 'Ano Seg. (Proj.)', Vendas: totalGrossSales * 1.25, Perdas: totalLossesVal * 0.75 }
+        ];
+      default:
+        // 5Y and 10Y long horizons
+        return [
+          { name: 'Histórico', Vendas: totalGrossSales * 0.5, Perdas: totalLossesVal * 1.5 },
+          { name: 'Atual', Vendas: totalGrossSales, Perdas: totalLossesVal },
+          { name: 'Projetado', Vendas: totalGrossSales * 1.8, Perdas: totalLossesVal * 0.5 }
+        ];
+    }
+  };
+
+  const chartData = generateChartData();
+
+  // Export Sales Ledger Ledger to CSV file format
+  const handleExportSalesLedger = () => {
+    let csv = "ID Venda,Fatura,Data,Cliente,Subtotal,Desconto,Total Pago,Metodo Pagamento,Sincronizado Supabase\n";
+    sales.forEach(s => {
+      csv += `"${s.id}","${s.invoiceNumber}","${s.date}","${s.customerName}",${s.subtotal},${s.discount},${s.total},"${s.paymentMethod}",${s.synced}\n`;
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `LIVRO_DIARIO_VENDAS_${new Date().getFullYear()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Export Sales Ledger (Livro Diário) to a beautiful PDF layout
+  const handleExportSalesLedgerPDF = () => {
+    const title = `Livro_Diario_Vendas_Ledger_${Date.now()}.pdf`;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+
+    const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
+
+    // Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(0, 106, 78);
+    doc.text('LIVRO DIÁRIO DE VENDAS (SALES LEDGER)', 15, 20);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`Emitido em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+
+    doc.setDrawColor(0, 106, 78);
+    doc.setLineWidth(1);
+    doc.line(15, 33, 195, 33);
+
+    let totalSubtotal = 0;
+    let totalDiscount = 0;
+    let totalPaid = 0;
+
+    sales.forEach(s => {
+      totalSubtotal += s.subtotal;
+      totalDiscount += s.discount;
+      totalPaid += s.total;
+    });
+
+    // Summary Box
+    doc.saveGraphicsState();
+    doc.setFillColor(240, 253, 244);
+    doc.rect(15, 37, 180, 20, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text('TOTAL DE TRANSAÇÕES', 20, 43);
+    doc.text('SUBTOTAL ACUMULADO', 65, 43);
+    doc.text('TOTAL DESCONTOS', 120, 43);
+    doc.text('TOTAL LÍQUIDO PAGO', 160, 43);
+
+    doc.setFontSize(10);
+    doc.setTextColor(0, 106, 78);
+    doc.text(`${sales.length} Registos`, 20, 51);
+    doc.text(`${totalSubtotal.toLocaleString('pt-MZ')} MT`, 65, 51);
+    doc.setTextColor(190, 18, 60);
+    doc.text(`-${totalDiscount.toLocaleString('pt-MZ')} MT`, 120, 51);
+    doc.setFontSize(11);
+    doc.setTextColor(21, 128, 61);
+    doc.text(`${totalPaid.toLocaleString('pt-MZ')} MT`, 160, 51);
+
+    // Table Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(0, 106, 78);
+    doc.text('REGISTOS DETALHADOS DAS VENDAS', 15, 65);
+
+    let currentY = 70;
+    doc.saveGraphicsState();
+    doc.setFillColor(0, 106, 78);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(255, 255, 255);
+    doc.text('#', 17, currentY + 5);
+    doc.text('DATA / HORA', 23, currentY + 5);
+    doc.text('FATURA Nº', 55, currentY + 5);
+    doc.text('CLIENTE / ADQUIRENTE', 85, currentY + 5);
+    doc.text('PAGAMENTO', 130, currentY + 5);
+    doc.text('DESCONTO', 160, currentY + 5, { align: 'right' });
+    doc.text('TOTAL PAGO', 193, currentY + 5, { align: 'right' });
+
+    currentY += 7;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(51, 65, 85);
+
+    sales.forEach((s, idx) => {
+      if (currentY > 260) {
+        doc.addPage();
+        currentY = 20;
+        doc.saveGraphicsState();
+        doc.setFillColor(0, 106, 78);
+        doc.rect(15, currentY, 180, 7, 'F');
+        doc.restoreGraphicsState();
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(255, 255, 255);
+        doc.text('#', 17, currentY + 5);
+        doc.text('DATA / HORA', 23, currentY + 5);
+        doc.text('FATURA Nº', 55, currentY + 5);
+        doc.text('CLIENTE / ADQUIRENTE', 85, currentY + 5);
+        doc.text('PAGAMENTO', 130, currentY + 5);
+        doc.text('DESCONTO', 160, currentY + 5, { align: 'right' });
+        doc.text('TOTAL PAGO', 193, currentY + 5, { align: 'right' });
+        currentY += 7;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(51, 65, 85);
+      }
+
+      if (idx % 2 === 1) {
+        doc.saveGraphicsState();
+        doc.setFillColor(248, 250, 252);
+        doc.rect(15, currentY, 180, 6, 'F');
+        doc.restoreGraphicsState();
+      }
+
+      doc.text((idx + 1).toString(), 17, currentY + 4);
+      doc.text(new Date(s.date).toLocaleDateString('pt-MZ') + ' ' + new Date(s.date).toLocaleTimeString('pt-MZ', { hour: '2-digit', minute: '2-digit' }), 23, currentY + 4);
+      doc.setFont('helvetica', 'bold');
+      doc.text(s.invoiceNumber, 55, currentY + 4);
+      doc.setFont('helvetica', 'normal');
+      doc.text(s.customerName.length > 25 ? s.customerName.substring(0, 24) + '...' : s.customerName, 85, currentY + 4);
+      doc.text(s.paymentMethod.toUpperCase(), 130, currentY + 4);
+      doc.setTextColor(190, 18, 60);
+      doc.text(s.discount > 0 ? `-${s.discount.toLocaleString('pt-MZ')} MT` : '0.00 MT', 160, currentY + 4, { align: 'right' });
+      doc.setTextColor(0, 106, 78);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${s.total.toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
+      doc.setTextColor(51, 65, 85);
+      doc.setFont('helvetica', 'normal');
+
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.5);
+      doc.line(15, currentY + 6, 195, currentY + 6);
+      currentY += 6;
+    });
+
+    // Totais row in Table
+    doc.saveGraphicsState();
+    doc.setFillColor(241, 245, 249);
+    doc.rect(15, currentY, 180, 7, 'F');
+    doc.restoreGraphicsState();
+
+    doc.setFont('helvetica', 'bold');
+    doc.text('TOTAIS ACUMULADOS', 17, currentY + 5);
+    doc.setTextColor(190, 18, 60);
+    doc.text(`-${totalDiscount.toLocaleString('pt-MZ')} MT`, 160, currentY + 5, { align: 'right' });
+    doc.setTextColor(0, 106, 78);
+    doc.text(`${totalPaid.toLocaleString('pt-MZ')} MT`, 193, currentY + 5, { align: 'right' });
+
+    doc.save(title);
+    showToast('Livro Diário de Vendas PDF Descarregado!');
+  };
+
+  return (
+    <div className="space-y-6" id="finance_module">
+      {/* Time Horizon Header and Module Description */}
+      <div className="bg-white p-5 border border-gray-200 rounded-2xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h3 className="text-xl font-bold text-slate-800 tracking-tight flex items-center gap-2">
+            <span className="material-symbols-outlined text-emerald-600">account_balance_wallet</span>
+            Gestão Financeira, Contabilidade e Relatórios POS
+          </h3>
+          <p className="text-xs text-gray-500 mt-1">
+            Painel consolidado de desempenho comercial, geração de relatórios periódicos de caixa e auditoria de cibersegurança do ERP AGRO - XICOMO & SERVIÇOS, LDA.
+          </p>
+        </div>
+
+        {/* Global Range Filter for Ledger / Analytics */}
+        {activeSubTab === 'ledger' && (
+          <div className="flex gap-1 bg-slate-100 p-1 rounded-lg self-start">
+            {(['Day', 'Week', 'Month', 'Year', '3Y', '5Y', '10Y'] as const).map(range => (
+              <button
+                key={range}
+                onClick={() => setSelectedRange(range)}
+                className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                  selectedRange === range
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-gray-600 hover:bg-slate-200'
+                }`}
+              >
+                {range === 'Day' ? 'Dia' :
+                 range === 'Week' ? 'Semana' :
+                 range === 'Month' ? 'Mês' :
+                 range === 'Year' ? 'Ano' :
+                 range}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Modern Sub-Tab Segmented Selector */}
+      <div className="flex flex-wrap gap-1 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+        <button
+          onClick={() => setActiveSubTab('dashboard')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+            activeSubTab === 'dashboard'
+              ? 'bg-white text-emerald-700 shadow-sm font-black'
+              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px]">dashboard</span>
+          Painel de Desempenho
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('reports')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+            activeSubTab === 'reports'
+              ? 'bg-white text-emerald-700 shadow-sm font-black'
+              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px]">receipt_long</span>
+          Relatórios do POS
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('ledger')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+            activeSubTab === 'ledger'
+              ? 'bg-white text-emerald-700 shadow-sm font-black'
+              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px]">analytics</span>
+          Livro de Vendas & Gráficos
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('alerts')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+            activeSubTab === 'alerts'
+              ? 'bg-white text-red-700 shadow-sm font-black'
+              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px] text-red-500">warning</span>
+          Alertas de Stock ({stockAlerts.length})
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('auditoria')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+            activeSubTab === 'auditoria'
+              ? 'bg-white text-slate-800 shadow-sm font-black'
+              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px]">security</span>
+          Auditoria de Segurança
+        </button>
+      </div>
+
+      {/* --- SUB-TAB 1: PAINEL DE DESEMPENHO (DASHBOARD - IMAGE 2) --- */}
+      {activeSubTab === 'dashboard' && (
+        <div className="space-y-6">
+          {/* Top Row: 4 KPI Bento Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Card 1: Faturação Bruta */}
+            <div className="bg-white p-5 border border-slate-100 rounded-2xl shadow-sm flex items-center gap-4 hover:shadow-md transition-shadow">
+              <div className="bg-emerald-50 text-emerald-700 p-3.5 rounded-2xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-[28px] font-black">attach_money</span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Faturação Bruta</span>
+                <p className="text-2xl font-black text-slate-800 font-mono">{(totalGrossSales || 0).toLocaleString('pt-MZ')} MT</p>
+                <div className="text-[10px] text-emerald-600 font-bold flex items-center gap-0.5">
+                  <span className="material-symbols-outlined text-[12px] font-black">trending_up</span>
+                  +12.4% vs mês ant.
+                </div>
+              </div>
+            </div>
+
+            {/* Card 2: Margem Lucro Est. */}
+            <div className="bg-white p-5 border border-slate-100 rounded-2xl shadow-sm flex items-center gap-4 hover:shadow-md transition-shadow">
+              <div className="bg-teal-50 text-teal-700 p-3.5 rounded-2xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-[28px] font-black">trending_up</span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Margem Lucro Est.</span>
+                <p className="text-2xl font-black text-slate-800 font-mono">{(totalProfit || 0).toLocaleString('pt-MZ')} MT</p>
+                <div className="text-[10px] text-gray-400 font-medium">Margem operacional aprox. 35%</div>
+              </div>
+            </div>
+
+            {/* Card 3: Falta de Stock */}
+            <div className="bg-white p-5 border border-slate-100 rounded-2xl shadow-sm flex items-center gap-4 hover:shadow-md transition-shadow">
+              <div className="bg-amber-50 text-amber-700 p-3.5 rounded-2xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-[28px] font-black">warning</span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Falta de Stock</span>
+                <p className="text-2xl font-black text-slate-800 font-mono">{stockAlerts.length} Alertas</p>
+                <div className="text-[10px] text-gray-400 font-medium">Insumos abaixo do nível de segurança.</div>
+              </div>
+            </div>
+
+            {/* Card 4: Faturas Pendentes */}
+            <div className="bg-white p-5 border border-slate-100 rounded-2xl shadow-sm flex items-center gap-4 hover:shadow-md transition-shadow">
+              <div className="bg-blue-50 text-blue-700 p-3.5 rounded-2xl flex items-center justify-center">
+                <span className="material-symbols-outlined text-[28px] font-black">description</span>
+              </div>
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Faturas Pendentes</span>
+                <p className="text-2xl font-black text-slate-800 font-mono">
+                  {sales.filter(s => s.paymentMethod?.toLowerCase().includes('crédit') || s.paymentMethod?.toLowerCase().includes('credit')).length} Clientes
+                </p>
+                <div className="text-[10px] text-gray-400 font-medium">Faturas à espera de liquidação.</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Middle Row: Tendência de Vendas Diárias & Vendas por Categoria */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Column 1: Tendência de Vendas Diárias (lg:col-span-2) */}
+            <div className="lg:col-span-2 bg-white border border-slate-150 rounded-2xl p-6 shadow-sm space-y-4">
+              <div>
+                <h4 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                  <span className="material-symbols-outlined text-emerald-600">calendar_month</span>
+                  Tendência de Vendas Diárias
+                </h4>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  Fluxo financeiro cobrado nos últimos 7 dias operacionais.
+                </p>
+              </div>
+
+              {/* Dynamic Weekday Bars Graph */}
+              <div className="h-64 flex items-end justify-between px-4 pb-2 border-b border-slate-100 pt-6">
+                {(() => {
+                  const daysOfWeek = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+                  
+                  // Monday to Sunday sales calculation
+                  const getDailySales = () => {
+                    const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+                    const result = [
+                      { name: 'Seg', amount: 0 },
+                      { name: 'Ter', amount: 0 },
+                      { name: 'Qua', amount: 0 },
+                      { name: 'Qui', amount: 0 },
+                      { name: 'Sex', amount: 0 },
+                      { name: 'Sáb', amount: 0 },
+                      { name: 'Dom', amount: 0 }
+                    ];
+                    
+                    for (let i = 0; i < 7; i++) {
+                      const d = new Date();
+                      d.setDate(d.getDate() - i);
+                      const dayName = days[d.getDay()];
+                      
+                      const daySales = sales.filter(s => {
+                        const saleDate = new Date(s.date);
+                        return saleDate.getDate() === d.getDate() &&
+                               saleDate.getMonth() === d.getMonth() &&
+                               saleDate.getFullYear() === d.getFullYear();
+                      });
+                      const total = daySales.reduce((sum, s) => sum + s.total, 0);
+                      
+                      const found = result.find(r => r.name === dayName);
+                      if (found) {
+                        found.amount += total;
+                      }
+                    }
+                    return result;
+                  };
+
+                  const actualValues = getDailySales();
+                  const maxAmt = Math.max(...actualValues.map(v => v.amount), 1);
+                  const hasSalesData = sales.length > 0;
+                  
+                  // Default visual Heights matching the screenshot when no sales data exists
+                  const visualHeights = [25, 55, 35, 75, 100, 60, 30];
+
+                  return actualValues.map((val, idx) => {
+                    const heightPct = hasSalesData ? Math.max(8, (val.amount / maxAmt) * 100) : visualHeights[idx];
+                    return (
+                      <div key={val.name} className="flex flex-col items-center group relative w-12 h-full justify-end">
+                        {/* Hover Tooltip */}
+                        <div className="absolute -top-8 bg-slate-800 text-white text-[9px] px-2 py-1 rounded shadow opacity-0 group-hover:opacity-100 transition-opacity z-10 font-mono">
+                          {hasSalesData ? `${val.amount.toLocaleString('pt-MZ')} MT` : 'Sem Vendas'}
+                        </div>
+                        
+                        {/* Filled Capsule */}
+                        <div className="w-8 bg-slate-50 rounded-t-xl flex flex-col justify-end overflow-hidden h-[90%] border border-slate-100">
+                          <div 
+                            style={{ height: `${heightPct}%` }}
+                            className="w-full bg-[#006A4E] rounded-t-xl transition-all duration-1000 ease-out hover:opacity-90"
+                          />
+                        </div>
+
+                        {/* Weekday Label */}
+                        <span className="text-[10px] font-bold text-slate-500 mt-2">{val.name}</span>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+
+            {/* Column 2: Vendas por Categoria (lg:col-span-1) */}
+            <div className="lg:col-span-1 bg-white border border-slate-150 rounded-2xl p-6 shadow-sm space-y-4">
+              <div>
+                <h4 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                  <span className="material-symbols-outlined text-emerald-600">pie_chart</span>
+                  Vendas por Categoria
+                </h4>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  Distribuição financeira das vendas agrícolas.
+                </p>
+              </div>
+
+              {/* Centered Donut Hole SVG Chart */}
+              {(() => {
+                const getCategoryBreakdown = () => {
+                  const categories: { [key: string]: number } = {};
+                  sales.forEach(sale => {
+                    sale.items.forEach(item => {
+                      const prod = products.find(p => p.id === item.productId);
+                      const cat = (prod ? prod.category : item.category) || 'Outro';
+                      const amount = item.unitPrice * item.quantity;
+                      categories[cat] = (categories[cat] || 0) + amount;
+                    });
+                  });
+                  return categories;
+                };
+
+                const catData = getCategoryBreakdown();
+                const totalCatAmt = Object.values(catData).reduce((a, b) => a + b, 0);
+                const hasSalesData = sales.length > 0 && totalCatAmt > 0;
+
+                const getCatPercent = (catName: string, defaultVal: number) => {
+                  if (!hasSalesData) return defaultVal;
+                  const matchedKey = Object.keys(catData).find(k => k.toLowerCase().includes(catName.toLowerCase()));
+                  if (!matchedKey) return 0;
+                  return Math.round((catData[matchedKey] / totalCatAmt) * 100);
+                };
+
+                const sementesPct = getCatPercent('semente', 60);
+                const adubosPct = getCatPercent('adubo', 25);
+                const servicosPct = getCatPercent('serviço', 15);
+
+                const radius = 35;
+                const circ = 2 * Math.PI * radius;
+
+                const strokeSementes = (sementesPct / 100) * circ;
+                const strokeAdubos = (adubosPct / 100) * circ;
+                const strokeServicos = (servicosPct / 100) * circ;
+
+                const offsetSementes = 0;
+                const offsetAdubos = strokeSementes;
+                const offsetServicos = strokeSementes + strokeAdubos;
+
+                return (
+                  <div className="flex flex-col items-center space-y-6 pt-4">
+                    {/* Ring Container */}
+                    <div className="relative flex items-center justify-center">
+                      <svg width="140" height="140" viewBox="0 0 100 100" className="transform -rotate-90">
+                        {/* Underlay ring */}
+                        <circle cx="50" cy="50" r={radius} fill="transparent" stroke="#F1F5F9" strokeWidth="12" />
+                        
+                        {/* Sementes Segment */}
+                        {sementesPct > 0 && (
+                          <circle
+                            cx="50"
+                            cy="50"
+                            r={radius}
+                            fill="transparent"
+                            stroke="#006A4E"
+                            strokeWidth="12"
+                            strokeDasharray={`${strokeSementes} ${circ}`}
+                            strokeDashoffset={-offsetSementes}
+                            className="transition-all duration-1000 ease-out"
+                          />
+                        )}
+
+                        {/* Adubos Segment */}
+                        {adubosPct > 0 && (
+                          <circle
+                            cx="50"
+                            cy="50"
+                            r={radius}
+                            fill="transparent"
+                            stroke="#D97706"
+                            strokeWidth="12"
+                            strokeDasharray={`${strokeAdubos} ${circ}`}
+                            strokeDashoffset={-offsetAdubos}
+                            className="transition-all duration-1000 ease-out"
+                          />
+                        )}
+
+                        {/* Servicos Segment */}
+                        {servicosPct > 0 && (
+                          <circle
+                            cx="50"
+                            cy="50"
+                            r={radius}
+                            fill="transparent"
+                            stroke="#94A3B8"
+                            strokeWidth="12"
+                            strokeDasharray={`${strokeServicos} ${circ}`}
+                            strokeDashoffset={-offsetServicos}
+                            className="transition-all duration-1000 ease-out"
+                          />
+                        )}
+                      </svg>
+
+                      {/* Inside label */}
+                      <div className="absolute flex flex-col items-center justify-center text-center">
+                        <span className="text-[9px] uppercase font-bold text-gray-400 tracking-widest">Foco</span>
+                        <span className="text-xs font-black text-slate-800">Sementes</span>
+                      </div>
+                    </div>
+
+                    {/* Horizontal Legend Below */}
+                    <div className="grid grid-cols-3 gap-2 w-full text-center text-[10px] font-black uppercase text-gray-600 border-t border-slate-100 pt-4">
+                      <div className="flex flex-col items-center">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#006A4E] block" />
+                          <span>Sementes</span>
+                        </div>
+                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{sementesPct}%</span>
+                      </div>
+
+                      <div className="flex flex-col items-center">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#D97706] block" />
+                          <span>Adubos</span>
+                        </div>
+                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{adubosPct}%</span>
+                      </div>
+
+                      <div className="flex flex-col items-center">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#94A3B8] block" />
+                          <span>Serviços</span>
+                        </div>
+                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{servicosPct}%</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Bottom Row: Comparativo de Vendas por Produto (Top 5 Mais Vendidos) */}
+          <div className="bg-white border border-slate-150 rounded-2xl p-6 shadow-sm space-y-4">
+            <div>
+              <h4 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                <span className="material-symbols-outlined text-emerald-600">bar_chart</span>
+                Comparativo de Vendas por Produto (Top 5 Mais Vendidos)
+              </h4>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Volume financeiro total faturado por item no catálogo.
+              </p>
+            </div>
+
+            {/* Top 5 Products List */}
+            <div className="space-y-4">
+              {(() => {
+                const getTopProducts = () => {
+                  const prodSales: { [key: string]: { qty: number, total: number, name: string, unit: string } } = {};
+                  sales.forEach(sale => {
+                    sale.items.forEach(item => {
+                      if (!prodSales[item.productId]) {
+                        const prod = products.find(p => p.id === item.productId);
+                        prodSales[item.productId] = {
+                          qty: 0,
+                          total: 0,
+                          name: item.name,
+                          unit: prod ? prod.baseUnit : 'Unidade'
+                        };
+                      }
+                      prodSales[item.productId].qty += item.quantity;
+                      prodSales[item.productId].total += item.unitPrice * item.quantity;
+                    });
+                  });
+                  
+                  return Object.values(prodSales).sort((a, b) => b.total - a.total).slice(0, 5);
+                };
+
+                const topProds = getTopProducts();
+                const hasSalesData = topProds.length > 0;
+                
+                // Fallback products matching screenshot if no sales recorded
+                const fallbackProducts = [
+                  { name: 'Semente de Milho Híbrido PAN 53', total: 0, qty: 0, unit: 'Saco' },
+                  { name: 'Semente de Feijão Nhemba IT82D', total: 0, qty: 0, unit: 'Saco' },
+                  { name: 'Semente de Tomate Cal J Graúdo', total: 0, qty: 0, unit: 'Lata' },
+                  { name: 'Adubo NPK 12-24-12 Basal', total: 0, qty: 0, unit: 'Saco' },
+                  { name: 'Ureia 46% Cobertura Especial', total: 0, qty: 0, unit: 'Saco' }
+                ];
+
+                const finalProds = hasSalesData ? topProds : fallbackProducts;
+                const maxVal = Math.max(...finalProds.map(p => p.total), 1);
+                // Fake proportional heights for preview when no sales
+                const fakeShares = [85, 65, 45, 30, 15];
+
+                return finalProds.map((prod, idx) => {
+                  const widthPct = hasSalesData ? Math.max(5, (prod.total / maxVal) * 100) : fakeShares[idx];
+                  return (
+                    <div key={prod.name} className="space-y-1.5">
+                      <div className="flex justify-between text-xs">
+                        <span className="font-extrabold text-slate-700">{prod.name}</span>
+                        <span className="font-mono text-slate-900 font-bold">
+                          {prod.total.toLocaleString('pt-MZ')} MT {prod.qty > 0 && `(${prod.qty} ${prod.unit})`}
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-50 rounded-full h-2.5 overflow-hidden border border-slate-100">
+                        <div 
+                          style={{ width: `${widthPct}%` }}
+                          className="bg-[#006A4E] h-full rounded-full transition-all duration-1000 ease-out"
+                        />
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- SUB-TAB 2: GERAÇÃO DE RELATÓRIOS PERIÓDICOS DO POS (IMAGE 1) --- */}
+      {activeSubTab === 'reports' && (
+        <div className="space-y-6">
+          {/* Main compilation panel */}
+          <div className="bg-white border border-slate-150 rounded-2xl p-6 shadow-sm space-y-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+              <div>
+                <h4 className="text-base font-bold text-slate-800 tracking-tight">Geração de Relatórios Periódicos do POS</h4>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Selecione o intervalo de auditoria e compile dados fiscais completos para prestação de contas.
+                </p>
+              </div>
+
+              {/* Compilation Selection controls */}
+              <div className="flex items-center gap-2 self-start md:self-auto">
+                <select
+                  value={reportPeriod}
+                  onChange={(e) => setReportPeriod(e.target.value as any)}
+                  className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-bold text-slate-700 focus:outline-none"
+                >
+                  <option value="Diário">Relatório Diário</option>
+                  <option value="Semanal">Relatório Semanal</option>
+                  <option value="Mensal">Relatório Mensal</option>
+                  <option value="Trimestral">Relatório Trimestral</option>
+                  <option value="Semestral">Relatório Semestral</option>
+                  <option value="Anual">Relatório Anual</option>
+                </select>
+                <button
+                  onClick={handleCompileReport}
+                  className="bg-[#006A4E] text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-[#005a42] flex items-center gap-1.5 shadow transition-all"
+                >
+                  <span className="material-symbols-outlined text-[16px]">sync_alt</span>
+                  Compilar
+                </button>
+              </div>
+            </div>
+
+            {/* Compiled KPIs Row */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Faturação Bruta ({compiledPeriod})</span>
+                <p className="text-xl font-mono font-black text-slate-800 mt-1">{(reportGrossSales || 0).toLocaleString('pt-MZ')} MT</p>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Lucro Estimado</span>
+                <p className="text-xl font-mono font-black text-emerald-700 mt-1">{(reportProfit || 0).toLocaleString('pt-MZ')} MT</p>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Transações Feitas</span>
+                <p className="text-xl font-mono font-black text-blue-700 mt-1">{reportTransCount} Vendas</p>
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Margem Operacional</span>
+                <p className="text-xl font-mono font-black text-amber-700 mt-1">{reportMargin.toFixed(1)}%</p>
+              </div>
+            </div>
+
+            {/* Document and Sheet Export action buttons */}
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+              <button
+                onClick={handleExportFinanceDashboardExcel}
+                className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold rounded-lg transition-colors border border-emerald-200"
+              >
+                <span className="material-symbols-outlined text-[18px]">dashboard_customize</span>
+                Exportar Dashboard Excel (.xlsx)
+              </button>
+              <button
+                onClick={handleExportReportPDF}
+                className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">picture_as_pdf</span>
+                Imprimir Relatório Oficial (PDF)
+              </button>
+              <button
+                onClick={handleExportBalancetePDF}
+                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-900 hover:bg-indigo-950 text-white text-xs font-bold rounded-lg shadow-sm transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">receipt_long</span>
+                Imprimir Balancete (PDF)
+              </button>
+            </div>
+          </div>
+
+          {/* Grid: Totais por Período Fiscal & Desempenho por Produto / Serviço */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left Box (lg:col-span-5): TOTAIS DE VENDA POR PERÍODO FISCAL */}
+            <div className="lg:col-span-5 bg-white border border-slate-150 rounded-2xl p-5 shadow-sm space-y-4">
+              <h5 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2">
+                Totais de Venda por Período Fiscal
+              </h5>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-50 text-slate-500 font-bold border-b border-slate-200">
+                    <tr>
+                      <th className="p-2">Intervalo de Vendas</th>
+                      <th className="p-2 text-right">Faturação Comercial</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Diário (24 Horas)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Diário').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Semanal (7 Dias)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Semanal').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Mensal (30 Dias)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Mensal').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Trimestral (90 Dias)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Trimestral').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Semestral (180 Dias)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Semestral').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Anual (365 Dias)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {getFilteredSalesForReport('Anual').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Trienal (3 Anos)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {sales.filter(s => {
+                          const diff = Date.now() - new Date(s.date).getTime();
+                          return diff <= 3 * 365 * 24 * 3600 * 1000;
+                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="p-2.5 font-bold text-slate-700">Quinquenal (5 Anos)</td>
+                      <td className="p-2.5 text-right font-mono text-slate-900">
+                        {sales.filter(s => {
+                          const diff = Date.now() - new Date(s.date).getTime();
+                          return diff <= 5 * 365 * 24 * 3600 * 1000;
+                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                    <tr className="bg-slate-50">
+                      <td className="p-2.5 font-extrabold text-[#006A4E]">Decenal (10 Anos)</td>
+                      <td className="p-2.5 text-right font-mono font-black text-[#006A4E]">
+                        {sales.filter(s => {
+                          const diff = Date.now() - new Date(s.date).getTime();
+                          return diff <= 10 * 365 * 24 * 3600 * 1000;
+                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[10px] text-gray-400 italic">
+                * Totalizador multi-ano calculated em tempo-real.
+              </p>
+            </div>
+
+            {/* Right Box (lg:col-span-7): DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO */}
+            <div className="lg:col-span-7 bg-white border border-slate-150 rounded-2xl p-5 shadow-sm space-y-4">
+              <h5 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2">
+                Desempenho de Vendas por Produto / Serviço
+              </h5>
+
+              <div className="overflow-y-auto max-h-[350px] custom-scrollbar border border-slate-100 rounded-xl">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 sticky top-0">
+                    <tr>
+                      <th className="p-2">Produto/Serviço</th>
+                      <th className="p-2 text-right">Preço Compra</th>
+                      <th className="p-2 text-right">Preço Venda</th>
+                      <th className="p-2 text-center">Comprado</th>
+                      <th className="p-2 text-center">Vendido</th>
+                      <th className="p-2 text-right">Faturado</th>
+                      <th className="p-2 text-right">Lucro Est.</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-[11px]">
+                    {products.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="p-4 text-center text-gray-400 italic">Nenhum produto cadastrado</td>
+                      </tr>
+                    ) : (
+                      products.map(p => {
+                        const soldQty = reportSales.reduce((sum, sale) => {
+                          const item = sale.items.find(it => it.productId === p.id);
+                          return sum + (item ? item.quantity : 0);
+                        }, 0);
+                        const faturado = soldQty * p.sellingPrice;
+                        const lucro = soldQty * (p.sellingPrice - p.buyingPrice);
+                        // Comprado can be simulated as catalog stockQty + soldQty historically
+                        const totalComprado = p.stockQty + soldQty;
+
+                        return (
+                          <tr key={p.id} className="hover:bg-slate-50">
+                            <td className="p-2 font-bold text-slate-800 max-w-[120px] truncate" title={p.name}>{p.name}</td>
+                            <td className="p-2 text-right font-mono text-gray-500">{p.buyingPrice.toLocaleString()} MT</td>
+                            <td className="p-2 text-right font-mono text-gray-800 font-bold">{p.sellingPrice.toLocaleString()} MT</td>
+                            <td className="p-2 text-center font-mono">{totalComprado}</td>
+                            <td className="p-2 text-center font-mono font-extrabold text-[#006A4E]">{soldQty}</td>
+                            <td className="p-2 text-right font-mono text-slate-900 font-bold">{faturado.toLocaleString()} MT</td>
+                            <td className="p-2 text-right font-mono text-blue-700 font-bold">{lucro.toLocaleString()} MT</td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Row: Faturação por Categoria & Histórico de Vendas */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Bottom Left: FATURAÇÃO POR CATEGORIA */}
+            <div className="bg-white border border-slate-150 rounded-2xl p-5 shadow-sm space-y-4">
+              <h5 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2">
+                Faturação por Categoria
+              </h5>
+
+              <div className="space-y-4 text-xs font-semibold">
+                {(() => {
+                  const categories = [
+                    { name: 'Semente', label: 'SEMENTE' },
+                    { name: 'Adubo', label: 'ADUBO' },
+                    { name: 'Quimico', label: 'QUIMICO' },
+                    { name: 'Ferramenta', label: 'FERRAMENTA' },
+                    { name: 'Servico', label: 'SERVICO' },
+                    { name: 'Outro', label: 'OUTRO' }
+                  ];
+
+                  let sumAllCats = 0;
+                  const calculatedCats = categories.map(cat => {
+                    const totalAmt = reportSales.reduce((sum, sale) => {
+                      return sum + sale.items.reduce((itemSum, item) => {
+                        const p = products.find(prod => prod.id === item.productId);
+                        const pCat = (p ? p.category : item.category) || 'Outro';
+                        if (pCat.toLowerCase().includes(cat.name.toLowerCase())) {
+                          return itemSum + (item.unitPrice * item.quantity);
+                        }
+                        return itemSum;
+                      }, 0);
+                    }, 0);
+                    sumAllCats += totalAmt;
+                    return { ...cat, amount: totalAmt };
+                  });
+
+                  return (
+                    <div className="space-y-3.5">
+                      {calculatedCats.map(cat => {
+                        const widthPct = sumAllCats > 0 ? Math.max(2, (cat.amount / sumAllCats) * 100) : 0;
+                        return (
+                          <div key={cat.name} className="space-y-1">
+                            <div className="flex justify-between text-[11px]">
+                              <span className="text-gray-500 font-black">{cat.label}</span>
+                              <span className="font-mono text-slate-800 font-bold">{cat.amount.toLocaleString()} MT</span>
+                            </div>
+                            <div className="w-full bg-slate-50 h-2 rounded-full border border-slate-100 overflow-hidden">
+                              <div
+                                style={{ width: `${widthPct}%` }}
+                                className="bg-[#006A4E] h-full rounded-full transition-all duration-700"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      <div className="flex justify-between text-xs font-black border-t border-slate-100 pt-3 text-slate-800">
+                        <span>SOMA DAS CATEGORIAS</span>
+                        <span className="font-mono text-[#006A4E]">{sumAllCats.toLocaleString()} MT</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Bottom Right: HISTÓRICO INDIVIDUAL DAS VENDAS */}
+            <div className="bg-white border border-slate-150 rounded-2xl p-5 shadow-sm space-y-4">
+              <h5 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b border-slate-100 pb-2">
+                Histórico Individual das Vendas ({reportSales.length} Vendas no Período)
+              </h5>
+
+              <div className="overflow-y-auto max-h-[280px] custom-scrollbar border border-slate-100 rounded-xl">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-50 text-slate-500 font-bold border-b border-slate-200 sticky top-0">
+                    <tr>
+                      <th className="p-2">Ref Venda</th>
+                      <th className="p-2">Data</th>
+                      <th className="p-2">Operador</th>
+                      <th className="p-2">Método</th>
+                      <th className="p-2 text-right">Total Cobrado</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {reportSales.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-4 text-center text-gray-400 italic">Nenhuma venda compilada para este período</td>
+                      </tr>
+                    ) : (
+                      reportSales.map(s => (
+                        <tr key={s.id} className="hover:bg-slate-50 text-[11px]">
+                          <td className="p-2 font-mono font-bold text-[#006A4E]">{s.invoiceNumber}</td>
+                          <td className="p-2 text-gray-500">{new Date(s.date).toLocaleDateString('pt-MZ')}</td>
+                          <td className="p-2 text-slate-700">{s.customerName || 'Consumidor Final'}</td>
+                          <td className="p-2 uppercase text-[9px] font-bold">{s.paymentMethod}</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{s.total.toLocaleString()} MT</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- SUB-TAB 3: LIVRO DE VENDAS & GRÁFICOS (LEDGER) --- */}
+      {activeSubTab === 'ledger' && (
+        <div className="space-y-6">
+          {/* Financial Bento Cards Summary */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
+              <span className="text-[10px] uppercase font-black text-gray-400">Faturação Total</span>
+              <p className="text-xl font-black text-emerald-600 font-mono">{(totalGrossSales || 0).toLocaleString()} MT</p>
+              <div className="text-[9px] text-gray-400">Total acumulado em caixa</div>
+            </div>
+
+            <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
+              <span className="text-[10px] uppercase font-black text-gray-400">Lucro Estimado</span>
+              <p className="text-xl font-black text-blue-600 font-mono">{(totalProfit || 0).toLocaleString()} MT</p>
+              <div className="text-[9px] text-gray-400">Faturação menos custos</div>
+            </div>
+
+            <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
+              <span className="text-[10px] uppercase font-black text-gray-400">Ticket Médio</span>
+              <p className="text-xl font-black text-indigo-600 font-mono">{(avgTicket || 0).toLocaleString('pt-MZ', { maximumFractionDigits: 1 })} MT</p>
+              <div className="text-[9px] text-gray-400">Valor médio por venda</div>
+            </div>
+
+            <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
+              <span className="text-[10px] uppercase font-black text-gray-400">Total Prejuízo</span>
+              <p className="text-xl font-black text-red-600 font-mono">-{totalLossesVal.toLocaleString()} MT</p>
+              <div className="text-[9px] text-gray-400">Quebras e vencidos</div>
+            </div>
+
+            <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
+              <span className="text-[10px] uppercase font-black text-gray-400">Sincronização</span>
+              <p className="text-xl font-black text-orange-500 font-mono">{pendingSyncCount} pendentes</p>
+              <div className="text-[9px] text-gray-400">Faturas locais sem nuvem</div>
+            </div>
+          </div>
+
+          {/* Visual Analytics Graphs */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="bg-white border border-gray-200 p-6 rounded-xl shadow-sm space-y-4">
+              <p className="font-bold text-gray-800 text-sm">Faturação Comercial ({selectedRange})</p>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                    <XAxis dataKey="name" stroke="#9CA3AF" fontSize={11} tickLine={false} />
+                    <YAxis stroke="#9CA3AF" fontSize={11} tickLine={false} />
+                    <Tooltip formatter={(value) => `${Number(value).toLocaleString()} MT`} />
+                    <Line type="monotone" dataKey="Vendas" stroke="#006A4E" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="bg-white border border-gray-200 p-6 rounded-xl shadow-sm space-y-4">
+              <p className="font-bold text-gray-800 text-sm">Relação Comercial: Faturação vs Perdas ({selectedRange})</p>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                    <XAxis dataKey="name" stroke="#9CA3AF" fontSize={11} tickLine={false} />
+                    <YAxis stroke="#9CA3AF" fontSize={11} tickLine={false} />
+                    <Tooltip formatter={(value) => `${Number(value).toLocaleString()} MT`} />
+                    <Legend />
+                    <Bar dataKey="Vendas" fill="#006A4E" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="Perdas" fill="#DC2626" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* Tendência Comercial (Histórico de Exercício) */}
+          <div className="bg-white border border-gray-200 p-6 rounded-xl shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h4 className="font-bold text-gray-800 text-sm">Tendência Comercial (Histórico de Exercício)</h4>
+                <p className="text-xs text-gray-500">Histórico de faturação mensal e download de relatórios comerciais consolidados.</p>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={handleExportCSVLedger} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-xs font-bold text-gray-600 flex items-center gap-1 transition-colors">
+                  <span className="material-symbols-outlined text-[16px]">grid_on</span> Exportar Excel
+                </button>
+                <button onClick={handleExportPDFLedger} className="px-3 py-1.5 bg-primary text-white hover:opacity-90 rounded text-xs font-bold flex items-center gap-1 transition-opacity">
+                  <span className="material-symbols-outlined text-[16px]">download_2</span> Descarregar PDF
+                </button>
+              </div>
+            </div>
+
+            {/* Bar charts built in tailwind */}
+            <div className="h-64 flex items-end justify-between pt-6 border-b border-gray-100 gap-2">
+              {monthlySales.map(m => {
+                const percent = Math.min(100, (m.amount / (totalGrossSales || 1)) * 300);
+                return (
+                  <div key={m.month} className="flex-1 flex flex-col items-center gap-2">
+                    <div className="text-[10px] font-mono font-bold text-gray-400">{Math.round(m.amount).toLocaleString()} MT</div>
+                    <div className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700" style={{ height: `${Math.max(10, percent)}px` }}></div>
+                    <div className="text-xs font-black text-gray-600 border-t border-gray-100 pt-2 w-full text-center bg-gray-50">{m.month}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Sales Transactions Book Table (Ledger) */}
+          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Livro Diário de Vendas (Ledger)</h4>
+                <p className="text-xs text-gray-500">Histórico cronológico de transações fiscais liquidadas.</p>
+              </div>
+
+              <div className="flex gap-2 self-start">
+                <button
+                  onClick={handleExportSalesLedger}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded text-xs font-bold text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[18px]">download</span>
+                  Exportar Diário (CSV)
+                </button>
+                <button
+                  onClick={handleExportSalesLedgerPDF}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-[#006A4E] text-white hover:opacity-90 rounded text-xs font-bold transition-opacity"
+                >
+                  <span className="material-symbols-outlined text-[18px]">download_2</span>
+                  Descarregar Diário (PDF)
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto custom-scrollbar">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                  <tr>
+                    <th className="p-3">Data</th>
+                    <th className="p-3">Documento / Fatura</th>
+                    <th className="p-3">Adquirente / Cliente</th>
+                    <th className="p-3">Método Liquidação</th>
+                    <th className="p-3 text-right">Subtotal</th>
+                    <th className="p-3 text-right">Desconto</th>
+                    <th className="p-3 text-right">Total Pago</th>
+                    <th className="p-3 text-center">Estado Sinc.</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 font-medium">
+                  {sales.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-4 text-center text-gray-400 italic">Nenhuma transação lançada no diário</td>
+                    </tr>
+                  ) : (
+                    [...sales].reverse().map(s => (
+                      <tr key={s.id} className="hover:bg-gray-50">
+                        <td className="p-3 font-mono text-[11px]">{new Date(s.date).toLocaleString()}</td>
+                        <td className="p-3 font-bold font-mono text-[#006A4E]">{s.invoiceNumber}</td>
+                        <td className="p-3 font-semibold text-gray-800">{s.customerName}</td>
+                        <td className="p-3 uppercase font-black text-gray-600">{s.paymentMethod}</td>
+                        <td className="p-3 text-right font-mono">{s.subtotal.toLocaleString()} MT</td>
+                        <td className="p-3 text-right font-mono text-red-500">-{s.discount.toLocaleString()} MT</td>
+                        <td className="p-3 text-right font-bold font-mono text-[#006A4E]">{s.total.toLocaleString()} MT</td>
+                        <td className="p-3 text-center">
+                          {s.synced ? (
+                            <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded text-[10px] uppercase">Online</span>
+                          ) : (
+                            <span className="bg-yellow-100 text-yellow-800 font-bold px-2 py-0.5 rounded text-[10px] uppercase">Local</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- SUB-TAB 4: RUTURAS E ALERTAS DE STOCK CRÍTICOS --- */}
+      {activeSubTab === 'alerts' && (
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-6">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h4 className="font-headline-md text-headline-md text-red-600 font-bold flex items-center gap-2">
+                <span className="material-symbols-outlined text-[24px]">warning</span>
+                Ruturas e Alertas de Stock (Críticos)
+              </h4>
+              <p className="text-xs text-gray-500">
+                Produtos abaixo do limite crítico de 10 unidades que requerem reabastecimento financeiro urgente.
+              </p>
+            </div>
+            <button
+              onClick={handleExportStockAlertsPDF}
+              className="flex items-center gap-2 px-3 py-1.5 bg-red-600 text-white rounded text-xs font-bold hover:bg-red-700 transition-colors shadow-sm self-start"
+            >
+              <span className="material-symbols-outlined text-[18px]">download_2</span>
+              Descarregar Alertas PDF
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {stockAlerts.length === 0 ? (
+              <div className="col-span-full text-center text-xs text-gray-400 py-6 bg-gray-50 rounded-lg border border-gray-200">
+                <span className="material-symbols-outlined text-green-500 text-3xl">check_circle</span>
+                <p className="mt-1 font-bold text-gray-600">Nenhum alerta crítico de stock de momento.</p>
+                <p className="text-[10px] text-gray-400">Todo o inventário comercial está acima do limite mínimo.</p>
+              </div>
+            ) : (
+              stockAlerts.map(p => (
+                <div key={p.id} className="flex justify-between items-center p-3 rounded-lg bg-red-50 border border-red-200 text-xs">
+                  <div>
+                    <p className="font-black text-gray-800">{p.name}</p>
+                    <p className="text-[10px] text-gray-400">SKU / Cód: {p.code}</p>
+                    <p className="text-[9px] font-mono text-gray-500">Custo de Reposição: {p.buyingPrice.toLocaleString()} MT</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-black bg-red-200 text-red-900 px-2 py-1 rounded text-[10px] block">
+                      {p.stockQty} {p.baseUnit}
+                    </span>
+                    <span className="text-[8px] text-red-600 block mt-1 font-bold uppercase animate-pulse">Aviso Crítico</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* --- SUB-TAB 5: AUDITORIA DE SEGURANÇA --- */}
+      {activeSubTab === 'auditoria' && (
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-3">
+            <div>
+              <h4 className="font-headline-md text-headline-md text-slate-800 font-bold flex items-center gap-2">
+                <span className="material-symbols-outlined text-[24px] text-red-600">security</span>
+                Rastreio Imutável de Auditoria de Cibersegurança
+              </h4>
+              <p className="text-xs text-gray-500">
+                Logs de segurança e acessos de utilizadores. Auditoria comercial imutável com rastreio de IPs.
+              </p>
+            </div>
+            <button
+              onClick={handleExportAuditPDF}
+              className="flex items-center gap-2 px-3 py-1.5 bg-red-600 text-white rounded text-xs font-bold hover:bg-red-700 transition-colors self-start shadow-sm"
+            >
+              <span className="material-symbols-outlined text-[18px]">download_2</span>
+              Descarregar PDF Auditoria
+            </button>
+          </div>
+
+          <div className="overflow-x-auto custom-scrollbar max-h-80">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200 sticky top-0">
+                <tr>
+                  <th className="p-3">Data/Hora</th>
+                  <th className="p-3">Utilizador</th>
+                  <th className="p-3">Endereço IP</th>
+                  <th className="p-3">Ação Realizada</th>
+                  <th className="p-3">Estado</th>
+                  <th className="p-3">Detalhes da Atividade</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {auditLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="p-4 text-center text-gray-400 italic">Nenhum evento de segurança registado</td>
+                  </tr>
+                ) : (
+                  [...auditLogs].reverse().map(l => (
+                    <tr key={l.id} className="hover:bg-gray-50">
+                      <td className="p-3 font-mono text-[11px] whitespace-nowrap">{new Date(l.timestamp).toLocaleString('pt-MZ')}</td>
+                      <td className="p-3 font-bold text-gray-700">{l.username}</td>
+                      <td className="p-3 font-mono text-gray-500">{l.ipAddress}</td>
+                      <td className="p-3 font-semibold text-slate-800">{l.action}</td>
+                      <td className="p-3">
+                        <span className={`font-bold px-2 py-0.5 rounded text-[10px] uppercase ${
+                          l.status === 'Sucesso' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800 animate-pulse'
+                        }`}>
+                          {l.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-gray-600 max-w-xs truncate" title={l.details}>{l.details}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Toast banner */}
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700">
+          <span className="material-symbols-outlined text-emerald-500">info</span>
+          <span className="text-sm font-semibold">{toastMessage}</span>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Remix Agro-Xicomo-e-Servicos-lda-mz-FB",
+  "description": "Imported from GitHub: WinSer2026/Agro-Xicomo-e-Servicos-lda-mz",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Inventory product",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "category": { "type": "string" },
+        "costPrice": { "type": "number" },
+        "salePrice": { "type": "number" },
+        "wholesalePrice": { "type": "number" },
+        "stockQty": { "type": "number" },
+        "baseUnit": { "type": "string" }
+      }
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "A completed sale",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "products/{productId}": {
+      "schema": "Product",
+      "description": "Products"
+    },
+    "sales/{saleId}": {
+      "schema": "Sale",
+      "description": "Sales"
+    },
+    "losses/{lossId}": {
+      "schema": "Sale",
+      "description": "Losses"
+    },
+    "employees/{employeeId}": {
+      "schema": "Sale",
+      "description": "Employees"
+    },
+    "attendance/{attendanceId}": {
+      "schema": "Sale",
+      "description": "Attendance"
+    },
+    "audit_logs/{logId}": {
+      "schema": "Sale",
+      "description": "Audit Logs"
+    },
+    "active_sessions/{sessionId}": {
+      "schema": "Sale",
+      "description": "Active Sessions"
+    },
+    "settings/{settingId}": {
+      "schema": "Sale",
+      "description": "Settings"
+    },
+    "credentials/{credId}": {
+      "schema": "Sale",
+      "description": "Credentials"
+    },
+    "payroll_payments/{payrollId}": {
+      "schema": "Sale",
+      "description": "Payroll"
+    },
+    "customers/{customerId}": {
+      "schema": "Sale",
+      "description": "Customers"
+    },
+    "paused_sales/{pausedSaleId}": {
+      "schema": "Sale",
+      "description": "Paused Sales"
+    }
+  }
+}
