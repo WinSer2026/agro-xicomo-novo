@@ -1000,6 +1000,20 @@ export class IndexedDBService {
     });
   }
 
+  public clearActiveSessions(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.isFallback) {
+        window.localStorage.removeItem('_mem_active_sessions');
+        resolve();
+        return;
+      }
+      const store = this.getStore('active_sessions', 'readwrite');
+      const request = store.clear();
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  }
+
   // --- Settings Store ---
   public getSettings(): Promise<SystemSettings> {
     return new Promise((resolve) => {

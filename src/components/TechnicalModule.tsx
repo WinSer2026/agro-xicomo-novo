@@ -1,7 +1,7 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
-import { SystemSettings, AuditLog, UserCredentials, Product, Sale, LossRecord, AppRole } from '../types';
+import { SystemSettings, AuditLog, UserCredentials, Product, Sale, LossRecord, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { 
@@ -27,7 +27,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [losses, setLosses] = useState<LossRecord[]>([]);
 
   // Active Technical Panel Tab
-  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
+  const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
 
   // Firebase Cloud Management States
   const [firebaseUrlInput, setFirebaseUrlInput] = useState('');
@@ -175,6 +176,41 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     // Load losses
     const lss = await dbService.getLosses();
     setLosses(lss);
+
+    // Load active sessions
+    const activeSess = await dbService.getActiveSessions();
+    setActiveSessions(activeSess);
+  };
+
+  const handleTerminateSession = async (sessionId: string, username: string) => {
+    await dbService.removeActiveSession(sessionId);
+    await dbService.addAuditLog({
+      id: 'log-' + Date.now(),
+      timestamp: new Date().toISOString(),
+      username: 'Técnico',
+      ipAddress: '127.0.0.1',
+      action: 'Terminar Sessão Forçada',
+      status: 'Alerta',
+      details: `O técnico encerrou a sessão ativa do utilizador: ${username}`
+    });
+    showToast(`Sessão de ${username} terminada com sucesso!`);
+    loadAllData();
+  };
+
+  const handleClearAllSessions = async () => {
+    if (!window.confirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.')) return;
+    await dbService.clearActiveSessions();
+    await dbService.addAuditLog({
+      id: 'log-' + Date.now(),
+      timestamp: new Date().toISOString(),
+      username: 'Técnico',
+      ipAddress: '127.0.0.1',
+      action: 'Limpeza Geral de Sessões',
+      status: 'Alerta',
+      details: 'Todas as sessões ativas foram limpas pelo técnico.'
+    });
+    showToast('Todas as sessões ativas foram limpas!');
+    loadAllData();
   };
 
   const showToast = (msg: string) => {
@@ -850,6 +886,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
             }`}
           >
             Logins & Auditoria
+          </button>
+          <button
+            onClick={() => setActiveTab('sessions')}
+            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all relative ${
+              activeTab === 'sessions' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
+            }`}
+          >
+            Sessões
+            {activeSessions.length > 0 && (
+              <span className="ml-1 bg-red-500 text-white rounded-full px-1.5 py-0.2 text-[9px]">
+                {activeSessions.length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('cloud_firebase')}
@@ -1824,6 +1873,74 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* --- ACTIVE SESSIONS MANAGEMENT VIEW --- */}
+      {activeTab === 'sessions' && (
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4 animate-fade-in">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Gestão de Sessões Ativas & Conexões</h4>
+              <p className="text-xs text-gray-500">
+                Visualize os operadores e técnicos com sessões abertas no sistema. Encerre sessões órfãs ou limpe acumulados.
+              </p>
+            </div>
+            <button
+              onClick={handleClearAllSessions}
+              className="bg-red-600 hover:bg-red-700 text-white font-bold px-4 py-2 rounded-lg text-xs shadow transition-all flex items-center gap-2"
+            >
+              <span className="material-symbols-outlined text-sm">power_settings_new</span>
+              Limpar Todas as Sessões Órfãs
+            </button>
+          </div>
+
+          <div className="overflow-x-auto text-xs">
+            <table className="w-full text-left border-collapse">
+              <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                <tr>
+                  <th className="p-3">Utilizador / Operador</th>
+                  <th className="p-3">Perfil / Cargo</th>
+                  <th className="p-3">Início da Sessão</th>
+                  <th className="p-3">Endereço IP</th>
+                  <th className="p-3 text-right">Ação</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {activeSessions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="p-6 text-center text-gray-400 italic">
+                      Nenhuma sessão ativa registada no momento.
+                    </td>
+                  </tr>
+                ) : (
+                  activeSessions.map(sess => (
+                    <tr key={sess.id} className="hover:bg-gray-50">
+                      <td className="p-3 font-bold text-gray-800 flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        {sess.username}
+                      </td>
+                      <td className="p-3">
+                        <span className="bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded text-[10px]">
+                          {sess.role}
+                        </span>
+                      </td>
+                      <td className="p-3 font-mono text-gray-500">{new Date(sess.loginTime).toLocaleString()}</td>
+                      <td className="p-3 font-mono text-gray-600">{sess.ipAddress}</td>
+                      <td className="p-3 text-right">
+                        <button
+                          onClick={() => handleTerminateSession(sess.id, sess.username)}
+                          className="bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold px-3 py-1 rounded text-xs transition-all"
+                        >
+                          Terminar Sessão
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

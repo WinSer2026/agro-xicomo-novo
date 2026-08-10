@@ -274,7 +274,12 @@ export class FirebaseDBService {
   public async getActiveSessions(): Promise<ActiveSession[]> { return await this.getAll<ActiveSession>('active_sessions'); }
   public async saveActiveSession(s: ActiveSession): Promise<void> { await this.upsert('active_sessions', s.id, s); }
   public async removeActiveSession(id: string): Promise<void> { await this.deleteRow('active_sessions', id); }
-  public async clearActiveSessions(): Promise<void> {}
+  public async clearActiveSessions(): Promise<void> {
+    const list = await this.getActiveSessions();
+    for (const s of list) {
+      await this.removeActiveSession(s.id);
+    }
+  }
 
   // --- Settings ---
   private getDefaultSettings(): SystemSettings {

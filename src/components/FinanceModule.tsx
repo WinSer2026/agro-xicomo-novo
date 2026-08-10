@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
@@ -204,13 +204,14 @@ export default function FinanceModule() {
     csv += `${totalMpesa},${totalEmola},${totalBank},${totalCash}\n\n`;
     
     csv += `DESEMPENHO INDIVIDUAL DE PRODUTOS\n`;
-    csv += `PRODUTO/SERVICO,PRECO COMPRA,PRECO VENDA,VENDIDO,FATURADO,LUCRO EST.\n`;
+    csv += `PRODUTO/SERVICO,STOCK ANTERIOR,PRECO COMPRA,PRECO VENDA,VENDIDO,FATURADO,LUCRO EST.\n`;
     products.forEach(p => {
       const soldQty = reportSales.reduce((sum, sale) => {
         const item = sale.items.find(it => it.productId === p.id);
         return sum + (item ? item.quantity : 0);
       }, 0);
-      csv += `"${p.name}",${p.buyingPrice},${p.sellingPrice},${soldQty},${soldQty * p.sellingPrice},${soldQty * (p.sellingPrice - p.buyingPrice)}\n`;
+      const stockAnterior = p.stockQty + soldQty;
+      csv += `"${p.name}",${stockAnterior},${p.buyingPrice},${p.sellingPrice},${soldQty},${soldQty * p.sellingPrice},${soldQty * (p.sellingPrice - p.buyingPrice)}\n`;
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -292,10 +293,11 @@ export default function FinanceModule() {
     doc.setTextColor(255, 255, 255);
     doc.text('#', 17, currentY + 5);
     doc.text('PRODUTO / SERVIÇO', 23, currentY + 5);
-    doc.text('P. COMPRA', 95, currentY + 5, { align: 'right' });
-    doc.text('P. VENDA', 120, currentY + 5, { align: 'right' });
-    doc.text('VENDIDO', 145, currentY + 5, { align: 'right' });
-    doc.text('FATURADO', 170, currentY + 5, { align: 'right' });
+    doc.text('STOCK ANT.', 88, currentY + 5, { align: 'right' });
+    doc.text('P. COMPRA', 108, currentY + 5, { align: 'right' });
+    doc.text('P. VENDA', 128, currentY + 5, { align: 'right' });
+    doc.text('VENDIDO', 148, currentY + 5, { align: 'right' });
+    doc.text('FATURADO', 172, currentY + 5, { align: 'right' });
     doc.text('LUCRO', 193, currentY + 5, { align: 'right' });
 
     currentY += 7;
@@ -308,6 +310,7 @@ export default function FinanceModule() {
         const item = sale.items.find(it => it.productId === p.id);
         return sum + (item ? item.quantity : 0);
       }, 0);
+      const stockAnterior = p.stockQty + soldQty;
       const faturado = soldQty * p.sellingPrice;
       const lucro = soldQty * (p.sellingPrice - p.buyingPrice);
 
@@ -324,10 +327,11 @@ export default function FinanceModule() {
         doc.setTextColor(255, 255, 255);
         doc.text('#', 17, currentY + 5);
         doc.text('PRODUTO / SERVIÇO', 23, currentY + 5);
-        doc.text('P. COMPRA', 95, currentY + 5, { align: 'right' });
-        doc.text('P. VENDA', 120, currentY + 5, { align: 'right' });
-        doc.text('VENDIDO', 145, currentY + 5, { align: 'right' });
-        doc.text('FATURADO', 170, currentY + 5, { align: 'right' });
+        doc.text('STOCK ANT.', 88, currentY + 5, { align: 'right' });
+        doc.text('P. COMPRA', 108, currentY + 5, { align: 'right' });
+        doc.text('P. VENDA', 128, currentY + 5, { align: 'right' });
+        doc.text('VENDIDO', 148, currentY + 5, { align: 'right' });
+        doc.text('FATURADO', 172, currentY + 5, { align: 'right' });
         doc.text('LUCRO', 193, currentY + 5, { align: 'right' });
         currentY += 7;
         doc.setFont('helvetica', 'normal');
@@ -343,11 +347,12 @@ export default function FinanceModule() {
       }
 
       doc.text((idx + 1).toString(), 17, currentY + 4);
-      doc.text(p.name.length > 40 ? p.name.substring(0, 38) + '...' : p.name, 23, currentY + 4);
-      doc.text(`${p.buyingPrice.toLocaleString('pt-MZ')} MT`, 95, currentY + 4, { align: 'right' });
-      doc.text(`${p.sellingPrice.toLocaleString('pt-MZ')} MT`, 120, currentY + 4, { align: 'right' });
-      doc.text(`${soldQty} ${p.baseUnit}`, 145, currentY + 4, { align: 'right' });
-      doc.text(`${faturado.toLocaleString('pt-MZ')} MT`, 170, currentY + 4, { align: 'right' });
+      doc.text(p.name.length > 32 ? p.name.substring(0, 30) + '...' : p.name, 23, currentY + 4);
+      doc.text(`${stockAnterior} ${p.baseUnit}`, 88, currentY + 4, { align: 'right' });
+      doc.text(`${p.buyingPrice.toLocaleString('pt-MZ')} MT`, 108, currentY + 4, { align: 'right' });
+      doc.text(`${p.sellingPrice.toLocaleString('pt-MZ')} MT`, 128, currentY + 4, { align: 'right' });
+      doc.text(`${soldQty} ${p.baseUnit}`, 148, currentY + 4, { align: 'right' });
+      doc.text(`${faturado.toLocaleString('pt-MZ')} MT`, 172, currentY + 4, { align: 'right' });
       doc.text(`${lucro.toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
 
       doc.setDrawColor(241, 245, 249);
