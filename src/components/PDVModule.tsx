@@ -1281,13 +1281,17 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
             }
           }
         }
-        if (deductionItems.length > 0 && typeof (dbService as any).deductProductStock === 'function') {
-          await (dbService as any).deductProductStock(deductionItems);
+        if (deductionItems.length > 0 && typeof (dbService as any).addSaleWithStockDeduction === 'function') {
+          await (dbService as any).addSaleWithStockDeduction(newSale, deductionItems);
+        } else {
+          if (deductionItems.length > 0 && typeof (dbService as any).deductProductStock === 'function') {
+            await (dbService as any).deductProductStock(deductionItems);
+          }
+          await dbService.addSale(newSale);
         }
+      } else {
+        await dbService.addSale(newSale);
       }
-
-      // 2. Add Transaction to indexedDB
-      await dbService.addSale(newSale);
 
       // 3. Log Audit Trial
       await dbService.addAuditLog({
@@ -1401,6 +1405,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           // Revert stock if it was FaturaDefinitiva and status wasn't already Cancelada
           if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
             const products = await dbService.getProducts();
+            const restockItems: any[] = [];
             for (const item of sale.items) {
               const prod = products.find(p => p.id === item.productId);
               if (prod && !prod.isService) {
@@ -1408,24 +1413,27 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 if (hasConversion) {
                   if (item.sellingUnit === 'Bulk') {
                     const qtyToAdd = item.quantity;
-                    prod.stockQtyBulk = (prod.stockQtyBulk || 0) + qtyToAdd;
                     const equivalentBaseQty = qtyToAdd * (prod.conversionRate || 1);
-                    prod.stockQty = prod.stockQty + equivalentBaseQty;
+                    restockItems.push({ productId: prod.id, hasConversion: true, sellingUnit: 'Bulk', qtyToAdd, equivalentBaseQty });
                   } else {
                     const qtyToAdd = item.quantity;
-                    prod.stockQtyRetail = (prod.stockQtyRetail || 0) + qtyToAdd;
-                    prod.stockQty = prod.stockQty + qtyToAdd;
+                    restockItems.push({ productId: prod.id, hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
                   }
                 } else {
-                  prod.stockQty = prod.stockQty + item.quantity;
+                  restockItems.push({ productId: prod.id, hasConversion: false, qtyToAdd: item.quantity });
                 }
-                await dbService.saveProduct(prod);
               }
             }
+            if (restockItems.length > 0 && typeof (dbService as any).cancelSaleWithStockRestoration === 'function') {
+              await (dbService as any).cancelSaleWithStockRestoration(sale, restockItems);
+            } else {
+              const updatedSale: Sale = { ...sale, status: 'Cancelada' };
+              await dbService.addSale(updatedSale);
+            }
+          } else {
+            const updatedSale: Sale = { ...sale, status: 'Cancelada' };
+            await dbService.addSale(updatedSale);
           }
-
-          const updatedSale: Sale = { ...sale, status: 'Cancelada' };
-          await dbService.addSale(updatedSale);
           setSales(await dbService.getSales());
           await loadPDVData();
           showToast(`Fatura ${sale.invoiceNumber} cancelada com sucesso.`, 'success');

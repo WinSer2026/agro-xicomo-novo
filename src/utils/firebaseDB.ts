@@ -1,18 +1,47 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, onSnapshot, getDoc, writeBatch, increment } from 'firebase/firestore';
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager,
+  collection, 
+  doc, 
+  setDoc, 
+  getDocs, 
+  deleteDoc, 
+  onSnapshot, 
+  getDoc, 
+  writeBatch, 
+  increment 
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+let dbInstance;
+try {
+  dbInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+  }, firebaseConfig.firestoreDatabaseId);
+} catch (e) {
+  console.warn('[FirebaseDBService] Fallback to standard initializeFirestore without multi-tab persistence:', e);
+  dbInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true
+  }, firebaseConfig.firestoreDatabaseId);
+}
+
+const db = dbInstance;
 
 export class FirebaseDBService {
   private initPromise: Promise<void> | null = null;
   private productsCache: Product[] | null = null;
   private salesCache: Sale[] | null = null;
   private customersCache: Customer[] | null = null;
+  private credentialsCache: UserCredentials[] | null = null;
+  private activeSessionsCache: ActiveSession[] | null = null;
   private unsubscribers: (() => void)[] = [];
 
   public async init(): Promise<void> {
@@ -66,7 +95,37 @@ export class FirebaseDBService {
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (customers):', error);
     }));
-    
+
+    // Realtime credentials listener
+    this.unsubscribers.push(onSnapshot(collection(db, 'credentials'), (snapshot) => {
+      const creds: UserCredentials[] = [];
+      snapshot.forEach(doc => {
+        creds.push(doc.data() as UserCredentials);
+      });
+      if (creds.length > 0) {
+        this.credentialsCache = creds.sort((a, b) => a.username.localeCompare(b.username));
+        safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
+        console.log(`[FirebaseDBService] onSnapshot (credentials): received ${creds.length} users.`);
+        window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'credentials', count: creds.length } }));
+      }
+    }, (error) => {
+      console.error('[FirebaseDBService] onSnapshot error (credentials):', error);
+    }));
+
+    // Realtime active sessions listener (supports 12+ concurrent multi-user sessions)
+    this.unsubscribers.push(onSnapshot(collection(db, 'active_sessions'), (snapshot) => {
+      const sessions: ActiveSession[] = [];
+      snapshot.forEach(doc => {
+        sessions.push(doc.data() as ActiveSession);
+      });
+      this.activeSessionsCache = sessions.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+      safeStorage.setItem('agro_active_sessions_cache', JSON.stringify(this.activeSessionsCache));
+      console.log(`[FirebaseDBService] onSnapshot (active_sessions): ${sessions.length} sessions active.`);
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'active_sessions', count: sessions.length } }));
+    }, (error) => {
+      console.error('[FirebaseDBService] onSnapshot error (active_sessions):', error);
+    }));
+
     return this.initPromise;
   }
 
@@ -241,6 +300,70 @@ export class FirebaseDBService {
     this.salesCache = null; // Invalidate cache so next fetch re-syncs
   }
 
+  public async addSaleWithStockDeduction(sale: Sale, deductionItems: any[]): Promise<void> {
+    const batch = writeBatch(db);
+    // 1. Deduct stock atomically
+    for (const item of deductionItems) {
+      const docRef = doc(db, "products", item.productId);
+      if (item.hasConversion) {
+        if (item.sellingUnit === "Bulk") {
+          batch.update(docRef, { 
+            stockQtyBulk: increment(-item.qtyToReduce), 
+            stockQty: increment(-item.equivalentBaseQty) 
+          });
+        } else {
+          batch.update(docRef, { 
+            stockQtyRetail: increment(-item.qtyToReduce), 
+            stockQty: increment(-item.qtyToReduce) 
+          });
+        }
+      } else {
+        batch.update(docRef, { stockQty: increment(-item.qtyToReduce) });
+      }
+    }
+    // 2. Add sale atomically in the same batch
+    const sanitizedSale = this.sanitizeData({ ...sale, status: sale.status || 'Pendente' });
+    batch.set(doc(db, 'sales', sale.id), sanitizedSale);
+
+    await batch.commit();
+    this.productsCache = null;
+    this.salesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: sale.id } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
+  }
+
+  public async cancelSaleWithStockRestoration(sale: Sale, restockItems: any[]): Promise<void> {
+    const batch = writeBatch(db);
+    // 1. Restock products atomically
+    for (const item of restockItems) {
+      const docRef = doc(db, "products", item.productId);
+      if (item.hasConversion) {
+        if (item.sellingUnit === "Bulk") {
+          batch.update(docRef, { 
+            stockQtyBulk: increment(item.qtyToAdd), 
+            stockQty: increment(item.equivalentBaseQty) 
+          });
+        } else {
+          batch.update(docRef, { 
+            stockQtyRetail: increment(item.qtyToAdd), 
+            stockQty: increment(item.qtyToAdd) 
+          });
+        }
+      } else {
+        batch.update(docRef, { stockQty: increment(item.qtyToAdd) });
+      }
+    }
+    // 2. Update sale status to 'Cancelada' atomically
+    const sanitizedSale = this.sanitizeData({ ...sale, status: 'Cancelada' });
+    batch.set(doc(db, 'sales', sale.id), sanitizedSale);
+
+    await batch.commit();
+    this.productsCache = null;
+    this.salesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: sale.id } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
+  }
+
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
     const list = await this.getAll<LossRecord>('losses');
@@ -271,9 +394,30 @@ export class FirebaseDBService {
   public async addAuditLog(l: AuditLog): Promise<void> { await this.upsert('audit_logs', l.id, l); }
 
   // --- Active Sessions ---
-  public async getActiveSessions(): Promise<ActiveSession[]> { return await this.getAll<ActiveSession>('active_sessions'); }
-  public async saveActiveSession(s: ActiveSession): Promise<void> { await this.upsert('active_sessions', s.id, s); }
-  public async removeActiveSession(id: string): Promise<void> { await this.deleteRow('active_sessions', id); }
+  public async getActiveSessions(): Promise<ActiveSession[]> {
+    if (this.activeSessionsCache && this.activeSessionsCache.length >= 0) {
+      return this.activeSessionsCache;
+    }
+    const list = await this.getAll<ActiveSession>('active_sessions');
+    this.activeSessionsCache = list.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+    return this.activeSessionsCache;
+  }
+  public async saveActiveSession(s: ActiveSession): Promise<void> { 
+    await this.upsert('active_sessions', s.id, s);
+    if (!this.activeSessionsCache) this.activeSessionsCache = [];
+    const idx = this.activeSessionsCache.findIndex(x => x.id === s.id);
+    if (idx >= 0) {
+      this.activeSessionsCache[idx] = s;
+    } else {
+      this.activeSessionsCache.unshift(s);
+    }
+  }
+  public async removeActiveSession(id: string): Promise<void> { 
+    await this.deleteRow('active_sessions', id);
+    if (this.activeSessionsCache) {
+      this.activeSessionsCache = this.activeSessionsCache.filter(x => x.id !== id);
+    }
+  }
   public async clearActiveSessions(): Promise<void> {
     const list = await this.getActiveSessions();
     for (const s of list) {
@@ -310,24 +454,89 @@ export class FirebaseDBService {
 
   // --- Credentials ---
   public async getCredentials(): Promise<UserCredentials[]> {
-    const list = await this.getAll<UserCredentials>('credentials');
-    if (list.length === 0) {
-      const initialCreds: UserCredentials[] = [
-        { id: 'usr-vanda', username: 'Vanda', passwordHash: '2060', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
-        { id: 'usr-salvador', username: 'Salvador', passwordHash: '2000SC', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-        { id: 'usr-nelson', username: 'Nelson', passwordHash: '1987', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
-        { id: 'usr-maria', username: 'Maria', passwordHash: 'Mara', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
-        { id: 'usr-ainara', username: 'Ainara', passwordHash: '131923', role: 'Contabilista', roles: ['Contabilista'], mfaEnabled: false },
-        { id: 'usr-mazive', username: 'Mazive', passwordHash: '0147', role: 'Técnico', roles: ['Técnico'], mfaEnabled: false },
-        { id: 'usr-gestor1', username: 'gestor1', passwordHash: 'gestor123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false }
-      ];
-      await this.upsertBatch('credentials', initialCreds);
-      return initialCreds;
+    const verifiedOfficialCreds: UserCredentials[] = [
+      { id: 'usr-ainira', username: 'Ainira', passwordHash: '131923', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
+      { id: 'usr-maria', username: 'Maria', passwordHash: 'Mara', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
+      { id: 'usr-mazive', username: 'Mazive', passwordHash: '0147', role: 'Técnico', roles: ['Técnico'], mfaEnabled: false },
+      { id: 'usr-nelson', username: 'Nelson', passwordHash: '1987', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
+      { id: 'usr-salvador', username: 'Salvador', passwordHash: '2000SC', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
+      { id: 'usr-vanda', username: 'Vanda', passwordHash: '2060', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
+      { id: 'usr-gestor1', username: 'gestor1', passwordHash: 'gestor123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false }
+    ];
+
+    if (this.credentialsCache && this.credentialsCache.length > 0) {
+      return this.credentialsCache;
     }
-    return list;
+    const cached = safeStorage.getItem('agro_credentials_cache');
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          this.credentialsCache = parsed;
+          return parsed;
+        }
+      } catch (e) {}
+    }
+
+    const list = await this.getAll<UserCredentials>('credentials');
+    if (list && list.length > 0) {
+      // Merge official verified roles if necessary
+      let hasUpdates = false;
+      const merged = [...list];
+      for (const off of verifiedOfficialCreds) {
+        const foundIdx = merged.findIndex(c => c.username.toLowerCase() === off.username.toLowerCase() || (off.username === 'Ainira' && c.username.toLowerCase() === 'ainara'));
+        if (foundIdx >= 0) {
+          // Update role and password if not matching official
+          const current = merged[foundIdx];
+          if (current.role !== off.role || current.passwordHash !== off.passwordHash || current.username !== off.username) {
+            merged[foundIdx] = { ...current, username: off.username, role: off.role, roles: off.roles, passwordHash: off.passwordHash };
+            this.saveCredential(merged[foundIdx]).catch(() => {});
+            hasUpdates = true;
+          }
+        } else {
+          merged.push(off);
+          this.saveCredential(off).catch(() => {});
+          hasUpdates = true;
+        }
+      }
+      this.credentialsCache = merged.sort((a, b) => a.username.localeCompare(b.username));
+      safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
+      return this.credentialsCache;
+    }
+
+    // If cache had items, do NOT overwrite with defaults
+    if (this.credentialsCache && this.credentialsCache.length > 0) {
+      return this.credentialsCache;
+    }
+
+    await this.upsertBatch('credentials', verifiedOfficialCreds);
+    this.credentialsCache = verifiedOfficialCreds;
+    safeStorage.setItem('agro_credentials_cache', JSON.stringify(verifiedOfficialCreds));
+    return verifiedOfficialCreds;
   }
-  public async saveCredential(c: UserCredentials): Promise<void> { await this.upsert('credentials', c.id, c); }
-  public async deleteCredential(id: string): Promise<void> { await this.deleteRow('credentials', id); }
+
+  public async saveCredential(c: UserCredentials): Promise<void> {
+    await this.upsert('credentials', c.id, c);
+    if (!this.credentialsCache) {
+      this.credentialsCache = [];
+    }
+    const idx = this.credentialsCache.findIndex(u => u.id === c.id || u.username.toLowerCase() === c.username.toLowerCase());
+    if (idx >= 0) {
+      this.credentialsCache[idx] = c;
+    } else {
+      this.credentialsCache.push(c);
+    }
+    this.credentialsCache.sort((a, b) => a.username.localeCompare(b.username));
+    safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
+  }
+
+  public async deleteCredential(id: string): Promise<void> {
+    await this.deleteRow('credentials', id);
+    if (this.credentialsCache) {
+      this.credentialsCache = this.credentialsCache.filter(u => u.id !== id);
+      safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
+    }
+  }
 
   // --- Payroll Payments ---
   public async getPayrollPayments(): Promise<PayrollPayment[]> { return await this.getAll<PayrollPayment>('payroll_payments'); }

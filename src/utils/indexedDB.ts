@@ -1212,20 +1212,6 @@ export class IndexedDBService {
         return;
       }
 
-      if (lowerUsername === 'maria') {
-        if (c.role !== 'Operador' || !c.roles?.includes('Operador') || c.roles.length !== 1) {
-          c.role = 'Operador';
-          c.roles = ['Operador'];
-          this.saveCredential(c).catch(err => console.error("Error saving Maria update", err));
-        }
-      } else if (lowerUsername === 'salvador') {
-        if (c.role !== 'Gestor Geral' || !c.roles?.includes('Gestor Geral') || c.roles.length !== 1) {
-          c.role = 'Gestor Geral';
-          c.roles = ['Gestor Geral'];
-          this.saveCredential(c).catch(err => console.error("Error saving Salvador update", err));
-        }
-      }
-
       if (!c.roles || c.roles.length === 0) {
         c.roles = c.role ? (c.role.split(',').map(r => r.trim() as any).filter(Boolean)) : ['Operador'];
       }

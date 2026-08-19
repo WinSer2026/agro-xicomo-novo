@@ -308,14 +308,20 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    const activeSessionId = safeSessionStorage.getItem('agro_session_id');
     safeSessionStorage.removeItem('agro_session_active');
+    safeSessionStorage.removeItem('agro_session_id');
     safeSessionStorage.clear();
     if (currentUser) {
-      // Find and remove session from IndexedDB
-      const sessions = await dbService.getActiveSessions();
-      const userSess = sessions.find(s => s.username === currentUser.username);
-      if (userSess) {
-        await dbService.removeActiveSession(userSess.id);
+      // Remove specific device session without terminating other sessions
+      if (activeSessionId) {
+        await dbService.removeActiveSession(activeSessionId);
+      } else {
+        const sessions = await dbService.getActiveSessions();
+        const userSess = sessions.find(s => s.username === currentUser.username);
+        if (userSess) {
+          await dbService.removeActiveSession(userSess.id);
+        }
       }
 
       await dbService.addAuditLog({

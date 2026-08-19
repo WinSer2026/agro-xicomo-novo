@@ -853,16 +853,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       )}
 
       {/* Navigation Headers and Module Tabs */}
-      <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div>
-          <h3 className="font-headline-md text-headline-md text-primary font-bold">Painel de Controlo do Técnico</h3>
-          <p className="font-body-sm text-body-sm text-gray-500">
-            Administração profunda do sistema, gestão de acessos de cibersegurança e auditoria de facturação comercial.
-          </p>
-        </div>
-
+      <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm flex flex-col md:flex-row justify-end items-start md:items-center gap-4">
         {/* Tab Buttons */}
-        <div className="flex gap-2 bg-gray-100 p-1 rounded-lg">
+        <div className="flex flex-wrap gap-2 bg-gray-100 p-1 rounded-lg">
           <button
             onClick={() => setActiveTab('settings')}
             className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all ${

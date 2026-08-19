@@ -68,22 +68,30 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
           details: 'Bypass de segurança total aplicado com êxito.'
         });
 
-        // Add to active sessions
+        // Add unique session
+        const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
         await dbService.saveActiveSession({
-          id: 'sess-master-' + Date.now(),
+          id: masterSessionId,
           username: 'Mazive',
           role: 'Técnico',
+          roles: ['Técnico'],
           loginTime: new Date().toISOString(),
           ipAddress
         });
+        safeSessionStorage.setItem('agro_session_id', masterSessionId);
 
-        onLoginSuccess({ username: 'Mazive', role: 'Técnico' });
+        onLoginSuccess({ username: 'Mazive', role: 'Técnico', roles: ['Técnico'] });
         return;
       }
 
       // 2. Query normal credentials
       const allCreds = await dbService.getCredentials();
-      const user = allCreds.find(c => c.username.toLowerCase() === username.toLowerCase());
+      const lower = username.trim().toLowerCase();
+      const user = allCreds.find(c => 
+        c.username.toLowerCase() === lower || 
+        (lower === 'ainira' && c.username.toLowerCase() === 'ainara') || 
+        (lower === 'ainara' && c.username.toLowerCase() === 'ainira')
+      );
 
       if (!user || user.passwordHash !== password) {
         // Log failed login attempt
@@ -101,42 +109,10 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      // 3. User Capacity Limits Check
-      const activeSessions = await dbService.getActiveSessions();
       const userRoles = getUserRoles(user);
       const isTech = userRoles.includes('Técnico');
-      
-      if (!isTech) {
-        const activeOps = activeSessions.filter(s => !s.role.includes('Técnico'));
-        if (activeOps.length >= 6) {
-          setError('Excedeu o número máximo de utilizadores');
-          await dbService.addAuditLog({
-            id: 'log-' + Date.now(),
-            timestamp: new Date().toISOString(),
-            username,
-            ipAddress,
-            action: 'Bloqueio de Sessão - Limite Excedido',
-            status: 'Alerta',
-            details: 'Tentativa de login de operador negada devido ao limite de 6 utilizadores ativos.'
-          });
-          return;
-        }
-      } else {
-        const activeTechs = activeSessions.filter(s => s.role.includes('Técnico'));
-        if (activeTechs.length >= 4) {
-          setError('Excedeu o número máximo de técnicos');
-          await dbService.addAuditLog({
-            id: 'log-' + Date.now(),
-            timestamp: new Date().toISOString(),
-            username,
-            ipAddress,
-            action: 'Bloqueio de Sessão - Limite Técnico Excedido',
-            status: 'Alerta',
-            details: 'Tentativa de login de técnico negada devido ao limite de 4 técnicos ativos.'
-          });
-          return;
-        }
-      }
+
+      // 3. Multi-User Concurrency - supports 12+ concurrent active users with individual device sessions
 
       // 4. Técnico requires Mandatory 2FA Setup or Verification
       if (isTech || user.username.toLowerCase() === 'admin') {
@@ -149,7 +125,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      // 5. Operator Successful Login (Direct)
+      // 5. Operator / Gestor Geral Successful Login (Direct)
       await finalizeSession(user, ipAddress);
 
     } catch (err) {
@@ -198,15 +174,17 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
   const finalizeSession = async (user: UserCredentials, ip: string) => {
     const userRoles = getUserRoles(user);
     const roleStr = userRoles.join(', ') || user.role;
+    const sessionId = 'sess-' + user.username.toLowerCase() + '-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
 
     await dbService.saveActiveSession({
-      id: 'sess-' + Date.now(),
+      id: sessionId,
       username: user.username,
       role: roleStr,
       roles: userRoles,
       loginTime: new Date().toISOString(),
       ipAddress: ip
     });
+    safeSessionStorage.setItem('agro_session_id', sessionId);
 
     await dbService.addAuditLog({
       id: 'log-' + Date.now(),
