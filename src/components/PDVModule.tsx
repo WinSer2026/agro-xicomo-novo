@@ -4,10 +4,13 @@ import { createPortal } from 'react-dom';
 import { dbService } from '../utils/firebaseDB';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
-import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF } from '../utils/pdfGenerator';
+import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
 import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import { DateRangeFilter } from './DateRangeFilter';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import * as XLSX from 'xlsx';
 
 interface PDVModuleProps {
   currentUser: { username: string; role: string; roles?: AppRole[] };
@@ -185,8 +188,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     saveCart().catch(err => console.error('Error auto-saving active cart:', err));
   }, [cart, customerName, paymentMethod, documentType, includeIva, customSubtotalDiscount]);
 
-  // Point of Sale Sub-tabs & Daily Sales Report States
+  // Point of Sale Sub-tabs & Periodic / Daily Sales Report States
   const [pdvTab, setPdvTab] = useState<'vendas' | 'relatorios'>('vendas');
+  const defaultRange = getDateRangeFromPreset('Hoje');
+  const [reportStartDate, setReportStartDate] = useState(defaultRange.startDate);
+  const [reportEndDate, setReportEndDate] = useState(defaultRange.endDate);
+  const [reportPreset, setReportPreset] = useState<DateRangePreset>('Hoje');
   const [selectedReportDate, setSelectedReportDate] = useState(() => new Date().toISOString().split('T')[0]);
 
   // Retroactive Sale / Venda Sem Energia / Registo de Venda Antiga Modal States
@@ -226,7 +233,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         quantity: 1,
         unit: product.baseUnit,
         unitPrice: product.sellingPrice,
-        totalPrice: product.sellingPrice
+        totalPrice: product.sellingPrice,
+        category: product.category || 'Outro',
+        costPrice: product.buyingPrice,
+        buyingPrice: product.buyingPrice,
+        isService: product.isService
       };
       setRetroactiveCart(prev => [...prev, newItem]);
     }
@@ -353,6 +364,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
       setShowRetroactiveModal(false);
       setRetroactiveCart([]);
+      setRetroactiveReceiptNo('');
+      setRetroactiveCustomerName('Cliente Geral');
+      setRetroactiveCustomerNuit('');
+      setRetroactiveCustomerAddress('');
+      setRetroactiveSaveCustomer(false);
+      setSelectedRegisteredCustomer('');
+      setRetroactiveProductQuery('');
+      setRetroactivePaymentMethod('Dinheiro');
+      // NOTE: retroactiveDateTime is intentionally PRESERVED across consecutive retroactive entries
       setRetroactiveCompletedSale(newSale);
       showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada! Recibo Xprinter XP 80C gerado.`, 'success');
 
@@ -370,6 +390,17 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const scannerBufferRef = useRef<string>('');
   const lastKeyTimeRef = useRef<number>(0);
+
+  const productsRef = useRef(products);
+  productsRef.current = products;
+
+  const cartRef = useRef(cart);
+  cartRef.current = cart;
+
+  const defaultPrinterRef = useRef(defaultPrinter);
+  defaultPrinterRef.current = defaultPrinter;
+
+  const handleFinalizeSaleRef = useRef<((format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'FaturaProforma') => Promise<void>) | null>(null);
 
   // Auto-print effect is removed in favor of automatic PDF high-fidelity downloads
   useEffect(() => {
@@ -418,8 +449,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               
               // Strict Validation: Only accept valid EAN-13 or confirmed patterns to avoid ghost scans
               const isEAN13 = /^\d{13}$/.test(decodedText);
-              const isEAN8 = /^\d{8}$/.test(decodedText);
-              const isNumeric = /^\d+$/.test(decodedText);
               
               // Checksum validation for EAN-13 if it looks like one
               if (isEAN13) {
@@ -436,7 +465,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               }
 
               // Find matching product by code (case insensitive/trimmed)
-              const matchedProduct = products.find(p => 
+              const currentProds = productsRef.current;
+              const matchedProduct = currentProds.find(p => 
                 p.code.trim().toLowerCase() === decodedText.trim().toLowerCase() ||
                 (p.reference && p.reference.trim().toLowerCase() === decodedText.trim().toLowerCase())
               );
@@ -490,20 +520,31 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         }
       };
     }
-  }, [showScanner, products]);
+  }, [showScanner]);
 
   useEffect(() => {
     loadPDVData();
 
+    let debounceTimer: any = null;
     const handleDbUpdate = (e: any) => {
       const updatedTable = e.detail?.table;
       if (!updatedTable || updatedTable === 'all' || updatedTable === 'products' || updatedTable === 'sales' || updatedTable === 'customers' || updatedTable === 'paused_sales') {
-        loadPDVData();
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          loadPDVData();
+        }, 150);
       }
     };
     window.addEventListener('db-update', handleDbUpdate);
 
-    // Setup key listeners for rapid POS operations (F2 for search, F9 for checkout, F1/F3/F4/F5 for payment methods)
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      window.removeEventListener('db-update', handleDbUpdate);
+    };
+  }, []);
+
+  // Setup key listeners for rapid POS operations (F2 for search, F9 for checkout, F1/F3/F4/F5 for payment methods)
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F1') {
         e.preventDefault();
@@ -532,15 +573,16 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       }
       if (e.key === 'F9') {
         e.preventDefault();
-        handleFinalizeSale(defaultPrinter);
+        if (handleFinalizeSaleRef.current) {
+          handleFinalizeSaleRef.current(defaultPrinterRef.current);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('db-update', handleDbUpdate);
     };
-  }, [products, cart, customerName, paymentMethod, settings, defaultPrinter]);
+  }, []);
 
   // Global hardware barcode scanner keydown listener
   useEffect(() => {
@@ -570,39 +612,28 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         return;
       }
 
-      // A threshold of 100ms safely distinguishes manual typing from hardware scanning
-      console.log(`[Scanner Key] Key: "${e.key}" | Time Diff: ${timeDiff}ms | Current Buffer: "${scannerBufferRef.current}"`);
-
       if (timeDiff > 100) {
         // Slow key interval: Reset scanner buffer with current key
         if (e.key !== 'Enter') {
-          console.log(`[Scanner Buffer Reset] Starting new scan with key: "${e.key}" (Time Diff: ${timeDiff}ms > 100ms)`);
           scannerBufferRef.current = e.key;
         } else {
-          console.log(`[Scanner Buffer Clear] Received slow Enter. Clearing buffer.`);
           scannerBufferRef.current = '';
         }
       } else {
         // Fast key interval: Accumulate keys
         if (e.key !== 'Enter') {
           scannerBufferRef.current += e.key;
-          console.log(`[Scanner Buffer Accumulate] Appended: "${e.key}" | New Buffer: "${scannerBufferRef.current}"`);
         } else {
           // Scanner finished sending and sent 'Enter'
           const rawScannedCode = scannerBufferRef.current.trim();
           const scannedCode = normalizeCode(rawScannedCode);
           scannerBufferRef.current = '';
-          console.log(`[Scanner Trigger Search] Completed input capture. Scanned Code: "${scannedCode}" | Length: ${scannedCode.length}`);
           
           if (scannedCode.length >= 4) {
-            console.log(`[Scanner Search] Query: "${scannedCode}" | Total products in memory: ${products.length}`);
-            
-            const found = products.find(p => {
+            const currentProds = productsRef.current;
+            const found = currentProds.find(p => {
               const codeMatch = p.code.trim().toLowerCase() === scannedCode.toLowerCase();
               const refMatch = p.reference && p.reference.trim().toLowerCase() === scannedCode.toLowerCase();
-              if (codeMatch || refMatch) {
-                console.log(`[Scanner Search MATCH FOUND] Exact match found! Product: "${p.name}" | Code: "${p.code}" | Reference: "${p.reference || 'N/A'}"`);
-              }
               return codeMatch || refMatch;
             });
 
@@ -610,28 +641,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               addToCart(found, 1);
               showToast(`Scanner: ${found.name} adicionado ao carrinho!`, 'success');
             } else {
-              console.warn(`[Scanner Search FAILED] No exact match for scanned code: "${scannedCode}"`);
-              // Diagnostic: Check if we have partial similarity or potential matches
-              const similarProducts = products.filter(p => 
-                p.code.toLowerCase().includes(scannedCode.toLowerCase()) || 
-                scannedCode.toLowerCase().includes(p.code.toLowerCase()) ||
-                (p.reference && p.reference.toLowerCase().includes(scannedCode.toLowerCase()))
-              );
-              if (similarProducts.length > 0) {
-                console.log(`[Scanner Search Diagnostics] Found ${similarProducts.length} potentially related products:`, 
-                  similarProducts.map(p => ({ id: p.id, name: p.name, code: p.code, reference: p.reference }))
-                );
-              } else {
-                console.log(`[Scanner Search Diagnostics] No similar product codes found in catalog. All registered product codes:`, 
-                  products.map(p => p.code)
-                );
-              }
               setUnrecognizedBarcode(scannedCode);
               setSelectedProductToAssociate('');
               showToast(`Código "${scannedCode}" não encontrado. Deseja associá-lo a um produto?`, 'error');
             }
-          } else {
-            console.warn(`[Scanner Search Ignored] Scanned code "${scannedCode}" is too short (length < 4).`);
           }
         }
       }
@@ -641,7 +654,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     return () => {
       window.removeEventListener('keydown', handleGlobalScanner);
     };
-  }, [products, cart, settings]);
+  }, []);
 
   const loadPDVData = async () => {
     await dbService.init();
@@ -1053,7 +1066,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           unitPrice: itemPrice,
           totalPrice: customQty * itemPrice,
           isService: product.isService,
-          sellingUnit: selectedUnit
+          sellingUnit: selectedUnit,
+          category: product.category || 'Outro',
+          costPrice: product.buyingPrice,
+          buyingPrice: product.buyingPrice
         }
       ]);
     }
@@ -1209,11 +1225,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const tot = getTotal();
       const iva = includeIva ? Math.round((sub - disc) * 0.16 * 100) / 100 : 0;
 
-      // Map cart items to finalized sale items with correct net prices after discount
-      const finalizedItems = cart.map(item => ({
-        ...item,
-        totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item)
-      }));
+      // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
+      const finalizedItems = cart.map(item => {
+        const prod = products.find(p => p.id === item.productId);
+        const cost = item.costPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
+        const cat = item.category || prod?.category || 'Outro';
+        return {
+          ...item,
+          category: cat,
+          costPrice: cost,
+          buyingPrice: cost,
+          totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item)
+        };
+      });
 
       // Determine document type from print option
       const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
@@ -1371,6 +1395,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       setIsFinalizing(false);
     }
   };
+  handleFinalizeSaleRef.current = handleFinalizeSale;
 
   const handlePayInvoice = (sale: Sale) => {
     askConfirmation(
@@ -1406,32 +1431,34 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
             const products = await dbService.getProducts();
             const restockItems: any[] = [];
-            for (const item of sale.items) {
-              const prod = products.find(p => p.id === item.productId);
+            for (const item of (sale.items || [])) {
+              if (!item) continue;
+              const prod = products.find(p => String(p.id) === String(item.productId));
               if (prod && !prod.isService) {
-                const hasConversion = !!(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
-                if (hasConversion) {
-                  if (item.sellingUnit === 'Bulk') {
-                    const qtyToAdd = item.quantity;
-                    const equivalentBaseQty = qtyToAdd * (prod.conversionRate || 1);
-                    restockItems.push({ productId: prod.id, hasConversion: true, sellingUnit: 'Bulk', qtyToAdd, equivalentBaseQty });
+                const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+                const qtyToAdd = Number(item.quantity) || 0;
+                if (qtyToAdd > 0) {
+                  if (hasConversion) {
+                    if (item.sellingUnit === 'Bulk') {
+                      const equivalentBaseQty = qtyToAdd * (Number(prod.conversionRate) || 1);
+                      restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Bulk', qtyToAdd, equivalentBaseQty });
+                    } else {
+                      restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+                    }
                   } else {
-                    const qtyToAdd = item.quantity;
-                    restockItems.push({ productId: prod.id, hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+                    restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
                   }
-                } else {
-                  restockItems.push({ productId: prod.id, hasConversion: false, qtyToAdd: item.quantity });
                 }
               }
             }
             if (restockItems.length > 0 && typeof (dbService as any).cancelSaleWithStockRestoration === 'function') {
               await (dbService as any).cancelSaleWithStockRestoration(sale, restockItems);
             } else {
-              const updatedSale: Sale = { ...sale, status: 'Cancelada' };
+              const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
               await dbService.addSale(updatedSale);
             }
           } else {
-            const updatedSale: Sale = { ...sale, status: 'Cancelada' };
+            const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
             await dbService.addSale(updatedSale);
           }
           setSales(await dbService.getSales());
@@ -1451,19 +1478,23 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
         const products = await dbService.getProducts();
         const deductionItems = [];
-        for (const item of sale.items) {
-          const prod = products.find(p => p.id === item.productId);
+        for (const item of (sale.items || [])) {
+          if (!item) continue;
+          const prod = products.find(p => String(p.id) === String(item.productId));
           if (prod && !prod.isService) {
-            const hasConversion = !!(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
-            if (hasConversion) {
-              if (item.sellingUnit === 'Bulk') {
-                const equivalentBaseQty = item.quantity * (prod.conversionRate || 1);
-                deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Bulk', qtyToReduce: item.quantity, equivalentBaseQty });
+            const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+            const qtyToReduce = Number(item.quantity) || 0;
+            if (qtyToReduce > 0) {
+              if (hasConversion) {
+                if (item.sellingUnit === 'Bulk') {
+                  const equivalentBaseQty = qtyToReduce * (Number(prod.conversionRate) || 1);
+                  deductionItems.push({ productId: String(prod.id), hasConversion, sellingUnit: 'Bulk', qtyToReduce, equivalentBaseQty });
+                } else {
+                  deductionItems.push({ productId: String(prod.id), hasConversion, sellingUnit: 'Retail', qtyToReduce });
+                }
               } else {
-                deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Retail', qtyToReduce: item.quantity });
+                deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
               }
-            } else {
-              deductionItems.push({ productId: prod.id, hasConversion: false, qtyToReduce: item.quantity });
             }
           }
         }
@@ -1472,7 +1503,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         }
       }
 
-      const updatedSale: Sale = { ...sale, status: 'Pendente' };
+      const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
       await dbService.addSale(updatedSale);
       setSales(await dbService.getSales());
       await loadPDVData();
@@ -2319,64 +2350,57 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       </div>
     </div>
     ) : (
-        /* Gorgeous High-Fidelity Reports Tab UI */
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 overflow-y-auto custom-scrollbar space-y-6 flex-1 min-h-[500px]">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-150 pb-5">
-            <button
-              type="button"
-              onClick={async () => {
-                const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as any;
-                showToast('A compilar e descarregar relatório diário em formato PDF...', 'success');
-                await downloadDailySalesReportPDF(selectedReportDate, sales, s);
-              }}
-              className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs uppercase tracking-wider rounded-lg shadow-md transition-all cursor-pointer hover:shadow-lg active:scale-[0.98]"
-            >
-              <span className="material-symbols-outlined text-[16px]">download</span>
-              Descarregar Relatório PDF Diário
-            </button>
-            
-            <div className="flex items-center gap-3 bg-gray-50 p-2.5 rounded-lg border border-gray-200 shrink-0">
-              <label className="text-xs font-black text-gray-700 uppercase">Dia de Consulta:</label>
-              <input
-                type="date"
-                value={selectedReportDate}
-                onChange={(e) => {
-                  if (e.target.value) {
-                    setSelectedReportDate(e.target.value);
-                  }
-                }}
-                className="bg-white border border-gray-300 rounded px-2.5 py-1 text-xs font-bold text-gray-800 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => setSelectedReportDate(new Date().toISOString().split('T')[0])}
-                className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded text-[10px] font-black uppercase transition-colors"
-              >
-                Hoje
-              </button>
-            </div>
-          </div>
+        /* High-Fidelity Reports Tab UI with Date Range Filtering (Parte 5) */
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-4 sm:p-6 overflow-y-auto custom-scrollbar space-y-6 flex-1 min-h-[500px]">
+          {/* Universal Date Range Filter */}
+          <DateRangeFilter
+            title="Relatório de Vendas por Período"
+            startDate={reportStartDate}
+            endDate={reportEndDate}
+            preset={reportPreset}
+            onRangeChange={(start, end, preset) => {
+              setReportStartDate(start);
+              setReportEndDate(end);
+              setReportPreset(preset);
+            }}
+            onExportPDF={async () => {
+              const s = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as any;
+              showToast('A compilar e descarregar relatório em formato PDF...', 'success');
+              await downloadPeriodSalesReportPDF(reportStartDate, reportEndDate, sales, s);
+            }}
+            onExportExcel={() => {
+              const salesInRange = sales.filter(s => {
+                if (s.status === 'Cancelada' || s.status === 'canceled') return false;
+                if (!s.date) return false;
+                return isDateInRange(s.date, reportStartDate, reportEndDate);
+              });
+              const dataRows = salesInRange.map(s => ({
+                'Factura': s.invoiceNumber,
+                'Recibo': s.receiptNumber || '',
+                'Data': formatDatePT(s.date),
+                'Cliente': s.customerName,
+                'NUIT': s.customerNuit || '',
+                'Itens': s.items.length,
+                'Subtotal (MT)': s.subtotal,
+                'Desconto (MT)': s.discount,
+                'Total (MT)': s.total,
+                'Método Pagamento': s.paymentMethod,
+                'Operador': s.operatorName,
+                'Estado': s.status
+              }));
+              const ws = XLSX.utils.json_to_sheet(dataRows);
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, ws, 'Vendas');
+              XLSX.writeFile(wb, `VENDAS_${reportStartDate}_a_${reportEndDate}.xlsx`);
+              showToast('Exportação para Excel concluída com sucesso!');
+            }}
+          />
 
           {(() => {
-            const isSameDay = (dateStr: string, targetDateStr: string) => {
-              if (!dateStr || !targetDateStr) return false;
-              if (dateStr.startsWith(targetDateStr)) return true;
-              try {
-                const d = new Date(dateStr);
-                if (!isNaN(d.getTime())) {
-                  const y = d.getFullYear();
-                  const m = String(d.getMonth() + 1).padStart(2, '0');
-                  const day = String(d.getDate()).padStart(2, '0');
-                  return `${y}-${m}-${day}` === targetDateStr;
-                }
-              } catch {}
-              return false;
-            };
-
             const salesOnDate = sales.filter(s => {
               if (s.status === 'Cancelada' || s.status === 'canceled') return false;
               if (!s.date) return false;
-              return isSameDay(s.date, selectedReportDate);
+              return isDateInRange(s.date, reportStartDate, reportEndDate);
             });
             const totalRevenue = salesOnDate.reduce((acc, s) => acc + s.total, 0);
 
@@ -2452,10 +2476,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                     <div>
                       <p className="text-[10px] font-black uppercase text-emerald-200 tracking-wider">Total Faturado</p>
                       <h3 className="text-lg font-black font-mono tracking-tight mt-1">
-                        {totalRevenue.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {totalRevenue.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                       </h3>
                     </div>
-                    <p className="text-[9px] text-emerald-100 font-semibold mt-3">{salesOnDate.length} Vendas Efetuadas</p>
+                    <p className="text-[9px] text-emerald-100 font-semibold mt-3">{salesOnDate.length} Vendas no Período</p>
                   </div>
 
                   {/* Numerário Card */}
@@ -2533,7 +2557,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 {/* Aggregated Sold Products List Table */}
                 <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
                   <div className="bg-gray-50 p-4 border-b border-gray-200 flex justify-between items-center">
-                    <h3 className="text-xs font-black text-gray-700 uppercase tracking-wider">Produtos e Serviços Vendidos</h3>
+                    <h3 className="text-xs font-black text-gray-700 uppercase tracking-wider">Produtos e Serviços Vendidos no Período</h3>
                     <span className="text-[10px] bg-emerald-100 text-emerald-800 font-black px-2 py-0.5 rounded-full uppercase">
                       {aggregatedList.length} Artigos Distintos
                     </span>
@@ -2554,7 +2578,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                         {aggregatedList.length === 0 ? (
                           <tr>
                             <td colSpan={5} className="p-8 text-center text-gray-400 italic">
-                              Sem movimentos registados para o dia {selectedReportDate}.
+                              Sem movimentos registados para o período de {formatDatePT(reportStartDate)} a {formatDatePT(reportEndDate)}.
                             </td>
                           </tr>
                         ) : (
@@ -3899,16 +3923,37 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
                   {/* 1. DATA E HORA REAL DA VENDA */}
                   <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-gray-700 uppercase flex items-center gap-1">
-                      <span className="material-symbols-outlined text-indigo-600 text-[16px]">event</span>
-                      Data e Hora Real <span className="text-red-500">*</span>
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-bold text-gray-700 uppercase flex items-center gap-1">
+                        <span className="material-symbols-outlined text-indigo-600 text-[16px]">event</span>
+                        Data e Hora Real <span className="text-red-500">*</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const now = new Date();
+                          const year = now.getFullYear();
+                          const month = String(now.getMonth() + 1).padStart(2, '0');
+                          const day = String(now.getDate()).padStart(2, '0');
+                          const hours = String(now.getHours()).padStart(2, '0');
+                          const minutes = String(now.getMinutes()).padStart(2, '0');
+                          setRetroactiveDateTime(`${year}-${month}-${day}T${hours}:${minutes}`);
+                        }}
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                        title="Repor para a data e hora actual"
+                      >
+                        Agora
+                      </button>
+                    </div>
                     <input
                       type="datetime-local"
                       value={retroactiveDateTime}
                       onChange={(e) => setRetroactiveDateTime(e.target.value)}
                       className="w-full bg-slate-50 border border-gray-300 rounded-lg px-2.5 py-1.5 text-[11px] font-bold text-gray-800 focus:outline-none focus:border-indigo-600 focus:bg-white transition-all shadow-2xs"
                     />
+                    <p className="text-[9px] text-indigo-700 font-medium">
+                      📌 Data memorizada automaticamente para lançamentos consecutivos.
+                    </p>
                   </div>
 
                   {/* 2. Nº DO RECIBO MANUSCRITO */}
@@ -4349,7 +4394,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               </button>
             </div>
 
-            <div className="pt-3 border-t border-slate-100 flex justify-end">
+            <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setRetroactiveCompletedSale(null);
+                  setShowRetroactiveModal(true);
+                }}
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs rounded-xl transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[18px]">add_circle</span>
+                <span>Lançar Outra Venda Antiga</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setRetroactiveCompletedSale(null)}

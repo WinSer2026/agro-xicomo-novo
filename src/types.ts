@@ -29,6 +29,8 @@ export interface SaleItem {
   quantity: number;
   unit: string;
   unitPrice: number; // in MT
+  costPrice?: number; // Buying cost per unit in MT at the time of sale (permanent snapshot)
+  buyingPrice?: number; // Alias for costPrice
   totalPrice: number; // in MT
   isService?: boolean;
   discountType?: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total';
@@ -44,7 +46,8 @@ export interface PaymentBreakdown {
 export interface Sale {
   id: string;
   invoiceNumber: string; // Sequencial fac/rec (e.g., "FAC-2026-0001")
-  date: string; // ISO String
+  date: string; // Real transaction date (ISO String or YYYY-MM-DD)
+  createdAt?: string; // Timestamp when record was created in system
   customerName: string;
   customerNuit?: string;
   customerAddress?: string;
@@ -94,10 +97,48 @@ export interface LossRecord {
   quantity: number;
   unit: string;
   date: string;
-  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Quebras de Inventário' | 'Outro';
+  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Quebras de Inventário' | 'Perda em Transformação' | 'Outro';
   responsibleEmployeeId?: string;
   justification: string;
-  costValue: number; // total cost lost
+  costValue: number; // total cost lost in MT
+  transformationId?: string;
+}
+
+// --- Product Transformation Module Types (Parte 4) ---
+export interface TransformationItem {
+  id: string;
+  transformationId: string;
+  resultingProductId: string;
+  resultingProductName: string;
+  resultingProductCode?: string;
+  quantity: number; // e.g. 20 packages
+  unitWeight: number; // weight or volume per unit e.g. 1 (kg)
+  unit: string; // 'Kg', 'Pacotes', 'Unidades', 'Litros', etc.
+  calculatedUnitCost: number; // in MT
+  sellingPrice?: number; // suggested selling price in MT
+  createdAt: string;
+}
+
+export interface ProductTransformation {
+  id: string;
+  code: string; // Sequencial (e.g., "TRF-2026-0001")
+  originalProductId: string;
+  originalProductName: string;
+  originalProductCode?: string;
+  originalQuantity: number;
+  originalUnit: string;
+  originalUnitCost: number; // cost per original unit
+  originalTotalCost: number; // total requisition cost
+  items: TransformationItem[];
+  lossQuantity: number; // e.g. 2 kg lost during process
+  lossValue: number; // monetary value of loss
+  date: string; // Date of transformation (YYYY-MM-DD or ISO)
+  operatorId: string;
+  operatorName: string;
+  notes?: string;
+  status: 'Concluída' | 'Pendente' | 'Cancelada';
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export type ContractType = 
@@ -214,9 +255,11 @@ export interface AuditLog {
   timestamp: string;
   username: string;
   ipAddress: string;
-  action: string; // e.g., "Tentativa de login falhada", "Login bem sucedido", "Alteração de stock"
+  action: string; // e.g., "Tentativa de login falhada", "Login bem sucedido", "Alteração de stock", "Transformação de Produto"
   status: 'Sucesso' | 'Falha' | 'Alerta';
+  level?: 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
   details: string;
+  entity?: string;
 }
 
 export type AppRole = 'Técnico' | 'Gestor Geral' | 'Operador' | 'Gestor de Stock' | 'Gestor de RH' | 'Contabilista';

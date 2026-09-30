@@ -1,0 +1,99 @@
+/**
+ * Security, Cryptography & Input Sanitization Helpers
+ * AGRO - XICOMO & SERVIÇOS, LDA
+ */
+
+// Simple robust browser & Node compatible SHA-256 with salt
+export async function hashPassword(password: string): Promise<string> {
+  const salt = generateSalt(16);
+  const hash = await sha256(salt + password);
+  return `sha256:${salt}:${hash}`;
+}
+
+export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  if (!storedHash) return false;
+
+  // Modern salted SHA-256 hash
+  if (storedHash.startsWith('sha256:')) {
+    const parts = storedHash.split(':');
+    if (parts.length === 3) {
+      const salt = parts[1];
+      const expectedHash = parts[2];
+      const computedHash = await sha256(salt + password);
+      return computedHash === expectedHash;
+    }
+  }
+
+  // Legacy plaintext fallback check for backwards compatibility
+  return password === storedHash;
+}
+
+function generateSalt(length: number = 16): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const array = new Uint8Array(length);
+    crypto.getRandomValues(array);
+    for (let i = 0; i < length; i++) {
+      result += chars[array[i] % chars.length];
+    }
+  } else {
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+  }
+  return result;
+}
+
+async function sha256(message: string): Promise<string> {
+  const msgBuffer = new TextEncoder().encode(message);
+
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : (typeof window !== 'undefined' ? window.crypto : undefined);
+
+  if (cryptoObj && cryptoObj.subtle) {
+    const hashBuffer = await cryptoObj.subtle.digest('SHA-256', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Pure JS fallback if crypto.subtle is unavailable
+  let hash = 0;
+  for (let i = 0; i < message.length; i++) {
+    const char = message.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(16).padStart(64, '0');
+}
+
+/**
+ * XSS & HTML Injection Sanitization
+ */
+export function sanitizeString(input: string | null | undefined): string {
+  if (!input) return '';
+  return String(input)
+    .replace(/<[^>]*>?/gm, '') // Strip HTML tags
+    .replace(/[<>'"]/g, '')     // Strip special chars
+    .trim();
+}
+
+/**
+ * Safe Number Sanitization
+ */
+export function sanitizeNumber(input: any, defaultValue: number = 0): number {
+  if (input === null || input === undefined || input === '') return defaultValue;
+  if (typeof input === 'number') return isNaN(input) ? defaultValue : input;
+  const cleaned = String(input).replace(/[^0-9.-]/g, '');
+  const parsed = parseFloat(cleaned);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
+ * Password Strength Policy
+ */
+export function isPasswordStrong(password: string): { strong: boolean; message?: string } {
+  if (!password || password.length < 5) {
+    return { strong: false, message: 'A palavra-passe deve ter pelo menos 5 caracteres.' };
+  }
+  return { strong: true };
+}

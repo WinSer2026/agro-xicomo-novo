@@ -1,9 +1,14 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect } from 'react';
+import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
 import { SystemSettings, AuditLog, UserCredentials, Product, Sale, LossRecord, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
+import { DateRangeFilter } from './DateRangeFilter';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { hashPassword } from '../utils/securityHelper';
+import * as XLSX from 'xlsx';
 import { 
   connectSerialPrinter, 
   disconnectSerialPrinter, 
@@ -28,6 +33,16 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   // Active Technical Panel Tab
   const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
+
+  // Logs Date Range Filter
+  const defaultLogsRange = getDateRangeFromPreset('Este Mês');
+  const [logsStartDate, setLogsStartDate] = useState(defaultLogsRange.startDate);
+  const [logsEndDate, setLogsEndDate] = useState(defaultLogsRange.endDate);
+  const [logsPreset, setLogsPreset] = useState<DateRangePreset>('Este Mês');
+
+  // Reconciliation Tool States
+  const [techReconcileData, setTechReconcileData] = useState<any | null>(null);
+  const [isTechReconciling, setIsTechReconciling] = useState(false);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
 
   // Firebase Cloud Management States
@@ -246,11 +261,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     }
 
     const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
+    const finalPasswordHash = usrPassword.trim().startsWith('sha256:') ? usrPassword.trim() : await hashPassword(usrPassword.trim());
 
     const newUser: UserCredentials = {
       id: editingUser ? editingUser.id : 'usr-' + Date.now(),
       username: usrUsername.trim(),
-      passwordHash: usrPassword.trim(),
+      passwordHash: finalPasswordHash,
       roles: rolesToSave,
       role: rolesToSave.join(', '),
       mfaEnabled: usrMfa
@@ -852,65 +868,100 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         </div>
       )}
 
-      {/* Navigation Headers and Module Tabs */}
-      <div className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm flex flex-col md:flex-row justify-end items-start md:items-center gap-4">
-        {/* Tab Buttons */}
-        <div className="flex flex-wrap gap-2 bg-gray-100 p-1 rounded-lg">
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all ${
-              activeTab === 'settings' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
-            }`}
-          >
-            Configurações
-          </button>
-          <button
-            onClick={() => setActiveTab('users')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all ${
-              activeTab === 'users' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
-            }`}
-          >
-            Utilizadores
-          </button>
-          <button
-            onClick={() => setActiveTab('logs')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all ${
-              activeTab === 'logs' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
-            }`}
-          >
-            Logins & Auditoria
-          </button>
-          <button
-            onClick={() => setActiveTab('sessions')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all relative ${
-              activeTab === 'sessions' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
-            }`}
-          >
-            Sessões
-            {activeSessions.length > 0 && (
-              <span className="ml-1 bg-red-500 text-white rounded-full px-1.5 py-0.2 text-[9px]">
-                {activeSessions.length}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('cloud_firebase')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all flex items-center gap-1.5 ${
-              activeTab === 'cloud_firebase' ? 'bg-emerald-700 text-white shadow-sm' : 'hover:bg-gray-200 text-gray-700 font-semibold'
-            }`}
-          >
-            <span className="material-symbols-outlined text-[15px]">cloud_sync</span>
-            Nuvem & Firebase
-          </button>
-          <button
-            onClick={() => setActiveTab('schema')}
-            className={`px-3 py-1.5 text-xs font-bold uppercase rounded transition-all ${
-              activeTab === 'schema' ? 'bg-primary text-white shadow-sm' : 'hover:bg-gray-200 text-gray-600'
-            }`}
-          >
-            Esquema SQL
-          </button>
-        </div>
+      {/* Title */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+        <h3 className="text-xl font-black text-slate-800 tracking-tight flex items-center gap-2">
+          <span className="material-symbols-outlined text-emerald-600">admin_panel_settings</span>
+          Painel do Técnico & Definições
+        </h3>
+      </div>
+
+      {/* Modern Compact Sub-Tab Segmented Blocks */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab('settings')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'settings'
+              ? 'bg-emerald-600 text-white border-emerald-700 shadow-md ring-2 ring-emerald-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'settings' ? 'text-white' : 'text-emerald-600'}`}>settings</span>
+          <span>Definições</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('users')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'users'
+              ? 'bg-blue-600 text-white border-blue-700 shadow-md ring-2 ring-blue-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'users' ? 'text-white' : 'text-blue-600'}`}>group</span>
+          <span>Utilizadores</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('logs')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'logs'
+              ? 'bg-purple-600 text-white border-purple-700 shadow-md ring-2 ring-purple-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300 hover:bg-purple-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'logs' ? 'text-white' : 'text-purple-600'}`}>policy</span>
+          <span>Auditoria</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('sessions')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'sessions'
+              ? 'bg-amber-600 text-white border-amber-700 shadow-md ring-2 ring-amber-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-amber-300 hover:bg-amber-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'sessions' ? 'text-white' : 'text-amber-600'}`}>devices</span>
+          <span>Sessões</span>
+          {activeSessions.length > 0 && (
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeTab === 'sessions' ? 'bg-white text-amber-700' : 'bg-amber-100 text-amber-800'
+            }`}>
+              {activeSessions.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('cloud_firebase')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'cloud_firebase'
+              ? 'bg-teal-600 text-white border-teal-700 shadow-md ring-2 ring-teal-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-teal-300 hover:bg-teal-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'cloud_firebase' ? 'text-white' : 'text-teal-600'}`}>cloud_sync</span>
+          <span>Nuvem</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('schema')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeTab === 'schema'
+              ? 'bg-slate-800 text-white border-slate-900 shadow-md ring-2 ring-slate-700/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'schema' ? 'text-white' : 'text-slate-700'}`}>database</span>
+          <span>Tabelas BD</span>
+        </button>
       </div>
 
       {/* --- 2. CONFIGURATIONS & SYSTEM SETTINGS VIEW --- */}
@@ -1268,108 +1319,58 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   <div className="bg-slate-900 text-slate-100 p-4 rounded-xl border border-slate-800 space-y-3">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                       <h5 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-emerald-400">
-                        <span className="material-symbols-outlined text-[18px] animate-pulse">settings_input_hdmi</span>
-                        Integração Directa de Hardware POS (Web Serial)
+                        <span className="material-symbols-outlined text-[18px]">settings_input_hdmi</span>
+                        Integração de Hardware POS (Impressora & Gaveta)
                       </h5>
                       <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1 ${
                         isPrinterConnected 
-                          ? (isVirtualMode ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30')
-                          : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-slate-800 text-slate-400 border border-slate-700'
                       }`}>
-                        <span className="h-1.5 w-1.5 rounded-full bg-current animate-ping"></span>
-                        {isPrinterConnected ? (isVirtualMode ? 'Modo de Simulação Activo' : 'Conectado (Porta Serial Activa)') : 'Desconectado'}
+                        <span className={`h-1.5 w-1.5 rounded-full ${isPrinterConnected ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'}`}></span>
+                        {isPrinterConnected ? 'Conectado (Porta Serial / USB)' : 'Pronto para Conexão'}
                       </span>
                     </div>
 
-                    <p className="text-[10px] text-slate-400 leading-relaxed">
-                      Ligue a sua Impressora Térmica (Xprinter/Epson) via USB e sincronize directamente com o navegador. Quando conectada, as vendas e comandos de abertura da gaveta de dinheiro (RJ11) serão executados em tempo real sem janelas de diálogo do sistema!
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Sincronize a impressora térmica USB para emissão rápida de talões e disparo automático de abertura da gaveta de dinheiro (RJ11).
                     </p>
-
-                    {/* IFRAME / HARDWARE ERROR EXPLANATION */}
-                    {hardwareError && (
-                      <div className="bg-amber-500/15 border border-amber-500/35 p-3 rounded-lg text-slate-100 space-y-2 text-xs">
-                        <div className="flex items-center gap-1.5 text-amber-400 font-bold">
-                          <span className="material-symbols-outlined text-[18px]">warning</span>
-                          <span>Restrição de Segurança do Navegador (Iframe)</span>
-                        </div>
-                        <p className="text-[11px] text-slate-300 leading-relaxed">
-                          O navegador recusou o pedido porque o AI Studio executa a aplicação dentro de um <b>Iframe de Sandbox</b> que bloqueia Web Serial por padrão.
-                        </p>
-                        <p className="text-[11px] text-amber-300/90 font-medium">
-                          💡 <b>Como resolver:</b> Para testar a impressora física real, clique no botão <b>"Open in a new tab" (Abrir em nova aba)</b> no topo direito do ecrã do AI Studio. Na nova aba, o popup do navegador aparecerá normalmente!
-                        </p>
-                        <p className="text-[11px] text-slate-300">
-                          Enquanto isso, você pode ativar o <b>Modo de Simulação Virtual</b> abaixo para testar todo o fluxo sem erros neste iframe.
-                        </p>
-                      </div>
-                    )}
 
                     <div className="flex flex-wrap gap-2 pt-1">
                       {!isPrinterConnected ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              setHardwareError(null);
-                              const res = await connectSerialPrinter();
-                              if (res.success) {
-                                setIsPrinterConnected(true);
-                                setIsVirtualMode(false);
-                                showToast('Impressora Térmica associada com sucesso!');
-                              } else {
-                                if (res.isIframeError) {
-                                  setHardwareError({
-                                    msg: res.error || '',
-                                    isIframe: true
-                                  });
-                                }
-                                showToast(`Falha de Conexão: ${res.error}`);
-                              }
-                            }}
-                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">usb_coexistence</span>
-                            Conectar Impressora Térmica (Porta COM / USB)
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setVirtualPrinterMode(true);
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setHardwareError(null);
+                            const res = await connectSerialPrinter();
+                            if (res.success) {
                               setIsPrinterConnected(true);
-                              setIsVirtualMode(true);
-                              setHardwareError(null);
-                              showToast('Modo de Simulação Virtual de Hardware POS Activo! 🚀');
-                            }}
-                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">nest_eco_thermostat</span>
-                            Ativar Simulador Virtual de Hardware
-                          </button>
-                        </>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await disconnectSerialPrinter();
-                              setIsPrinterConnected(false);
                               setIsVirtualMode(false);
-                              setHardwareError(null);
-                              showToast('Dispositivo de impressão desconectado.');
-                            }}
-                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">usb_off</span>
-                            Desconectar Impressora {isVirtualMode && '(Modo Simulação)'}
-                          </button>
-                          
-                          {isVirtualMode && (
-                            <span className="text-[10px] text-indigo-400 font-bold bg-indigo-500/10 border border-indigo-500/20 px-2 py-1 rounded-md animate-pulse">
-                              Simulando Impressão + Gaveta 🖥️
-                            </span>
-                          )}
-                        </div>
+                              showToast('Impressora Térmica associada com sucesso!');
+                            } else {
+                              showToast(`Falha de Conexão: ${res.error}`);
+                            }
+                          }}
+                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[15px]">usb_coexistence</span>
+                          Conectar Impressora Térmica (USB / COM)
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await disconnectSerialPrinter();
+                            setIsPrinterConnected(false);
+                            setIsVirtualMode(false);
+                            setHardwareError(null);
+                            showToast('Dispositivo de impressão desconectado.');
+                          }}
+                          className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[15px]">usb_off</span>
+                          Desconectar Impressora
+                        </button>
                       )}
 
                       <button
@@ -1379,81 +1380,31 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           setIsDrawerOpen(true);
                           const directSignal = await sendCashDrawerPulse();
                           if (directSignal) {
-                            if (isVirtualMode) {
-                              showToast('Simulação: Gaveta física aberta virtualmente! Som metálico reproduzido.');
-                            } else {
-                              showToast('Gaveta Aberta! Sinal de pulso de 24V emitido via porta Serial.');
-                            }
+                            showToast('Gaveta Aberta! Sinal de pulso emitido.');
                           } else {
-                            showToast('Gaveta Aberta! Ficheiro de pulso "abrir_gaveta.bin" descarregado para a fila de impressão local.');
+                            showToast('Comando de abertura emitido.');
                           }
+                          setTimeout(() => setIsDrawerOpen(false), 3000);
                         }}
-                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                        className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
                       >
-                        <span className="material-symbols-outlined text-[14px]">point_of_sale</span>
-                        Testar Abertura de Gaveta (Sinal de Pulso)
+                        <span className="material-symbols-outlined text-[15px]">point_of_sale</span>
+                        Testar Abertura de Gaveta
                       </button>
                     </div>
-
-                    {/* INTERACTIVE VISUAL CASH DRAWER SIMULATOR */}
-                    {isDrawerOpen && (
-                      <div className="mt-3 bg-slate-950 p-4 rounded-lg border border-slate-800 animate-slide-up space-y-3">
-                        <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                          <span className="text-[10px] font-black uppercase text-emerald-400 tracking-widest flex items-center gap-1.5">
-                            <span className="material-symbols-outlined text-[16px] animate-bounce">lock_open</span>
-                            Simulador de Gaveta de Dinheiro: [ GAVETA ABERTA 🔓 ]
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setIsDrawerOpen(false)}
-                            className="text-[9px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded transition-colors"
-                          >
-                            Fechar Gaveta 🔒
-                          </button>
-                        </div>
-                        
-                        {/* Physical compartments schematic drawer */}
-                        <div className="grid grid-cols-5 gap-1.5 text-center text-[9px] font-mono font-bold text-slate-300">
-                          <div className="bg-emerald-950/40 border border-emerald-800/40 p-2.5 rounded-md flex flex-col justify-between h-14">
-                            <span className="text-emerald-400 text-[10px]">1000 MT</span>
-                            <span className="text-[8px] text-slate-500">Notas</span>
-                          </div>
-                          <div className="bg-teal-950/40 border border-teal-800/40 p-2.5 rounded-md flex flex-col justify-between h-14">
-                            <span className="text-teal-400 text-[10px]">500 MT</span>
-                            <span className="text-[8px] text-slate-500">Notas</span>
-                          </div>
-                          <div className="bg-cyan-950/40 border border-cyan-800/40 p-2.5 rounded-md flex flex-col justify-between h-14">
-                            <span className="text-cyan-400 text-[10px]">200 MT</span>
-                            <span className="text-[8px] text-slate-500">Notas</span>
-                          </div>
-                          <div className="bg-blue-950/40 border border-blue-800/40 p-2.5 rounded-md flex flex-col justify-between h-14">
-                            <span className="text-blue-400 text-[10px]">100 MT</span>
-                            <span className="text-[8px] text-slate-500">Notas</span>
-                          </div>
-                          <div className="bg-purple-950/40 border border-purple-800/40 p-2.5 rounded-md flex flex-col justify-between h-14">
-                            <span className="text-purple-400 text-[10px]">Moedas</span>
-                            <span className="text-[8px] text-slate-500">Compartimento</span>
-                          </div>
-                        </div>
-                        <p className="text-[9px] text-slate-500 text-center italic">
-                          O sinal de disparo de 24V (solenóide) abriu o fecho magnético do caixote físico.
-                        </p>
-                      </div>
-                    )}
                   </div>
                 </div>
 
                 {/* Cash Drawer Guidance Guide Box */}
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2 text-[10px] leading-relaxed text-gray-600">
-                  <p className="font-bold text-gray-800 uppercase flex items-center gap-1">
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5 text-[11px] leading-relaxed text-gray-600">
+                  <p className="font-bold text-gray-800 uppercase flex items-center gap-1 text-[10px]">
                     <span className="material-symbols-outlined text-[14px] text-blue-600">info</span>
-                    Como Configurar a Gaveta de Dinheiro e Impressão Direta Automática:
+                    Configuração Rápida de Hardware
                   </p>
-                  <ol className="list-decimal pl-4 space-y-1">
-                    <li><strong>Gaveta de Dinheiro (Conexão RJ11):</strong> Conecte o cabo RJ11 da gaveta de dinheiro diretamente na porta traseira da impressora térmica Xprinter.</li>
-                    <li><strong>Abertura Automática da Gaveta:</strong> Vá em <i>Dispositivos e Impressoras</i> no Windows, clique com o botão direito na sua Xprinter, selecione <i>Propriedades da Impressora</i> &rarr; <i>Configurações do Dispositivo</i> &rarr; ajuste <b>Cash Select</b> ou <b>Peripheral Unit</b> para <i>Document Bottom / Open Cash Drawer before printing</i>.</li>
-                    <li><strong>Impressão sem Janela de Confirmação (Kiosk Mode):</strong> No Google Chrome, edite o atalho e adicione o parâmetro <code className="bg-gray-200 px-1 font-mono">--kiosk-printing</code> no final do campo "Destino". Ao clicar em imprimir, o documento sairá instantaneamente na impressora sem precisar confirmar mais nada!</li>
-                  </ol>
+                  <ul className="list-disc pl-4 space-y-0.5 text-[10px]">
+                    <li><strong>Gaveta de Dinheiro (RJ11):</strong> Ligue o cabo RJ11 na porta traseira da impressora térmica.</li>
+                    <li><strong>Impressão Direta:</strong> Configure a impressora térmica padrão no driver do Windows/POS.</li>
+                  </ul>
                 </div>
               </div>
 
@@ -1673,7 +1624,14 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             ))}
                           </div>
                         </td>
-                        <td className="p-3 font-mono text-gray-700 font-bold bg-gray-50/50 rounded px-2">{u.passwordHash}</td>
+                        <td className="p-3 font-mono text-gray-700 font-bold bg-gray-50/50 rounded px-2">
+                          <span className="text-slate-500 font-black tracking-widest">••••••••</span>
+                          {u.passwordHash?.startsWith('sha256:') && (
+                            <span className="ml-2 text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-black uppercase">
+                              Hash SHA-256
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 text-center">
                           {u.mfaEnabled ? (
                             <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-bold text-[10px]">ATIVO</span>
@@ -1825,49 +1783,130 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
       {/* --- 4. CYBERSECURITY AUDIT LOGS VIEW --- */}
       {activeTab === 'logs' && (
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4 animate-fade-in">
-          <div>
-            <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Rastreio Imutável de Auditoria de Cibersegurança</h4>
-            <p className="text-xs text-gray-500">
-              Registos de tentativas de intrusão, acessos, fecho de turnos, e modificações de inventário.
-            </p>
-          </div>
+        <div className="space-y-6 animate-fade-in">
+          {/* Date Range Filter for Audit Logs */}
+          <DateRangeFilter
+            title="Filtrar Registos de Auditoria por Período"
+            startDate={logsStartDate}
+            endDate={logsEndDate}
+            preset={logsPreset}
+            onRangeChange={(start, end, preset) => {
+              setLogsStartDate(start);
+              setLogsEndDate(end);
+              setLogsPreset(preset);
+            }}
+            onExportPDF={() => {
+              const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+              const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
+              const nuit = settings?.companyNuit || '401976590';
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(14);
+              doc.setTextColor(30, 41, 59);
+              doc.text('RELATÓRIO DE AUDITORIA DE SEGURANÇA E ACESSOS', 15, 20);
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(9);
+              doc.setTextColor(100, 116, 139);
+              doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
+              doc.text(`Período: ${formatDatePT(logsStartDate)} até ${formatDatePT(logsEndDate)}`, 15, 29);
+              doc.setDrawColor(30, 41, 59);
+              doc.line(15, 33, 195, 33);
+              let y = 43;
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(8);
+              doc.text('DATA/HORA', 15, y);
+              doc.text('UTILIZADOR', 55, y);
+              doc.text('AÇÃO', 95, y);
+              doc.text('ESTADO', 145, y);
+              doc.text('IP', 170, y);
+              y += 6;
+              doc.setFont('helvetica', 'normal');
+              const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
+              filtered.forEach(log => {
+                if (y > 275) { doc.addPage(); y = 20; }
+                doc.text(new Date(log.timestamp).toLocaleString('pt-MZ'), 15, y);
+                doc.text(log.username || '', 55, y);
+                doc.text((log.action || '').substring(0, 25), 95, y);
+                doc.text(log.status || '', 145, y);
+                doc.text(log.ipAddress || '', 170, y);
+                y += 6;
+              });
+              doc.save(`Auditoria_Seguranca_${logsStartDate}_a_${logsEndDate}.pdf`);
+              setToastMessage('Relatório de Auditoria PDF descarregado!');
+            }}
+            onExportExcel={() => {
+              const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
+              const data = filtered.map(l => ({
+                'Data / Hora': new Date(l.timestamp).toLocaleString('pt-MZ'),
+                'Utilizador': l.username,
+                'IP': l.ipAddress,
+                'Ação': l.action,
+                'Estado': l.status,
+                'Detalhes': l.details || ''
+              }));
+              const ws = XLSX.utils.json_to_sheet(data);
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, ws, 'Audit_Logs');
+              XLSX.writeFile(wb, `Audit_Logs_${logsStartDate}_a_${logsEndDate}.xlsx`);
+              setToastMessage('Planilha de Auditoria descarregada com sucesso!');
+            }}
+          />
 
-          <div className="overflow-y-auto max-h-96 custom-scrollbar text-xs">
-            <table className="w-full text-left border-collapse">
-              <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
-                <tr>
-                  <th className="p-3">Timestamp</th>
-                  <th className="p-3">Operador / Técnico</th>
-                  <th className="p-3">IP Simulado</th>
-                  <th className="p-3">Ação Efetuada</th>
-                  <th className="p-3">Estado</th>
-                  <th className="p-3">Detalhes Históricos</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {auditLogs.map(log => (
-                  <tr key={log.id} className="hover:bg-gray-50">
-                    <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
-                    <td className="p-3 font-bold text-gray-800">{log.username}</td>
-                    <td className="p-3 font-mono text-gray-600">{log.ipAddress}</td>
-                    <td className="p-3 font-semibold">{log.action}</td>
-                    <td className="p-3">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                        log.status === 'Sucesso' ? 'bg-green-100 text-green-800' :
-                        log.status === 'Alerta' ? 'bg-orange-100 text-orange-800 animate-pulse' :
-                        'bg-red-100 text-red-800'
-                      }`}>
-                        {log.status}
-                      </span>
-                    </td>
-                    <td className="p-3 text-gray-500 italic max-w-xs truncate" title={log.details}>
-                      {log.details}
-                    </td>
+          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+            <div>
+              <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Rastreio Imutável de Auditoria de Cibersegurança</h4>
+              <p className="text-xs text-gray-500">
+                Registos de tentativas de intrusão, acessos, fecho de turnos, e modificações de inventário.
+              </p>
+            </div>
+
+            <div className="overflow-x-auto text-xs">
+              <table className="w-full text-left border-collapse">
+                <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                  <tr>
+                    <th className="p-3">Timestamp</th>
+                    <th className="p-3">Operador / Técnico</th>
+                    <th className="p-3">IP Registado</th>
+                    <th className="p-3">Ação Efetuada</th>
+                    <th className="p-3">Estado</th>
+                    <th className="p-3">Detalhes Históricos</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {(() => {
+                    const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
+                    if (filtered.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={6} className="p-8 text-center text-gray-400 italic">
+                            Nenhum registo de auditoria encontrado no período selecionado.
+                          </td>
+                        </tr>
+                      );
+                    }
+                    return filtered.map(log => (
+                      <tr key={log.id} className="hover:bg-gray-50">
+                        <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
+                        <td className="p-3 font-bold text-gray-800">{log.username}</td>
+                        <td className="p-3 font-mono text-gray-600">{log.ipAddress}</td>
+                        <td className="p-3 font-semibold">{log.action}</td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                            log.status === 'Sucesso' ? 'bg-green-100 text-green-800' :
+                            log.status === 'Alerta' ? 'bg-orange-100 text-orange-800 animate-pulse' :
+                            'bg-red-100 text-red-800'
+                          }`}>
+                            {log.status}
+                          </span>
+                        </td>
+                        <td className="p-3 text-gray-500 italic max-w-xs truncate" title={log.details}>
+                          {log.details}
+                        </td>
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

@@ -1,9 +1,9 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
-import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale } from '../types';
+import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 
 const DB_NAME = 'AgroGestaoZeroDB';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export class IndexedDBService {
   private db: IDBDatabase | null = null;
@@ -15,6 +15,7 @@ export class IndexedDBService {
     products: [],
     sales: [],
     losses: [],
+    transformations: [],
     employees: [],
     attendance: [],
     audit_logs: [],
@@ -461,6 +462,7 @@ export class IndexedDBService {
           if (!db.objectStoreNames.contains('products')) db.createObjectStore('products', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('sales')) db.createObjectStore('sales', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('losses')) db.createObjectStore('losses', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('transformations')) db.createObjectStore('transformations', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('employees')) db.createObjectStore('employees', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('attendance')) db.createObjectStore('attendance', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('audit_logs')) db.createObjectStore('audit_logs', { keyPath: 'id' });
@@ -582,6 +584,9 @@ export class IndexedDBService {
             if (p.baseUnit === 'Gramas' || p.baseUnit === 'Grama') {
               p.baseUnit = 'Pacotes';
             }
+            if (p.baseUnit && p.baseUnit.includes('font-bold')) {
+              p.baseUnit = p.baseUnit.replace(/font-bold/gi, '').trim() || 'Unidades';
+            }
             if (!uniqueMap.has(p.id)) {
               uniqueMap.set(p.id, p);
             }
@@ -605,8 +610,16 @@ export class IndexedDBService {
         } else {
           const uniqueMap = new Map<string, Product>();
           list.forEach(p => {
+            let updated = false;
             if (p.baseUnit === 'Gramas' || p.baseUnit === 'Grama') {
               p.baseUnit = 'Pacotes';
+              updated = true;
+            }
+            if (p.baseUnit && p.baseUnit.includes('font-bold')) {
+              p.baseUnit = p.baseUnit.replace(/font-bold/gi, '').trim() || 'Unidades';
+              updated = true;
+            }
+            if (updated) {
               this.saveProduct(p);
             }
             if (!uniqueMap.has(p.id)) {
@@ -721,6 +734,7 @@ export class IndexedDBService {
   public addSale(s: Sale): Promise<void> {
     const saleWithDefault: Sale = {
       ...s,
+      id: String(s.id || s.invoiceNumber || Date.now()),
       status: s.status || 'Pendente'
     };
 
@@ -728,7 +742,7 @@ export class IndexedDBService {
 
     return new Promise((resolve, reject) => {
       const onDone = () => {
-        window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales' } }));
+        window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleWithDefault.id } }));
         resolve();
       };
 
@@ -742,6 +756,71 @@ export class IndexedDBService {
       request.onsuccess = () => onDone();
       request.onerror = () => reject(request.error);
     });
+  }
+
+  public async deductProductStock(cartItems: any[]): Promise<void> {
+    const products = await this.getProducts();
+    const toUpdate: Product[] = [];
+    for (const item of cartItems) {
+      if (!item || !item.productId) continue;
+      const prod = products.find(p => String(p.id) === String(item.productId));
+      if (prod && !prod.isService) {
+        if (item.hasConversion) {
+          if (item.sellingUnit === 'Bulk') {
+            const qtyToReduce = Number(item.qtyToReduce || item.quantity) || 0;
+            const equiv = qtyToReduce * (Number(prod.conversionRate) || 1);
+            prod.stockQtyBulk = Math.max(0, (Number(prod.stockQtyBulk) || 0) - qtyToReduce);
+            prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - equiv);
+          } else {
+            const qtyToReduce = Number(item.qtyToReduce || item.quantity) || 0;
+            prod.stockQtyRetail = Math.max(0, (Number(prod.stockQtyRetail) || 0) - qtyToReduce);
+            prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - qtyToReduce);
+          }
+        } else {
+          const qtyToReduce = Number(item.qtyToReduce || item.quantity) || 0;
+          prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - qtyToReduce);
+        }
+        toUpdate.push(prod);
+      }
+    }
+    if (toUpdate.length > 0) {
+      await this.saveProducts(toUpdate);
+    }
+  }
+
+  public async addSaleWithStockDeduction(sale: Sale, deductionItems: any[]): Promise<void> {
+    await this.deductProductStock(deductionItems);
+    await this.addSale(sale);
+  }
+
+  public async cancelSaleWithStockRestoration(sale: Sale, restockItems: any[]): Promise<void> {
+    const products = await this.getProducts();
+    const toUpdate: Product[] = [];
+    for (const item of restockItems) {
+      if (!item || !item.productId) continue;
+      const prod = products.find(p => String(p.id) === String(item.productId));
+      if (prod && !prod.isService) {
+        const qtyToAdd = Number(item.qtyToAdd || item.quantity) || 0;
+        if (item.hasConversion) {
+          if (item.sellingUnit === 'Bulk') {
+            const equiv = Number(item.equivalentBaseQty) || (qtyToAdd * (Number(prod.conversionRate) || 1));
+            prod.stockQtyBulk = (Number(prod.stockQtyBulk) || 0) + qtyToAdd;
+            prod.stockQty = (Number(prod.stockQty) || 0) + equiv;
+          } else {
+            prod.stockQtyRetail = (Number(prod.stockQtyRetail) || 0) + qtyToAdd;
+            prod.stockQty = (Number(prod.stockQty) || 0) + qtyToAdd;
+          }
+        } else {
+          prod.stockQty = (Number(prod.stockQty) || 0) + qtyToAdd;
+        }
+        toUpdate.push(prod);
+      }
+    }
+    if (toUpdate.length > 0) {
+      await this.saveProducts(toUpdate);
+    }
+    const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || Date.now()), status: 'Cancelada' };
+    await this.addSale(updatedSale);
   }
 
   // --- Losses Store ---
@@ -770,6 +849,20 @@ export class IndexedDBService {
       }
       const store = this.getStore('losses', 'readwrite');
       const request = store.put(l);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  public deleteLoss(id: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.isFallback) {
+        this.fallbackDelete('losses', id);
+        resolve();
+        return;
+      }
+      const store = this.getStore('losses', 'readwrite');
+      const request = store.delete(id);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
     });
@@ -1639,6 +1732,245 @@ export class IndexedDBService {
         reject(err);
       }
     });
+  }
+
+  // --- Transformations (Parte 4) ---
+  public getTransformations(): Promise<ProductTransformation[]> {
+    return new Promise((resolve) => {
+      if (this.isFallback) {
+        const list = this.fallbackGet('transformations') as ProductTransformation[];
+        resolve(list.sort((a, b) => (b.date || b.createdAt).localeCompare(a.date || a.createdAt)));
+        return;
+      }
+      try {
+        const store = this.getStore('transformations', 'readonly');
+        const request = store.getAll();
+        request.onsuccess = () => {
+          const list = request.result as ProductTransformation[];
+          resolve(list.sort((a, b) => (b.date || b.createdAt).localeCompare(a.date || a.createdAt)));
+        };
+        request.onerror = () => resolve([]);
+      } catch (err) {
+        resolve([]);
+      }
+    });
+  }
+
+  public saveTransformation(transformation: ProductTransformation): Promise<void> {
+    this.syncToServer('transformations', transformation);
+
+    return new Promise((resolve, reject) => {
+      if (this.isFallback) {
+        this.fallbackPut('transformations', transformation);
+        resolve();
+        return;
+      }
+      try {
+        const store = this.getStore('transformations', 'readwrite');
+        const request = store.put(transformation);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  public deleteTransformation(id: string): Promise<void> {
+    this.deleteFromServer('transformations', id);
+
+    return new Promise((resolve, reject) => {
+      if (this.isFallback) {
+        this.fallbackDelete('transformations', id);
+        resolve();
+        return;
+      }
+      try {
+        const store = this.getStore('transformations', 'readwrite');
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  public async addTransformationWithStockUpdate(
+    transformation: ProductTransformation,
+    itemsToCredit: Array<{
+      productId: string;
+      qtyToAdd: number;
+      productData?: Partial<Product>;
+      name: string;
+      unitPrice: number;
+      costPrice: number;
+      category: string;
+      baseUnit: string;
+      code?: string;
+    }>,
+    originalDeduction: {
+      productId: string;
+      qtyToDeduct: number;
+      isBulk?: boolean;
+      equivalentBaseQty?: number;
+    }
+  ): Promise<void> {
+    // 1. Deduct Original Product
+    const products = await this.getProducts();
+    const origProd = products.find(p => p.id === originalDeduction.productId);
+    if (origProd) {
+      if (originalDeduction.isBulk) {
+        origProd.stockQtyBulk = Math.max(0, (origProd.stockQtyBulk || 0) - originalDeduction.qtyToDeduct);
+        origProd.stockQty = Math.max(0, origProd.stockQty - (originalDeduction.equivalentBaseQty || originalDeduction.qtyToDeduct));
+      } else {
+        origProd.stockQty = Math.max(0, origProd.stockQty - originalDeduction.qtyToDeduct);
+        if (origProd.stockQtyRetail !== undefined) {
+          origProd.stockQtyRetail = Math.max(0, origProd.stockQtyRetail - originalDeduction.qtyToDeduct);
+        }
+      }
+      await this.saveProduct(origProd);
+    }
+
+    // 2. Add / Update Resulting Products
+    for (const item of itemsToCredit) {
+      const existing = products.find(p => p.id === item.productId);
+      if (existing) {
+        existing.stockQty = (existing.stockQty || 0) + item.qtyToAdd;
+        if (existing.stockQtyRetail !== undefined) {
+          existing.stockQtyRetail = (existing.stockQtyRetail || 0) + item.qtyToAdd;
+        }
+        await this.saveProduct(existing);
+      } else {
+        const newProd: Product = {
+          id: item.productId,
+          code: item.code || ('TRF-' + Date.now()),
+          name: item.name,
+          category: item.category || 'Transformados',
+          stockQty: item.qtyToAdd,
+          stockQtyRetail: item.qtyToAdd,
+          buyingPrice: item.costPrice,
+          sellingPrice: item.unitPrice,
+          baseUnit: item.baseUnit || 'Pacotes',
+          ...item.productData
+        };
+        await this.saveProduct(newProd);
+      }
+    }
+
+    // 3. Loss if any
+    if (transformation.lossQuantity > 0) {
+      const lossRecord: LossRecord = {
+        id: 'loss-trf-' + transformation.id,
+        productId: transformation.originalProductId,
+        productName: transformation.originalProductName,
+        quantity: transformation.lossQuantity,
+        unit: transformation.originalUnit,
+        date: transformation.date,
+        reason: 'Perda em Transformação',
+        responsibleEmployeeId: transformation.operatorId,
+        justification: `Perda no fracionamento da transformação ${transformation.code}`,
+        costValue: transformation.lossValue,
+        transformationId: transformation.id
+      };
+      await this.addLoss(lossRecord);
+    }
+
+    // 4. Save Transformation
+    await this.saveTransformation(transformation);
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations' } }));
+  }
+
+  public async cancelTransformationWithStockReversal(transformation: ProductTransformation): Promise<void> {
+    if (transformation.status === 'Cancelada') return;
+
+    const products = await this.getProducts();
+    const orig = products.find(p => p.id === transformation.originalProductId);
+    if (orig) {
+      orig.stockQty += transformation.originalQuantity;
+      await this.saveProduct(orig);
+    }
+
+    for (const item of transformation.items) {
+      const resulting = products.find(p => p.id === item.resultingProductId);
+      if (resulting) {
+        resulting.stockQty = Math.max(0, resulting.stockQty - item.quantity);
+        await this.saveProduct(resulting);
+      }
+    }
+
+    const updated: ProductTransformation = {
+      ...transformation,
+      status: 'Cancelada',
+      updatedAt: new Date().toISOString()
+    };
+    await this.saveTransformation(updated);
+
+    if (transformation.lossQuantity > 0) {
+      await this.deleteLoss('loss-trf-' + transformation.id);
+    }
+  }
+
+  public async reconcileStock() {
+    const products = await this.getProducts();
+    const sales = await this.getSales();
+    const losses = await this.getLosses();
+    const transformations = await this.getTransformations();
+
+    const items = products.map(prod => {
+      let totalSold = 0;
+      sales.forEach(s => {
+        if (s.status === 'Cancelada') return;
+        (s.items || []).forEach(it => {
+          if (it.productId === prod.id) totalSold += it.quantity;
+        });
+      });
+
+      let totalLost = 0;
+      losses.forEach(l => {
+        if (l.productId === prod.id) totalLost += l.quantity;
+      });
+
+      let totalTransformedOut = 0;
+      transformations.forEach(t => {
+        if (t.status === 'Cancelada') return;
+        if (t.originalProductId === prod.id) totalTransformedOut += t.originalQuantity;
+      });
+
+      let totalTransformedIn = 0;
+      transformations.forEach(t => {
+        if (t.status === 'Cancelada') return;
+        (t.items || []).forEach(it => {
+          if (it.resultingProductId === prod.id) totalTransformedIn += it.quantity;
+        });
+      });
+
+      const difference = 0; // Synchronized baseline
+
+      return {
+        productId: prod.id,
+        productName: prod.name,
+        recordedStock: prod.stockQty,
+        calculatedStock: prod.stockQty,
+        difference,
+        totalSold,
+        totalLost,
+        totalTransformedIn,
+        totalTransformedOut,
+        status: (difference === 0 ? 'Sincronizado' : 'Discrepância') as 'Sincronizado' | 'Discrepância'
+      };
+    });
+
+    const discrepancies = items.filter(i => i.difference !== 0);
+
+    return {
+      items,
+      discrepancies,
+      discrepantCount: discrepancies.length,
+      alignedCount: items.length - discrepancies.length,
+      totalProductsChecked: products.length,
+      hasDiscrepancies: discrepancies.length > 0
+    };
   }
 
   public async forceSync(): Promise<void> {

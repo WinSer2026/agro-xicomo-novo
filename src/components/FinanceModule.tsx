@@ -1,23 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
-import { Sale, LossRecord, Product, AuditLog, SystemSettings } from '../types';
+import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import { DateRangeFilter } from './DateRangeFilter';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { REPORT_CATEGORIES, matchCategory } from '../utils/categoryHelper';
 
 export default function FinanceModule() {
   const [sales, setSales] = useState<Sale[]>([]);
   const [losses, setLosses] = useState<LossRecord[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [transformations, setTransformations] = useState<ProductTransformation[]>([]);
+  const [payrollPayments, setPayrollPayments] = useState<PayrollPayment[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [toastMessage, setToastMessage] = useState('');
   const [selectedRange, setSelectedRange] = useState<'Day' | 'Week' | 'Month' | 'Year' | '3Y' | '5Y' | '10Y'>('Month');
+
+  // Universal Date Range States (Parte 5)
+  const defaultRange = getDateRangeFromPreset('Este Mês');
+  const [startDate, setStartDate] = useState(defaultRange.startDate);
+  const [endDate, setEndDate] = useState(defaultRange.endDate);
+  const [datePreset, setDatePreset] = useState<DateRangePreset>('Este Mês');
   
   // Sub-tabs in Accounting & Finance
-  const [activeSubTab, setActiveSubTab] = useState<'dashboard' | 'reports' | 'ledger' | 'alerts' | 'auditoria'>('dashboard');
+  const [activeSubTab, setActiveSubTab] = useState<'dashboard' | 'reports' | 'ledger' | 'transformacoes' | 'alerts' | 'auditoria'>('dashboard');
   
   // POS Reports Compilation States
   const [reportPeriod, setReportPeriod] = useState<'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual'>('Mensal');
@@ -26,6 +37,7 @@ export default function FinanceModule() {
   useEffect(() => {
     loadFinancials();
 
+    let debounceTimer: any = null;
     const handleDbUpdate = (e: any) => {
       const updatedTable = e.detail?.table;
       if (
@@ -35,27 +47,41 @@ export default function FinanceModule() {
         updatedTable === 'losses' ||
         updatedTable === 'products' ||
         updatedTable === 'audit_logs' ||
-        updatedTable === 'settings'
+        updatedTable === 'settings' ||
+        updatedTable === 'transformations' ||
+        updatedTable === 'payroll_payments'
       ) {
-        loadFinancials();
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          loadFinancials();
+        }, 150);
       }
     };
     window.addEventListener('db-update', handleDbUpdate);
-    return () => window.removeEventListener('db-update', handleDbUpdate);
-  }, [selectedRange]);
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      window.removeEventListener('db-update', handleDbUpdate);
+    };
+  }, []);
 
   const loadFinancials = async () => {
     await dbService.init();
-    const salesList = await dbService.getSales();
-    const lossesList = await dbService.getLosses();
-    const prodsList = await dbService.getProducts();
-    const logsList = await dbService.getAuditLogs();
-    const config = await dbService.getSettings();
+    const [salesList, lossesList, prodsList, logsList, config, trfList, payrollList] = await Promise.all([
+      dbService.getSales(),
+      dbService.getLosses(),
+      dbService.getProducts(),
+      dbService.getAuditLogs(),
+      dbService.getSettings(),
+      dbService.getTransformations(),
+      dbService.getPayrollPayments()
+    ]);
     setSales(salesList);
     setLosses(lossesList);
     setProducts(prodsList);
     setAuditLogs(logsList);
     setSettings(config);
+    setTransformations(trfList);
+    setPayrollPayments(payrollList);
   };
 
   const showToast = (msg: string) => {
@@ -63,24 +89,35 @@ export default function FinanceModule() {
     setTimeout(() => setToastMessage(''), 3000);
   };
 
-  // 1. Math formulas for calculations
-  const totalGrossSales = sales.reduce((acc, s) => acc + s.total, 0);
-  const totalLossesVal = losses.reduce((acc, l) => acc + l.costValue, 0);
+  // 1. Math formulas for calculations based on active Date Range (Parte 5 & Parte 7)
+  const filteredSales = sales.filter(s => s.status !== 'Cancelada' && isDateInRange(s.date, startDate, endDate));
+  const filteredLosses = losses.filter(l => isDateInRange(l.date, startDate, endDate));
+  const filteredTransformations = transformations.filter(t => t.status !== 'Cancelada' && isDateInRange(t.date || t.createdAt, startDate, endDate));
+  const filteredPayroll = payrollPayments.filter(p => isDateInRange(p.paymentDate || (p.month + '-01'), startDate, endDate));
 
-  // Calculate actual buying cost from products database
-  const totalCost = sales.reduce((acc, sale) => {
-    return acc + sale.items.reduce((sum, item) => {
+  const totalGrossSales = filteredSales.reduce((acc, s) => acc + s.total, 0);
+  const totalLossesVal = filteredLosses.reduce((acc, l) => acc + l.costValue, 0);
+  const totalPayrollVal = filteredPayroll.reduce((acc, p) => acc + p.finalNetWage, 0);
+
+  // Calculate actual buying cost using permanent snapshot costPrice on sale items (Parte 3 - 3.1.3)
+  const totalCost = filteredSales.reduce((acc, sale) => {
+    return acc + (sale.items || []).reduce((sum, item) => {
       const prod = products.find(p => p.id === item.productId);
-      const buyPrice = prod ? prod.buyingPrice : (item.unitPrice * 0.6); // default to 60% of sale price if product missing
+      const buyPrice = item.costPrice ?? item.buyingPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
       return sum + (buyPrice * item.quantity);
     }, 0);
   }, 0);
 
   const totalProfit = Math.max(0, totalGrossSales - totalCost);
-  const netCommercialMargin = Math.max(0, totalGrossSales - totalCost - totalLossesVal);
+  const netCommercialMargin = Math.max(0, totalGrossSales - totalCost - totalLossesVal - totalPayrollVal);
   const stockAlerts = products.filter(p => p.stockQty <= 10);
-  const avgTicket = sales.length > 0 ? (totalGrossSales / sales.length) : 0;
-  const pendingSyncCount = sales.filter(s => !s.synced).length;
+  const avgTicket = filteredSales.length > 0 ? (totalGrossSales / filteredSales.length) : 0;
+  const pendingSyncCount = filteredSales.filter(s => !s.synced).length;
+
+  // Transformation Accounting Totals (Parte 4 - 4.4)
+  const trfOriginalCost = filteredTransformations.reduce((sum, t) => sum + t.originalTotalCost, 0);
+  const trfResultingCost = filteredTransformations.reduce((sum, t) => sum + t.items.reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0), 0);
+  const trfLossesVal = filteredTransformations.reduce((sum, t) => sum + t.lossValue, 0);
 
   // Monthly Sales Chart Data (Mocking current and last 5 months)
   const monthlySales = [
@@ -164,20 +201,19 @@ export default function FinanceModule() {
     XLSX.utils.book_append_sheet(workbook, wsProducts, 'Vendas por Produto');
 
     // Sheet 3: Category Analysis
-    const categories = ['Semente', 'Adubo', 'Quimico', 'Ferramenta', 'Servico', 'Outro'];
-    const categoryData = categories.map(cat => {
+    const categoryData = REPORT_CATEGORIES.map(cat => {
       const totalAmt = reportSales.reduce((sum, sale) => {
-        return sum + sale.items.reduce((itemSum, item) => {
+        return sum + (sale.items || []).reduce((itemSum, item) => {
           const p = products.find(prod => prod.id === item.productId);
-          const pCat = (p ? p.category : item.category) || 'Outro';
-          if (pCat.toLowerCase().includes(cat.toLowerCase())) {
+          const pCat = item.category || p?.category || 'Outro';
+          if (matchCategory(pCat, cat.key)) {
             return itemSum + (item.unitPrice * item.quantity);
           }
           return itemSum;
         }, 0);
       }, 0);
       return {
-        'Categoria': cat.toUpperCase(),
+        'Categoria': cat.label,
         'Faturação Total (MT)': totalAmt
       };
     });
@@ -223,6 +259,10 @@ export default function FinanceModule() {
     link.click();
     document.body.removeChild(link);
     showToast('Planilha CSV de Relatório Periódico Descarregada!');
+  };
+
+  const handleExportFinancePDF = () => {
+    handleExportReportPDF();
   };
 
   const handleExportReportPDF = () => {
@@ -392,14 +432,14 @@ export default function FinanceModule() {
     doc.setFontSize(7.5);
     doc.setTextColor(51, 65, 85);
 
-    const categories = ['Semente', 'Adubo', 'Quimico', 'Ferramenta', 'Servico', 'Outro'];
+    const categories = REPORT_CATEGORIES;
     let totalCatAmt = 0;
     categories.forEach((cat, idx) => {
       const totalAmt = reportSales.reduce((sum, sale) => {
-        return sum + sale.items.reduce((itemSum, item) => {
+        return sum + (sale.items || []).reduce((itemSum, item) => {
           const p = products.find(prod => prod.id === item.productId);
-          const pCat = (p ? p.category : item.category) || 'Outro';
-          if (pCat.toLowerCase().includes(cat.toLowerCase())) {
+          const pCat = item.category || p?.category || 'Outro';
+          if (matchCategory(pCat, cat.key)) {
             return itemSum + (item.unitPrice * item.quantity);
           }
           return itemSum;
@@ -415,7 +455,7 @@ export default function FinanceModule() {
       }
 
       doc.setFont('helvetica', 'bold');
-      doc.text(cat.toUpperCase(), 17, currentY + 4);
+      doc.text(cat.label, 17, currentY + 4);
       doc.setFont('helvetica', 'normal');
       doc.text(`${totalAmt.toLocaleString('pt-MZ')} MT`, 193, currentY + 4, { align: 'right' });
 
@@ -1019,104 +1059,116 @@ export default function FinanceModule() {
 
   return (
     <div className="space-y-6" id="finance_module">
-      {/* Time Horizon Header and Module Description */}
-      <div className="bg-white p-5 border border-gray-200 rounded-2xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h3 className="text-xl font-bold text-slate-800 tracking-tight flex items-center gap-2">
-            <span className="material-symbols-outlined text-emerald-600">account_balance_wallet</span>
-            Gestão Financeira, Contabilidade e Relatórios POS
-          </h3>
-          <p className="text-xs text-gray-500 mt-1">
-            Painel consolidado de desempenho comercial, geração de relatórios periódicos de caixa e auditoria de cibersegurança do ERP AGRO - XICOMO & SERVIÇOS, LDA.
-          </p>
-        </div>
-
-        {/* Global Range Filter for Ledger / Analytics */}
-        {activeSubTab === 'ledger' && (
-          <div className="flex gap-1 bg-slate-100 p-1 rounded-lg self-start">
-            {(['Day', 'Week', 'Month', 'Year', '3Y', '5Y', '10Y'] as const).map(range => (
-              <button
-                key={range}
-                onClick={() => setSelectedRange(range)}
-                className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
-                  selectedRange === range
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-gray-600 hover:bg-slate-200'
-                }`}
-              >
-                {range === 'Day' ? 'Dia' :
-                 range === 'Week' ? 'Semana' :
-                 range === 'Month' ? 'Mês' :
-                 range === 'Year' ? 'Ano' :
-                 range}
-              </button>
-            ))}
-          </div>
-        )}
+      {/* Title */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+        <h3 className="text-xl font-black text-slate-800 tracking-tight flex items-center gap-2">
+          <span className="material-symbols-outlined text-emerald-600">account_balance_wallet</span>
+          Contabilidade & Finanças
+        </h3>
       </div>
 
-      {/* Modern Sub-Tab Segmented Selector */}
-      <div className="flex flex-wrap gap-1 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+      {/* Modern Compact Sub-Tab Segmented Blocks */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <button
+          type="button"
           onClick={() => setActiveSubTab('dashboard')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
             activeSubTab === 'dashboard'
-              ? 'bg-white text-emerald-700 shadow-sm font-black'
-              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+              ? 'bg-emerald-600 text-white border-emerald-700 shadow-md ring-2 ring-emerald-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50'
           }`}
         >
-          <span className="material-symbols-outlined text-[18px]">dashboard</span>
-          Painel de Desempenho
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'dashboard' ? 'text-white' : 'text-emerald-600'}`}>dashboard</span>
+          <span>Resultados (DRE)</span>
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveSubTab('reports')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
             activeSubTab === 'reports'
-              ? 'bg-white text-emerald-700 shadow-sm font-black'
-              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+              ? 'bg-blue-600 text-white border-blue-700 shadow-md ring-2 ring-blue-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50/50'
           }`}
         >
-          <span className="material-symbols-outlined text-[18px]">receipt_long</span>
-          Relatórios do POS
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'reports' ? 'text-white' : 'text-blue-600'}`}>receipt_long</span>
+          <span>Relatórios POS</span>
         </button>
 
         <button
+          type="button"
+          onClick={() => setActiveSubTab('transformacoes')}
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
+            activeSubTab === 'transformacoes'
+              ? 'bg-purple-600 text-white border-purple-700 shadow-md ring-2 ring-purple-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300 hover:bg-purple-50/50'
+          }`}
+        >
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'transformacoes' ? 'text-white' : 'text-purple-600'}`}>call_split</span>
+          <span>Transformações</span>
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveSubTab('ledger')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
             activeSubTab === 'ledger'
-              ? 'bg-white text-emerald-700 shadow-sm font-black'
-              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+              ? 'bg-teal-600 text-white border-teal-700 shadow-md ring-2 ring-teal-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-teal-300 hover:bg-teal-50/50'
           }`}
         >
-          <span className="material-symbols-outlined text-[18px]">analytics</span>
-          Livro de Vendas & Gráficos
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'ledger' ? 'text-white' : 'text-teal-600'}`}>analytics</span>
+          <span>Livro de Caixa</span>
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveSubTab('alerts')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
             activeSubTab === 'alerts'
-              ? 'bg-white text-red-700 shadow-sm font-black'
-              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+              ? 'bg-amber-600 text-white border-amber-700 shadow-md ring-2 ring-amber-500/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-amber-300 hover:bg-amber-50/50'
           }`}
         >
-          <span className="material-symbols-outlined text-[18px] text-red-500">warning</span>
-          Alertas de Stock ({stockAlerts.length})
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'alerts' ? 'text-white' : 'text-amber-600'}`}>warning</span>
+          <span>Alertas Stock</span>
+          {stockAlerts.length > 0 && (
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+              activeSubTab === 'alerts' ? 'bg-white text-amber-700' : 'bg-amber-100 text-amber-800'
+            }`}>
+              {stockAlerts.length}
+            </span>
+          )}
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveSubTab('auditoria')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
             activeSubTab === 'auditoria'
-              ? 'bg-white text-slate-800 shadow-sm font-black'
-              : 'text-slate-600 hover:bg-white/50 hover:text-slate-900'
+              ? 'bg-slate-800 text-white border-slate-900 shadow-md ring-2 ring-slate-700/20'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
           }`}
         >
-          <span className="material-symbols-outlined text-[18px]">security</span>
-          Auditoria de Segurança
+          <span className={`material-symbols-outlined text-[17px] ${activeSubTab === 'auditoria' ? 'text-white' : 'text-slate-700'}`}>security</span>
+          <span>Segurança</span>
         </button>
       </div>
+
+      {/* Date Range Filter for Financial Analysis */}
+      <DateRangeFilter
+        title="Período de Análise Financeira & Contabilística"
+        startDate={startDate}
+        endDate={endDate}
+        preset={datePreset}
+        onRangeChange={(start, end, preset) => {
+          setStartDate(start);
+          setEndDate(end);
+          setDatePreset(preset);
+        }}
+        onExportPDF={handleExportFinancePDF}
+        onExportExcel={handleExportFinanceDashboardExcel}
+      />
 
       {/* --- SUB-TAB 1: PAINEL DE DESEMPENHO (DASHBOARD - IMAGE 2) --- */}
       {activeSubTab === 'dashboard' && (
@@ -1278,43 +1330,49 @@ export default function FinanceModule() {
               {/* Centered Donut Hole SVG Chart */}
               {(() => {
                 const getCategoryBreakdown = () => {
-                  const categories: { [key: string]: number } = {};
+                  const breakdown: Record<string, number> = {};
                   sales.forEach(sale => {
-                    sale.items.forEach(item => {
+                    (sale.items || []).forEach(item => {
                       const prod = products.find(p => p.id === item.productId);
-                      const cat = (prod ? prod.category : item.category) || 'Outro';
+                      const cat = item.category || prod?.category || 'Outro';
                       const amount = item.unitPrice * item.quantity;
-                      categories[cat] = (categories[cat] || 0) + amount;
+                      
+                      const matchedCat = REPORT_CATEGORIES.find(c => matchCategory(cat, c.key)) || REPORT_CATEGORIES[REPORT_CATEGORIES.length - 1];
+                      breakdown[matchedCat.key] = (breakdown[matchedCat.key] || 0) + amount;
                     });
                   });
-                  return categories;
+                  return breakdown;
                 };
 
                 const catData = getCategoryBreakdown();
                 const totalCatAmt = Object.values(catData).reduce((a, b) => a + b, 0);
                 const hasSalesData = sales.length > 0 && totalCatAmt > 0;
 
-                const getCatPercent = (catName: string, defaultVal: number) => {
+                const getCatPercent = (key: string, defaultVal: number) => {
                   if (!hasSalesData) return defaultVal;
-                  const matchedKey = Object.keys(catData).find(k => k.toLowerCase().includes(catName.toLowerCase()));
-                  if (!matchedKey) return 0;
-                  return Math.round((catData[matchedKey] / totalCatAmt) * 100);
+                  return Math.round(((catData[key] || 0) / totalCatAmt) * 100);
                 };
 
-                const sementesPct = getCatPercent('semente', 60);
-                const adubosPct = getCatPercent('adubo', 25);
-                const servicosPct = getCatPercent('serviço', 15);
+                const quimicosPct = getCatPercent('quimicos', 35);
+                const sementesPct = getCatPercent('sementes', 30);
+                const adubosPct = getCatPercent('adubos', 20);
+                const ferramentasPct = getCatPercent('ferramentas', 10);
+                const outrosPct = Math.max(0, 100 - (quimicosPct + sementesPct + adubosPct + ferramentasPct));
 
                 const radius = 35;
                 const circ = 2 * Math.PI * radius;
 
+                const strokeQuimicos = (quimicosPct / 100) * circ;
                 const strokeSementes = (sementesPct / 100) * circ;
                 const strokeAdubos = (adubosPct / 100) * circ;
-                const strokeServicos = (servicosPct / 100) * circ;
+                const strokeFerramentas = (ferramentasPct / 100) * circ;
+                const strokeOutros = (outrosPct / 100) * circ;
 
-                const offsetSementes = 0;
-                const offsetAdubos = strokeSementes;
-                const offsetServicos = strokeSementes + strokeAdubos;
+                const offsetQuimicos = 0;
+                const offsetSementes = strokeQuimicos;
+                const offsetAdubos = strokeQuimicos + strokeSementes;
+                const offsetFerramentas = strokeQuimicos + strokeSementes + strokeAdubos;
+                const offsetOutros = strokeQuimicos + strokeSementes + strokeAdubos + strokeFerramentas;
 
                 return (
                   <div className="flex flex-col items-center space-y-6 pt-4">
@@ -1324,14 +1382,29 @@ export default function FinanceModule() {
                         {/* Underlay ring */}
                         <circle cx="50" cy="50" r={radius} fill="transparent" stroke="#F1F5F9" strokeWidth="12" />
                         
-                        {/* Sementes Segment */}
+                        {/* Químicos Segment (Purple) */}
+                        {quimicosPct > 0 && (
+                          <circle
+                            cx="50"
+                            cy="50"
+                            r={radius}
+                            fill="transparent"
+                            stroke="#7C3AED"
+                            strokeWidth="12"
+                            strokeDasharray={`${strokeQuimicos} ${circ}`}
+                            strokeDashoffset={-offsetQuimicos}
+                            className="transition-all duration-1000 ease-out"
+                          />
+                        )}
+
+                        {/* Sementes Segment (Emerald) */}
                         {sementesPct > 0 && (
                           <circle
                             cx="50"
                             cy="50"
                             r={radius}
                             fill="transparent"
-                            stroke="#006A4E"
+                            stroke="#10B981"
                             strokeWidth="12"
                             strokeDasharray={`${strokeSementes} ${circ}`}
                             strokeDashoffset={-offsetSementes}
@@ -1339,14 +1412,14 @@ export default function FinanceModule() {
                           />
                         )}
 
-                        {/* Adubos Segment */}
+                        {/* Adubos Segment (Amber) */}
                         {adubosPct > 0 && (
                           <circle
                             cx="50"
                             cy="50"
                             r={radius}
                             fill="transparent"
-                            stroke="#D97706"
+                            stroke="#F59E0B"
                             strokeWidth="12"
                             strokeDasharray={`${strokeAdubos} ${circ}`}
                             strokeDashoffset={-offsetAdubos}
@@ -1354,17 +1427,32 @@ export default function FinanceModule() {
                           />
                         )}
 
-                        {/* Servicos Segment */}
-                        {servicosPct > 0 && (
+                        {/* Ferramentas Segment (Blue) */}
+                        {ferramentasPct > 0 && (
                           <circle
                             cx="50"
                             cy="50"
                             r={radius}
                             fill="transparent"
-                            stroke="#94A3B8"
+                            stroke="#3B82F6"
                             strokeWidth="12"
-                            strokeDasharray={`${strokeServicos} ${circ}`}
-                            strokeDashoffset={-offsetServicos}
+                            strokeDasharray={`${strokeFerramentas} ${circ}`}
+                            strokeDashoffset={-offsetFerramentas}
+                            className="transition-all duration-1000 ease-out"
+                          />
+                        )}
+
+                        {/* Outros Segment (Slate) */}
+                        {outrosPct > 0 && (
+                          <circle
+                            cx="50"
+                            cy="50"
+                            r={radius}
+                            fill="transparent"
+                            stroke="#64748B"
+                            strokeWidth="12"
+                            strokeDasharray={`${strokeOutros} ${circ}`}
+                            strokeDashoffset={-offsetOutros}
                             className="transition-all duration-1000 ease-out"
                           />
                         )}
@@ -1372,16 +1460,24 @@ export default function FinanceModule() {
 
                       {/* Inside label */}
                       <div className="absolute flex flex-col items-center justify-center text-center">
-                        <span className="text-[9px] uppercase font-bold text-gray-400 tracking-widest">Foco</span>
-                        <span className="text-xs font-black text-slate-800">Sementes</span>
+                        <span className="text-[9px] uppercase font-bold text-gray-400 tracking-widest">Catálogo</span>
+                        <span className="text-xs font-black text-slate-800">Mix Agrícola</span>
                       </div>
                     </div>
 
                     {/* Horizontal Legend Below */}
-                    <div className="grid grid-cols-3 gap-2 w-full text-center text-[10px] font-black uppercase text-gray-600 border-t border-slate-100 pt-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 w-full text-center text-[10px] font-black uppercase text-gray-600 border-t border-slate-100 pt-4">
                       <div className="flex flex-col items-center">
                         <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#006A4E] block" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#7C3AED] block" />
+                          <span>Químicos</span>
+                        </div>
+                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{quimicosPct}%</span>
+                      </div>
+
+                      <div className="flex flex-col items-center">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] block" />
                           <span>Sementes</span>
                         </div>
                         <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{sementesPct}%</span>
@@ -1389,7 +1485,7 @@ export default function FinanceModule() {
 
                       <div className="flex flex-col items-center">
                         <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#D97706] block" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#F59E0B] block" />
                           <span>Adubos</span>
                         </div>
                         <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{adubosPct}%</span>
@@ -1397,10 +1493,10 @@ export default function FinanceModule() {
 
                       <div className="flex flex-col items-center">
                         <div className="flex items-center gap-1.5">
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#94A3B8] block" />
-                          <span>Serviços</span>
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#3B82F6] block" />
+                          <span>Ferramentas</span>
                         </div>
-                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{servicosPct}%</span>
+                        <span className="font-mono text-slate-800 text-[11px] font-black mt-1">{ferramentasPct}%</span>
                       </div>
                     </div>
                   </div>
@@ -1725,22 +1821,13 @@ export default function FinanceModule() {
 
               <div className="space-y-4 text-xs font-semibold">
                 {(() => {
-                  const categories = [
-                    { name: 'Semente', label: 'SEMENTE' },
-                    { name: 'Adubo', label: 'ADUBO' },
-                    { name: 'Quimico', label: 'QUIMICO' },
-                    { name: 'Ferramenta', label: 'FERRAMENTA' },
-                    { name: 'Servico', label: 'SERVICO' },
-                    { name: 'Outro', label: 'OUTRO' }
-                  ];
-
                   let sumAllCats = 0;
-                  const calculatedCats = categories.map(cat => {
+                  const calculatedCats = REPORT_CATEGORIES.map(cat => {
                     const totalAmt = reportSales.reduce((sum, sale) => {
-                      return sum + sale.items.reduce((itemSum, item) => {
+                      return sum + (sale.items || []).reduce((itemSum, item) => {
                         const p = products.find(prod => prod.id === item.productId);
-                        const pCat = (p ? p.category : item.category) || 'Outro';
-                        if (pCat.toLowerCase().includes(cat.name.toLowerCase())) {
+                        const pCat = item.category || p?.category || 'Outro';
+                        if (matchCategory(pCat, cat.key)) {
                           return itemSum + (item.unitPrice * item.quantity);
                         }
                         return itemSum;
@@ -1753,17 +1840,24 @@ export default function FinanceModule() {
                   return (
                     <div className="space-y-3.5">
                       {calculatedCats.map(cat => {
-                        const widthPct = sumAllCats > 0 ? Math.max(2, (cat.amount / sumAllCats) * 100) : 0;
+                        const widthPct = sumAllCats > 0 ? Math.max(1, (cat.amount / sumAllCats) * 100) : 0;
+                        const pctStr = sumAllCats > 0 ? ((cat.amount / sumAllCats) * 100).toFixed(1) : '0.0';
                         return (
-                          <div key={cat.name} className="space-y-1">
+                          <div key={cat.key} className="space-y-1">
                             <div className="flex justify-between text-[11px]">
-                              <span className="text-gray-500 font-black">{cat.label}</span>
-                              <span className="font-mono text-slate-800 font-bold">{cat.amount.toLocaleString()} MT</span>
+                              <span className="text-gray-700 font-black flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ backgroundColor: cat.color }} />
+                                {cat.label}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-gray-400 font-bold">({pctStr}%)</span>
+                                <span className="font-mono text-slate-800 font-black">{cat.amount.toLocaleString('pt-MZ')} MT</span>
+                              </div>
                             </div>
-                            <div className="w-full bg-slate-50 h-2 rounded-full border border-slate-100 overflow-hidden">
+                            <div className="w-full bg-slate-100 h-2 rounded-full border border-slate-200 overflow-hidden">
                               <div
-                                style={{ width: `${widthPct}%` }}
-                                className="bg-[#006A4E] h-full rounded-full transition-all duration-700"
+                                style={{ width: `${widthPct}%`, backgroundColor: cat.color }}
+                                className="h-full rounded-full transition-all duration-700"
                               />
                             </div>
                           </div>
@@ -1772,7 +1866,7 @@ export default function FinanceModule() {
 
                       <div className="flex justify-between text-xs font-black border-t border-slate-100 pt-3 text-slate-800">
                         <span>SOMA DAS CATEGORIAS</span>
-                        <span className="font-mono text-[#006A4E]">{sumAllCats.toLocaleString()} MT</span>
+                        <span className="font-mono text-emerald-800 font-black">{sumAllCats.toLocaleString('pt-MZ')} MT</span>
                       </div>
                     </div>
                   );
@@ -1816,6 +1910,123 @@ export default function FinanceModule() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- SUB-TAB: CONTABILIDADE DE TRANSFORMAÇÕES (PARTE 4 - 4.4) --- */}
+      {activeSubTab === 'transformacoes' && (
+        <div className="space-y-6">
+          {/* Top Bento Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-5 border border-slate-200 rounded-2xl shadow-sm space-y-1">
+              <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider">Custo Original Consumido</span>
+              <p className="text-xl font-black text-slate-900 font-mono mt-1">
+                {trfOriginalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+              </p>
+              <p className="text-[10px] text-slate-400">Saída de stock original</p>
+            </div>
+
+            <div className="bg-white p-5 border border-emerald-200 rounded-2xl shadow-sm space-y-1">
+              <span className="text-[10px] uppercase font-black text-emerald-700 tracking-wider">Valor em Pacotes Criados</span>
+              <p className="text-xl font-black text-emerald-800 font-mono mt-1">
+                {trfResultingCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+              </p>
+              <p className="text-[10px] text-emerald-600">Entrada de stock fracionado</p>
+            </div>
+
+            <div className="bg-white p-5 border border-amber-200 rounded-2xl shadow-sm space-y-1">
+              <span className="text-[10px] uppercase font-black text-amber-800 tracking-wider">Perdas em Transformação</span>
+              <p className="text-xl font-black text-amber-900 font-mono mt-1">
+                {trfLossesVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+              </p>
+              <p className="text-[10px] text-amber-700">Custos operacionais de quebra</p>
+            </div>
+
+            <div className="bg-emerald-50 p-5 border border-emerald-200 rounded-2xl shadow-sm space-y-1">
+              <span className="text-[10px] uppercase font-black text-emerald-800 tracking-wider">Balanço Contabilístico</span>
+              <p className="text-xl font-black text-emerald-950 font-mono mt-1">0.00 MT</p>
+              <p className="text-[10px] font-bold text-emerald-700">NEUTRALIDADE FINANCEIRA ✓</p>
+            </div>
+          </div>
+
+          {/* Explanation Banner */}
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 text-xs text-slate-700 space-y-2">
+            <h4 className="font-black text-slate-900 text-sm flex items-center gap-2">
+              <span className="material-symbols-outlined text-emerald-700 text-[20px]">account_balance</span>
+              Princípio Contabilístico da Transformação de Produtos
+            </h4>
+            <p className="leading-relaxed">
+              O processo de transformação (ex: fracionamento de sacos de 50kg em pacotes de 1kg ou 5kg) é uma <strong>operação interna de neutralidade financeira</strong>. O valor patrimonial do stock mantém-se invariável: o custo de aquisição do artigo original é transferido proporcionalmente para os novos artigos empacotados. As eventuais perdas de peso no manuseamento são reconhecidas pontualmente como quebras de inventário.
+            </p>
+          </div>
+
+          {/* Transformations Table */}
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-gray-150 pb-3">
+              <h4 className="font-black text-gray-800 text-xs sm:text-sm uppercase tracking-tight">
+                Transformações Registadas no Período ({filteredTransformations.length})
+              </h4>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-emerald-800/10 text-emerald-950 font-black border-b border-emerald-200 text-[10px] uppercase">
+                    <th className="p-3">Código</th>
+                    <th className="p-3">Data</th>
+                    <th className="p-3">Artigo Original</th>
+                    <th className="p-3 text-right">Qtd Original</th>
+                    <th className="p-3 text-right">Custo Original (MT)</th>
+                    <th className="p-3 text-center">Pacotes Gerados</th>
+                    <th className="p-3 text-right">Valor Criado (MT)</th>
+                    <th className="p-3 text-right">Perda (MT)</th>
+                    <th className="p-3 text-center">Estado</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-150 text-slate-700">
+                  {filteredTransformations.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="p-8 text-center text-gray-400 italic">
+                        Nenhuma transformação registada no período selecionado.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredTransformations.map(t => {
+                      const createdVal = t.items.reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0);
+                      const isCancelled = t.status === 'Cancelada';
+                      return (
+                        <tr key={t.id} className="hover:bg-emerald-50/50">
+                          <td className="p-3 font-mono font-black text-slate-900">{t.code}</td>
+                          <td className="p-3 font-medium">{formatDatePT(t.date)}</td>
+                          <td className="p-3 font-bold text-slate-900">{t.originalProductName}</td>
+                          <td className="p-3 text-right font-mono font-bold">{t.originalQuantity} {t.originalUnit}</td>
+                          <td className="p-3 text-right font-mono font-black text-slate-900">
+                            {t.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                          </td>
+                          <td className="p-3 text-center font-bold text-emerald-800">
+                            {t.items.reduce((s, it) => s + it.quantity, 0)} unidades
+                          </td>
+                          <td className="p-3 text-right font-mono font-black text-emerald-900">
+                            {createdVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                          </td>
+                          <td className="p-3 text-right font-mono font-bold text-amber-900">
+                            {t.lossValue > 0 ? `${t.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT` : '-'}
+                          </td>
+                          <td className="p-3 text-center">
+                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${
+                              isCancelled ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
+                            }`}>
+                              {t.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

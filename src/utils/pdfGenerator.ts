@@ -1175,37 +1175,32 @@ export async function downloadSalesReportPDF(
 }
 
 // ============================================================================
-// 6. RELATÓRIO DIÁRIO DE VENDAS (PDF A4)
+// 6. RELATÓRIO DE VENDAS POR PERÍODO / DIÁRIO (PDF A4)
 // ============================================================================
 
-export async function downloadDailySalesReportPDF(
-  selectedDate: string,
+export async function downloadPeriodSalesReportPDF(
+  startDate: string,
+  endDate: string,
   sales: Sale[],
-  settings: SystemSettings
+  settings: SystemSettings,
+  reportTitle: string = 'Relatório Periódico de Vendas'
 ) {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const co = getCompanyDefaults(settings);
   const logoBase64 = await getLogoBase64(settings.logoUrl || '/logo.png');
 
-  const isSameDay = (dateStr: string, targetDateStr: string) => {
-    if (!dateStr || !targetDateStr) return false;
-    if (dateStr.startsWith(targetDateStr)) return true;
-    try {
-      const d = new Date(dateStr);
-      if (!isNaN(d.getTime())) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}` === targetDateStr;
-      }
-    } catch {}
-    return false;
+  const isDateInInterval = (dateStr: string) => {
+    if (!dateStr) return false;
+    const clean = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr.substring(0, 10);
+    if (startDate && clean < startDate) return false;
+    if (endDate && clean > endDate) return false;
+    return true;
   };
 
-  const dailySales = sales.filter(s => {
+  const periodSales = sales.filter(s => {
     if (s.status === 'Cancelada') return false;
     if (!s.date) return false;
-    return isSameDay(s.date, selectedDate);
+    return isDateInInterval(s.date);
   });
 
   let totalRevenue = 0;
@@ -1217,7 +1212,7 @@ export async function downloadDailySalesReportPDF(
 
   const productAgg: Record<string, { name: string; category: string; qty: number; unit: string; revenue: number }> = {};
 
-  dailySales.forEach(sale => {
+  periodSales.forEach(sale => {
     totalRevenue += sale.total;
     const pm = (sale.paymentMethod || '').trim().toLowerCase();
     if (pm === 'dinheiro' || pm === 'numerario' || pm === 'cash') {
@@ -1258,33 +1253,30 @@ export async function downloadDailySalesReportPDF(
     });
   });
 
-  const dateParts = selectedDate.split('-');
-  const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : selectedDate;
+  // Top header banner
+  doc.setFillColor(14, 98, 49);
+  doc.rect(0, 0, 210, 26, 'F');
 
-  // Header
   if (logoBase64) {
-    try { doc.addImage(logoBase64, 'JPEG', 15, 8, 25, 12); } catch { /* skip */ }
+    try {
+      doc.addImage(logoBase64, 'PNG', 14, 4, 18, 18);
+    } catch {}
   }
 
+  doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
-  doc.setTextColor(14, 98, 49);
-  doc.text('RELATÓRIO DIÁRIO DE VENDAS', 50, 14);
+  doc.setFontSize(13);
+  doc.text(co.name, logoBase64 ? 36 : 14, 11);
 
+  doc.setFontSize(8.5);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  doc.setTextColor(100, 116, 139);
-  doc.text(co.name.toUpperCase(), 50, 19);
-  doc.text(`NUIT: ${co.nuit} • ${co.email}`, 50, 23);
-  doc.text(`Dia de Referência: ${formattedDate}`, 50, 27);
+  doc.text(`${reportTitle} • Período: ${startDate} a ${endDate}`, logoBase64 ? 36 : 14, 18);
+
+  doc.setFontSize(7.5);
   doc.text(`Emissão: ${new Date().toLocaleString('pt-MZ')}`, 195, 14, { align: 'right' });
 
-  doc.setDrawColor(200, 200, 200);
-  doc.setLineWidth(0.5);
-  doc.line(15, 31, 195, 31);
-
   // Summary box
-  let cy = 37;
+  let cy = 34;
   doc.setFillColor(248, 250, 252);
   doc.setDrawColor(226, 232, 240);
   doc.rect(15, cy, 180, 24, 'FD');
@@ -1292,7 +1284,7 @@ export async function downloadDailySalesReportPDF(
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
   doc.setTextColor(15, 23, 42);
-  doc.text('RESUMO FINANCEIRO DO DIA', 20, cy + 5);
+  doc.text('RESUMO FINANCEIRO DO PERÍODO', 20, cy + 5);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
@@ -1300,6 +1292,11 @@ export async function downloadDailySalesReportPDF(
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(14, 98, 49);
   doc.text(`${fmtMT(totalRevenue)} MT`, 55, cy + 11);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(100, 116, 139);
+  doc.text(`Vendas: ${periodSales.length}`, 20, cy + 18);
 
   const methods = [
     ['Dinheiro:', fmtMT(totalNumerario)],
@@ -1318,17 +1315,17 @@ export async function downloadDailySalesReportPDF(
   });
 
   // Products table
-  cy += 31;
+  cy += 30;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(14, 98, 49);
-  doc.text('PRODUTOS E SERVIÇOS VENDIDOS NO DIA', 15, cy);
+  doc.text('PRODUTOS E SERVIÇOS VENDIDOS NO PERÍODO', 15, cy);
 
   cy += 4;
   doc.setFillColor(241, 245, 249);
   doc.rect(15, cy, 180, 7, 'F');
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7);
+  doc.setFontSize(7.5);
   doc.setTextColor(15, 23, 42);
   doc.text('PRODUTO / SERVIÇO', 17, cy + 4.5);
   doc.text('CATEG.', 105, cy + 4.5);
@@ -1343,7 +1340,7 @@ export async function downloadDailySalesReportPDF(
     doc.setFont('helvetica', 'italic');
     doc.setFontSize(8.5);
     doc.setTextColor(148, 163, 184);
-    doc.text('Nenhuma venda registada para este dia.', 105, cy + 10, { align: 'center' });
+    doc.text('Nenhuma venda registada para este período.', 105, cy + 10, { align: 'center' });
   } else {
     list.forEach(item => {
       if (cy > 260) {
@@ -1353,7 +1350,7 @@ export async function downloadDailySalesReportPDF(
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(7.5);
       doc.setTextColor(51, 65, 85);
-      doc.text(item.name.substring(0, 50), 17, cy + 4.5);
+      doc.text(item.name.substring(0, 48), 17, cy + 4.5);
       doc.text(item.category, 105, cy + 4.5);
       doc.text(item.qty.toLocaleString('pt-MZ'), 140, cy + 4.5, { align: 'right' });
       doc.text(item.unit, 155, cy + 4.5);
@@ -1370,9 +1367,17 @@ export async function downloadDailySalesReportPDF(
   doc.setFontSize(6.5);
   doc.setTextColor(100, 100, 100);
   doc.text(`${co.name} • NUIT: ${co.nuit}`, 15, 285);
-  doc.text('Pág. 1', 195, 285, { align: 'right' });
+  doc.text('Página 1', 195, 285, { align: 'right' });
 
-  doc.save(`RELATORIO_VENDAS_${selectedDate}.pdf`);
+  doc.save(`RELATORIO_VENDAS_${startDate}_a_${endDate}.pdf`);
+}
+
+export async function downloadDailySalesReportPDF(
+  selectedDate: string,
+  sales: Sale[],
+  settings: SystemSettings
+) {
+  return downloadPeriodSalesReportPDF(selectedDate, selectedDate, sales, settings, `Relatório Diário de Vendas`);
 }
 
 // ============================================================================

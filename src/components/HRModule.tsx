@@ -970,37 +970,11 @@ export default function HRModule() {
       )}
 
       {/* Header and Brand */}
-      <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-            <span className="material-symbols-outlined text-emerald-600 text-3xl">badge</span>
-            Gestão de Recursos Humanos
-          </h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Conformidade laboral rigorosa com a nova Lei n.º 13/2023 de Moçambique.
-          </p>
-        </div>
-
-        {/* Foreigner Quota Checker widget */}
-        <div className="p-4 bg-emerald-50/50 border border-emerald-100 rounded-2xl max-w-xs w-full flex flex-col justify-between" id="quota_widget">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">Auditoria de Quota</span>
-            <div className={`w-2 h-2 rounded-full ${quota.compliant ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
-          </div>
-          <div className="mt-2">
-            <h4 className="text-xl font-black text-emerald-900 font-mono">
-              {foreignerCount} / {totalEmployeesCount} <span className="text-sm font-medium">estrangeiros</span>
-            </h4>
-            <p className="text-[10px] text-slate-500 mt-1">
-              Empresa {quota.enterpriseSize}: Limite de <span className="font-bold">{quota.maxPercent}%</span> estrangeiros em vigor.
-            </p>
-          </div>
-          <div className={`mt-3 text-center py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
-            quota.compliant ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-          }`}>
-            {quota.compliant ? 'SITUAÇÃO REGULAR' : 'LIMITE EXCEDIDO'}
-          </div>
-        </div>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+        <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+          <span className="material-symbols-outlined text-emerald-600">badge</span>
+          Gestão de Recursos Humanos
+        </h1>
       </div>
 
       {/* Navigation Tab Bar */}
