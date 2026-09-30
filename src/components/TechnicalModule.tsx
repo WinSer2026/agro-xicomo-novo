@@ -33,6 +33,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   // Active Technical Panel Tab
   const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
+  const [settingsSubTab, setSettingsSubTab] = useState<'empresa' | 'bancos' | 'impressoras' | 'backups' | 'sistema'>('empresa');
 
   // Logs Date Range Filter
   const defaultLogsRange = getDateRangeFromPreset('Este Mês');
@@ -966,112 +967,226 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
       {/* --- 2. CONFIGURATIONS & SYSTEM SETTINGS VIEW --- */}
       {activeTab === 'settings' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 bg-white p-6 border border-gray-200 rounded-xl shadow-sm space-y-4">
-            <h4 className="font-headline-md text-headline-md text-gray-800 font-bold border-b border-gray-100 pb-3">
-              Configurações do ERP & Logotipo
-            </h4>
+        <div className="space-y-4">
+          {/* Sub-tabs Bar */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
+            <button
+              type="button"
+              onClick={() => setSettingsSubTab('empresa')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                settingsSubTab === 'empresa'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">store</span>
+              <span>Empresa & Logótipo</span>
+            </button>
 
-            <form onSubmit={handleSaveSettings} className="space-y-4 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="col-span-2 md:col-span-1">
-                  <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Designação Comercial da Empresa</label>
-                  <input
-                    type="text"
-                    value={compName}
-                    onChange={(e) => setCompName(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                  />
-                </div>
+            <button
+              type="button"
+              onClick={() => setSettingsSubTab('bancos')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                settingsSubTab === 'bancos'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">account_balance</span>
+              <span>Bancos & Contactos</span>
+            </button>
 
-                <div className="col-span-2 md:col-span-1 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setSettingsSubTab('impressoras')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                settingsSubTab === 'impressoras'
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">print</span>
+              <span>Impressoras (A4 & POS)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSettingsSubTab('backups')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                settingsSubTab === 'backups'
+                  ? 'bg-teal-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">backup</span>
+              <span>Backups & Restauração</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSettingsSubTab('sistema')}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                settingsSubTab === 'sistema'
+                  ? 'bg-slate-800 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/80'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[16px]">build</span>
+              <span>Manutenção & Exercício</span>
+            </button>
+          </div>
+
+          {/* Sub-Tab 1: EMPRESA & LOGOTIPO */}
+          {settingsSubTab === 'empresa' && (
+            <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm space-y-5">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold flex items-center gap-2">
+                  <span className="material-symbols-outlined text-emerald-600 text-[20px]">store</span>
+                  Identificação da Empresa & Logótipo
+                </h4>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Defina o nome oficial, número fiscal (NUIT), nível de alerta de stock e identidade visual impressa nos documentos.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveSettings} className="space-y-5 text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">NUIT da Empresa</label>
+                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Designação Comercial da Empresa</label>
                     <input
                       type="text"
-                      value={companyNuit}
-                      onChange={(e) => setCompanyNuit(e.target.value)}
-                      placeholder="401976590"
-                      className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary font-mono"
+                      value={compName}
+                      onChange={(e) => setCompName(e.target.value)}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                      placeholder="Ex: Agro-Xicomo & Serviços Lda"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Nível Crítico de Stock (Alerta)</label>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">NUIT da Empresa</label>
+                      <input
+                        type="text"
+                        value={companyNuit}
+                        onChange={(e) => setCompanyNuit(e.target.value)}
+                        placeholder="401976590"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary font-mono focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Nível Crítico de Stock</label>
+                      <input
+                        type="number"
+                        value={criticalStockLevel}
+                        onChange={(e) => setCriticalStockLevel(Number(e.target.value))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Palavra-passe de Segurança do Stock (Código do Gestor)</label>
                     <input
-                      type="number"
-                      value={criticalStockLevel}
-                      onChange={(e) => setCriticalStockLevel(Number(e.target.value))}
-                      className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
+                      type="password"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      data-lpignore="true"
+                      value={stockCode}
+                      onChange={(e) => setStockCode(e.target.value)}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary font-mono"
+                      placeholder="Código para autorização de alterações manuais de stock"
                     />
                   </div>
                 </div>
 
-                <div className="col-span-2 space-y-2">
-                  <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Logotipo da Empresa</label>
+                {/* Upload de Logotipo */}
+                <div className="border-t border-gray-100 pt-4 space-y-3">
+                  <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider">Logótipo da Empresa</label>
                   
-                  {/* File Upload Zone */}
-                  <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 text-center bg-gray-50 hover:bg-gray-100 transition-colors relative cursor-pointer group">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleLogoUpload}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                    />
-                    <div className="space-y-1">
-                      <span className="material-symbols-outlined text-gray-400 group-hover:text-primary transition-colors text-3xl">cloud_upload</span>
-                      <p className="text-xs font-bold text-gray-700">Carregar Logotipo do Computador ou Celular</p>
-                      <p className="text-[10px] text-gray-400">Arraste a imagem ou clique para selecionar (PNG, JPG, SVG de até 1.5MB)</p>
-                    </div>
-                  </div>
-
-                  <div className="text-center text-gray-400 font-bold text-[10px] uppercase my-2">— OU —</div>
-
-                  <div>
-                    <label className="block text-[9px] font-semibold text-gray-400 mb-1">URL do Logotipo (Opcional)</label>
-                    <input
-                      type="text"
-                      value={logoUrl}
-                      onChange={(e) => setLogoUrl(e.target.value)}
-                      placeholder="https://exemplo.com/logo.png"
-                      className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                    />
-                  </div>
-
-                  {logoUrl && (
-                    <div className="mt-2 flex items-center justify-between p-3 bg-green-50 rounded-lg border border-green-200">
-                      <div className="flex items-center gap-3">
-                        <img src={logoUrl} alt="Logo" className="w-12 h-12 object-contain rounded border border-gray-300 bg-white" onError={(e) => (e.currentTarget.style.display = 'none')} />
-                        <div>
-                          <span className="text-xs font-bold text-gray-800">Visualização ativa do Logotipo</span>
-                          <p className="text-[9px] text-gray-400">{logoUrl.startsWith('data:') ? 'Imagem carregada por upload local' : 'Ligação URL remota'}</p>
-                        </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                    {/* File Upload Zone */}
+                    <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 text-center bg-gray-50 hover:bg-gray-100 transition-colors relative cursor-pointer group">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleLogoUpload}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                      />
+                      <div className="space-y-1">
+                        <span className="material-symbols-outlined text-gray-400 group-hover:text-primary transition-colors text-3xl">cloud_upload</span>
+                        <p className="text-xs font-bold text-gray-700">Carregar Logotipo do Computador ou Celular</p>
+                        <p className="text-[10px] text-gray-400">Arraste a imagem ou clique para selecionar (PNG, JPG, SVG de até 1.5MB)</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setLogoUrl('')}
-                        className="px-2 py-1 bg-red-100 hover:bg-red-200 text-red-700 font-bold text-[10px] rounded"
-                      >
-                        Remover
-                      </button>
                     </div>
-                  )}
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[9px] font-semibold text-gray-500 mb-1">Ou URL Remota do Logótipo</label>
+                        <input
+                          type="text"
+                          value={logoUrl}
+                          onChange={(e) => setLogoUrl(e.target.value)}
+                          placeholder="https://exemplo.com/logo.png"
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary"
+                        />
+                      </div>
+
+                      {logoUrl && (
+                        <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                          <div className="flex items-center gap-3">
+                            <img src={logoUrl} alt="Logo" className="w-12 h-12 object-contain rounded-lg border border-gray-200 bg-white p-1" onError={(e) => (e.currentTarget.style.display = 'none')} />
+                            <div>
+                              <span className="text-xs font-bold text-gray-800 block">Logótipo Ativo</span>
+                              <span className="text-[10px] text-emerald-700 font-medium">{logoUrl.startsWith('data:') ? 'Ficheiro local (Base64)' : 'Ligação URL'}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setLogoUrl('')}
+                            className="px-2.5 py-1 bg-red-100 hover:bg-red-200 text-red-700 font-bold text-[10px] rounded-lg transition-colors cursor-pointer"
+                          >
+                            Remover
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Palavra-passe de Segurança do Stock (Gestor)</label>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    spellCheck={false}
-                    data-lpignore="true"
-                    value={stockCode}
-                    onChange={(e) => setStockCode(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
-                  />
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl uppercase transition-all shadow-xs flex items-center gap-1.5 text-xs cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">save</span>
+                    Gravar Definições da Empresa
+                  </button>
                 </div>
+              </form>
+            </div>
+          )}
 
-                <div className="col-span-2 border-t border-gray-100 pt-3 mt-1">
-                  <h5 className="text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-2">Dados Bancários 1 (Principal)</h5>
+          {/* Sub-Tab 2: BANCOS & CONTACTOS */}
+          {settingsSubTab === 'bancos' && (
+            <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm space-y-5">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold flex items-center gap-2">
+                  <span className="material-symbols-outlined text-blue-600 text-[20px]">account_balance</span>
+                  Contas Bancárias, Carteiras Móveis & Contactos
+                </h4>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Estes dados são exibidos nos cabeçalhos e rodapés de Faturas, Cotações e Recibos para pagamentos de clientes.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveSettings} className="space-y-5 text-xs">
+                {/* Banco Principal */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <h5 className="text-[11px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-blue-600">account_balance</span>
+                    Conta Bancária 1 (Principal)
+                  </h5>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Instituição Bancária 1</label>
@@ -1079,7 +1194,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={banco}
                         onChange={(e) => setBanco(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white"
                         placeholder="Ex: BCI"
                       />
                     </div>
@@ -1089,7 +1204,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={conta}
                         onChange={(e) => setConta(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
+                        placeholder="Ex: 123456789"
                       />
                     </div>
                     <div>
@@ -1098,14 +1214,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={nib}
                         onChange={(e) => setNib(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
+                        placeholder="Ex: 0008 0000 1234 5678 9012 3"
                       />
                     </div>
                   </div>
                 </div>
 
-                <div className="col-span-2 border-t border-gray-100 pt-2">
-                  <h5 className="text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-2">Dados Bancários 2 (Secundário - Opcional)</h5>
+                {/* Banco Secundário */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <h5 className="text-[11px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-slate-600">account_balance</span>
+                    Conta Bancária 2 (Secundário - Opcional)
+                  </h5>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Instituição Bancária 2</label>
@@ -1113,8 +1234,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={banco2}
                         onChange={(e) => setBanco2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
-                        placeholder="Ex: Millennium BIM"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white"
+                        placeholder="Ex: Millennium BIM / Standard Bank"
                       />
                     </div>
                     <div>
@@ -1123,7 +1244,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={conta2}
                         onChange={(e) => setConta2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
                       />
                     </div>
                     <div>
@@ -1132,155 +1253,170 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={nib2}
                         onChange={(e) => setNib2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
                       />
                     </div>
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Contacto M-Pesa Principal</label>
-                  <input
-                    type="text"
-                    value={mpesa}
-                    onChange={(e) => setMpesa(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Contacto E-Mola Principal</label>
-                  <input
-                    type="text"
-                    value={emola}
-                    onChange={(e) => setEmola(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none"
-                  />
-                </div>
-
-                <div className="col-span-2 border-t border-gray-100 pt-3 mt-1">
-                  <h5 className="text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-2">Números de Contacto do Cliente (Impressos em Faturas/Recibos)</h5>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* Carteiras Móveis */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <h5 className="text-[11px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-amber-600">payments</span>
+                    Carteiras Móveis de Pagamento
+                  </h5>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Vodacom 1</label>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Contacto M-Pesa Principal</label>
                       <input
                         type="text"
-                        value={vodacom1}
-                        onChange={(e) => setVodacom1(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 84 123 4567"
+                        value={mpesa}
+                        onChange={(e) => setMpesa(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
+                        placeholder="+258 84 000 0000"
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Vodacom 2</label>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Contacto E-Mola Principal</label>
                       <input
                         type="text"
-                        value={vodacom2}
-                        onChange={(e) => setVodacom2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 84 765 4321"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Vodacom 3</label>
-                      <input
-                        type="text"
-                        value={vodacom3}
-                        onChange={(e) => setVodacom3(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 84 111 2222"
+                        value={emola}
+                        onChange={(e) => setEmola(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 bg-white font-mono"
+                        placeholder="+258 86 000 0000"
                       />
                     </div>
                   </div>
                 </div>
 
-                <div className="col-span-2">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* Contactos Telefónicos e Email */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <h5 className="text-[11px] font-bold text-gray-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-emerald-600">contact_phone</span>
+                    Contactos de Atendimento ao Cliente
+                  </h5>
+                  
+                  <div className="space-y-3">
                     <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Movitel 1</label>
-                      <input
-                        type="text"
-                        value={movitel1}
-                        onChange={(e) => setMovitel1(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 86 123 4567"
-                      />
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Linhas Vodacom</span>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={vodacom1}
+                          onChange={(e) => setVodacom1(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Vodacom 1: +258 84..."
+                        />
+                        <input
+                          type="text"
+                          value={vodacom2}
+                          onChange={(e) => setVodacom2(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Vodacom 2: +258 84..."
+                        />
+                        <input
+                          type="text"
+                          value={vodacom3}
+                          onChange={(e) => setVodacom3(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Vodacom 3: +258 84..."
+                        />
+                      </div>
                     </div>
+
                     <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Movitel 2</label>
-                      <input
-                        type="text"
-                        value={movitel2}
-                        onChange={(e) => setMovitel2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 86 765 4321"
-                      />
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Linhas Movitel</span>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={movitel1}
+                          onChange={(e) => setMovitel1(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Movitel 1: +258 86/87..."
+                        />
+                        <input
+                          type="text"
+                          value={movitel2}
+                          onChange={(e) => setMovitel2(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Movitel 2: +258 86/87..."
+                        />
+                        <input
+                          type="text"
+                          value={movitel3}
+                          onChange={(e) => setMovitel3(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Movitel 3: +258 86/87..."
+                        />
+                      </div>
                     </div>
+
                     <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Movitel 3</label>
-                      <input
-                        type="text"
-                        value={movitel3}
-                        onChange={(e) => setMovitel3(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 86 333 4444"
-                      />
+                      <span className="text-[10px] font-bold text-slate-500 uppercase block mb-1">Linhas Fixas & Email Corporativo</span>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={fixo1}
+                          onChange={(e) => setFixo1(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Fixo 1: +258 21..."
+                        />
+                        <input
+                          type="text"
+                          value={fixo2}
+                          onChange={(e) => setFixo2(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Fixo 2: +258 21..."
+                        />
+                        <input
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:border-blue-500"
+                          placeholder="Email: geral@empresa.mz"
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                <div className="col-span-2">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Número Fixo 1</label>
-                      <input
-                        type="text"
-                        value={fixo1}
-                        onChange={(e) => setFixo1(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 21 123 456"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Número Fixo 2</label>
-                      <input
-                        type="text"
-                        value={fixo2}
-                        onChange={(e) => setFixo2(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="+258 21 654 321"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Email Geral</label>
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                        placeholder="contacto@empresa.co.mz"
-                      />
-                    </div>
-                  </div>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl uppercase transition-all shadow-xs flex items-center gap-1.5 text-xs cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">save</span>
+                    Gravar Dados Bancários & Contactos
+                  </button>
                 </div>
-              </div>
+              </form>
+            </div>
+          )}
 
-              {/* GESTÃO DE IMPRESSORAS & CAIXA DE DINHEIRO */}
-              <div className="border-t border-gray-200 pt-5 mt-5 space-y-4">
-                <h4 className="text-[12px] font-black text-primary uppercase tracking-wider flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[18px]">print</span>
+          {/* Sub-Tab 3: IMPRESSORAS (A4 & POS) */}
+          {settingsSubTab === 'impressoras' && (
+            <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm space-y-5">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold flex items-center gap-2">
+                  <span className="material-symbols-outlined text-purple-600 text-[20px]">print</span>
                   Gestão de Impressoras & Gaveta de Dinheiro (POS)
                 </h4>
-                
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Configure os destinos de impressão de faturas formais (A4) e talões térmicos (POS), e teste a gaveta física.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveSettings} className="space-y-5 text-xs">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">
-                      Impressora X (Facturas e Recibos A4)
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                    <label className="block text-[11px] font-bold text-gray-800 uppercase">
+                      Impressora X (Facturas, Guias e Cotações A4)
                     </label>
                     <select
                       value={printerA4}
                       onChange={(e) => setPrinterA4(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary bg-white"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-purple-500 bg-white"
                     >
                       <option value="Microsoft Print to PDF">Microsoft Print to PDF</option>
                       <option value="HP LaserJet Professional A4">HP LaserJet Professional A4</option>
@@ -1288,19 +1424,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       <option value="Canon G3010 A4">Canon G3010 A4</option>
                       <option value="Outra Impressora (Nome padrão)">Outra Impressora (Definições de Sistema)</option>
                     </select>
-                    <p className="text-[9px] text-gray-400 mt-1">
-                      Documentos A4 serão emitidos automaticamente configurados para esta impressora.
+                    <p className="text-[10px] text-gray-500">
+                      Documentos fiscais A4 serão formatados automaticamente para esta impressora.
                     </p>
                   </div>
 
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">
-                      Impressora Y (Ponto de Venda Térmica POS)
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                    <label className="block text-[11px] font-bold text-gray-800 uppercase">
+                      Impressora Y (Talões Térmicos POS de 80mm/58mm)
                     </label>
                     <select
                       value={printerThermal}
                       onChange={(e) => setPrinterThermal(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary bg-white"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-purple-500 bg-white"
                     >
                       <option value="Xprinter XP-80">Xprinter XP-80 (80mm Térmica)</option>
                       <option value="Xprinter XP-58">Xprinter XP-58 (58mm Térmica)</option>
@@ -1308,269 +1444,327 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       <option value="Generic Thermal 80mm">Generic Thermal 80mm</option>
                       <option value="Outra Impressora POS">Outra Impressora POS</option>
                     </select>
-                    <p className="text-[9px] text-gray-400 mt-1">
-                      Os recibos do Ponto de Venda (vendas diretas) serão direcionados para esta impressora térmica.
+                    <p className="text-[10px] text-gray-500">
+                      Os recibos rápidos do balcão (PDV) serão direcionados para esta impressora.
                     </p>
                   </div>
                 </div>
 
-                {/* REAL HARDWARE INTEGRATION: WEB SERIAL & PHYSICAL CASH DRAWER */}
-                <div className="border-t border-gray-100 pt-4 mt-2 space-y-4">
-                  <div className="bg-slate-900 text-slate-100 p-4 rounded-xl border border-slate-800 space-y-3">
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-                      <h5 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-emerald-400">
-                        <span className="material-symbols-outlined text-[18px]">settings_input_hdmi</span>
-                        Integração de Hardware POS (Impressora & Gaveta)
-                      </h5>
-                      <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1 ${
-                        isPrinterConnected 
-                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-slate-800 text-slate-400 border border-slate-700'
-                      }`}>
-                        <span className={`h-1.5 w-1.5 rounded-full ${isPrinterConnected ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'}`}></span>
-                        {isPrinterConnected ? 'Conectado (Porta Serial / USB)' : 'Pronto para Conexão'}
-                      </span>
-                    </div>
+                {/* Hardware integration */}
+                <div className="bg-slate-900 text-slate-100 p-5 rounded-xl border border-slate-800 space-y-3">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                    <h5 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2 text-emerald-400">
+                      <span className="material-symbols-outlined text-[18px]">settings_input_hdmi</span>
+                      Integração de Hardware POS (Impressora & Gaveta)
+                    </h5>
+                    <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                      isPrinterConnected 
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}>
+                      <span className={`h-1.5 w-1.5 rounded-full ${isPrinterConnected ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'}`}></span>
+                      {isPrinterConnected ? 'Conectado (Porta Serial / USB)' : 'Pronto para Conexão'}
+                    </span>
+                  </div>
 
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      Sincronize a impressora térmica USB para emissão rápida de talões e disparo automático de abertura da gaveta de dinheiro (RJ11).
-                    </p>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Sincronize a impressora térmica USB para emissão instantânea de talões e disparo automático de abertura da gaveta de dinheiro (RJ11).
+                  </p>
 
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      {!isPrinterConnected ? (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            setHardwareError(null);
-                            const res = await connectSerialPrinter();
-                            if (res.success) {
-                              setIsPrinterConnected(true);
-                              setIsVirtualMode(false);
-                              showToast('Impressora Térmica associada com sucesso!');
-                            } else {
-                              showToast(`Falha de Conexão: ${res.error}`);
-                            }
-                          }}
-                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <span className="material-symbols-outlined text-[15px]">usb_coexistence</span>
-                          Conectar Impressora Térmica (USB / COM)
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await disconnectSerialPrinter();
-                            setIsPrinterConnected(false);
-                            setIsVirtualMode(false);
-                            setHardwareError(null);
-                            showToast('Dispositivo de impressão desconectado.');
-                          }}
-                          className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <span className="material-symbols-outlined text-[15px]">usb_off</span>
-                          Desconectar Impressora
-                        </button>
-                      )}
-
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {!isPrinterConnected ? (
                       <button
                         type="button"
                         onClick={async () => {
-                          playChachingSound();
-                          setIsDrawerOpen(true);
-                          const directSignal = await sendCashDrawerPulse();
-                          if (directSignal) {
-                            showToast('Gaveta Aberta! Sinal de pulso emitido.');
+                          setHardwareError(null);
+                          const res = await connectSerialPrinter();
+                          if (res.success) {
+                            setIsPrinterConnected(true);
+                            setIsVirtualMode(false);
+                            showToast('Impressora Térmica associada com sucesso!');
                           } else {
-                            showToast('Comando de abertura emitido.');
+                            showToast(`Falha de Conexão: ${res.error}`);
                           }
-                          setTimeout(() => setIsDrawerOpen(false), 3000);
                         }}
-                        className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                        className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
                       >
-                        <span className="material-symbols-outlined text-[15px]">point_of_sale</span>
-                        Testar Abertura de Gaveta
+                        <span className="material-symbols-outlined text-[15px]">usb_coexistence</span>
+                        Conectar Impressora Térmica (USB / COM)
                       </button>
-                    </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectSerialPrinter();
+                          setIsPrinterConnected(false);
+                          setIsVirtualMode(false);
+                          setHardwareError(null);
+                          showToast('Dispositivo de impressão desconectado.');
+                        }}
+                        className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">usb_off</span>
+                        Desconectar Impressora
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        playChachingSound();
+                        setIsDrawerOpen(true);
+                        const directSignal = await sendCashDrawerPulse();
+                        if (directSignal) {
+                          showToast('Gaveta Aberta! Sinal de pulso emitido.');
+                        } else {
+                          showToast('Comando de abertura emitido.');
+                        }
+                        setTimeout(() => setIsDrawerOpen(false), 3000);
+                      }}
+                      className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">point_of_sale</span>
+                      Testar Abertura de Gaveta
+                    </button>
                   </div>
                 </div>
 
-                {/* Cash Drawer Guidance Guide Box */}
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5 text-[11px] leading-relaxed text-gray-600">
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-1.5 text-[11px] leading-relaxed text-gray-600">
                   <p className="font-bold text-gray-800 uppercase flex items-center gap-1 text-[10px]">
                     <span className="material-symbols-outlined text-[14px] text-blue-600">info</span>
                     Configuração Rápida de Hardware
                   </p>
-                  <ul className="list-disc pl-4 space-y-0.5 text-[10px]">
+                  <ul className="list-disc pl-4 space-y-1 text-[10px]">
                     <li><strong>Gaveta de Dinheiro (RJ11):</strong> Ligue o cabo RJ11 na porta traseira da impressora térmica.</li>
-                    <li><strong>Impressão Direta:</strong> Configure a impressora térmica padrão no driver do Windows/POS.</li>
+                    <li><strong>Impressão Direta:</strong> Configure a impressora térmica padrão no driver do sistema operacional.</li>
                   </ul>
                 </div>
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl uppercase transition-all shadow-xs flex items-center gap-1.5 text-xs cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">save</span>
+                    Gravar Definições de Impressão
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* Sub-Tab 4: BACKUPS & RESTAURAÇÃO */}
+          {settingsSubTab === 'backups' && (
+            <div className="space-y-4">
+              {/* Top Quick Actions */}
+              <div className="bg-teal-50 border border-teal-200 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-teal-600 text-white rounded-xl">
+                    <span className="material-symbols-outlined text-[24px]">cloud_download</span>
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-teal-950 text-sm">Backup Completo do Sistema (.JSON)</h4>
+                    <p className="text-teal-700 text-xs">Exporte todos os produtos, vendas, stock, clientes, faturas e utilizadores para um ficheiro .JSON seguro.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleBackupTotal}
+                  className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-bold text-xs uppercase transition-all shadow-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[16px]">download</span>
+                  Descarregar Backup .JSON
+                </button>
               </div>
 
-              {/* SEGURANÇA DE DADOS, BACKUPS AGENDADOS E RECUPERAÇÃO */}
-              <div className="border-t border-gray-200 pt-5 mt-5 space-y-4">
-                <h4 className="text-[12px] font-black text-primary uppercase tracking-wider flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[18px]">security</span>
-                  Segurança de Dados, Backups em IndexedDB e Recuperação
-                </h4>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Left: Auto-backups listings */}
-                  <div className="space-y-2 border border-gray-150 p-3 rounded-lg bg-gray-50/50">
-                    <h5 className="font-bold text-gray-700">Backups Automáticos Agendados (Local Storage)</h5>
-                    <p className="text-[10px] text-gray-500">
-                      O sistema realiza backups programados em segundo plano a cada 5 minutos e após cada venda para evitar perdas offline.
-                    </p>
-                    
-                    {autoBackupsList.length === 0 ? (
-                      <p className="text-[10px] italic text-gray-400">Nenhum backup automático registado ainda.</p>
-                    ) : (
-                      <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar pr-1">
-                        {autoBackupsList.map((ts, idx) => (
-                          <div key={idx} className="flex justify-between items-center bg-white p-2 border border-gray-150 rounded text-[10px]">
-                            <div>
-                              <span className="font-bold text-gray-700">Auto-Backup #{autoBackupsList.length - idx}</span>
-                              <p className="text-[9px] text-gray-400">{new Date(ts).toLocaleString()}</p>
-                            </div>
-                            <div className="flex gap-1">
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  const conf = window.confirm(`Deseja mesmo restaurar as bases de dados para o estado do backup de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
-                                  if (!conf) return;
-                                  try {
-                                    const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
-                                    if (backupData) {
-                                      await dbService.importAllData(backupData);
-                                      showToast('Banco de dados restaurado com sucesso!');
-                                      loadAllData();
-                                    } else {
-                                      showToast('Erro: Dados de backup não encontrados.');
-                                    }
-                                  } catch (err) {
-                                    showToast('Erro ao restaurar o backup.');
-                                  }
-                                }}
-                                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold rounded border border-blue-200"
-                              >
-                                Restaurar
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Right: Manual JSON import */}
-                  <div className="space-y-2 border border-gray-150 p-3 rounded-lg bg-gray-50/50 flex flex-col justify-between">
-                    <div>
-                      <h5 className="font-bold text-gray-700">Restaurar de Ficheiro de Backup JSON</h5>
-                      <p className="text-[10px] text-gray-500">
-                        Carregue um arquivo de backup (.json) gerado anteriormente para restaurar totalmente o inventário, vendas e recursos humanos.
-                      </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Left: Auto-Backups List */}
+                <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-3 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h5 className="font-bold text-gray-800 text-xs uppercase flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[16px] text-teal-600">history</span>
+                        Backups Automáticos em Memória Local
+                      </h5>
+                      <span className="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded-full">
+                        {autoBackupsList.length} pontos
+                      </span>
                     </div>
-                    
-                    <div className="pt-2">
-                      <input
-                        type="file"
-                        accept=".json"
-                        id="backup-upload"
-                        className="hidden"
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          
-                          const reader = new FileReader();
-                          reader.onload = async (event) => {
-                            try {
-                              const content = event.target?.result as string;
-                              await dbService.importAllData(content);
-                              showToast('Recuperação efetuada com sucesso a partir do ficheiro de backup!');
-                              loadAllData();
-                            } catch (err) {
-                              showToast('Ficheiro de backup inválido ou corrompido.');
-                            }
-                          };
-                          reader.readAsText(file);
-                        }}
-                      />
+                    <p className="text-[11px] text-gray-500">
+                      O ERP cria pontos de restauro periódicos automáticos a cada 5 minutos e após cada venda concluída.
+                    </p>
+                  </div>
+                  
+                  {autoBackupsList.length === 0 ? (
+                    <div className="p-6 text-center text-gray-400 bg-gray-50 rounded-xl text-xs italic">
+                      Nenhum ponto de restauro automático gravado ainda.
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+                      {autoBackupsList.map((ts, idx) => (
+                        <div key={idx} className="flex justify-between items-center bg-gray-50 hover:bg-gray-100 p-2.5 border border-gray-200 rounded-lg text-xs transition-colors">
+                          <div className="space-y-0.5">
+                            <span className="font-bold text-gray-800 text-[11px]">Ponto #{autoBackupsList.length - idx}</span>
+                            <p className="text-[10px] text-gray-500 flex items-center gap-1 font-mono">
+                              <span className="material-symbols-outlined text-[12px]">schedule</span>
+                              {new Date(ts).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const conf = window.confirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
+                              if (!conf) return;
+                              try {
+                                const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
+                                if (backupData) {
+                                  await dbService.importAllData(backupData);
+                                  showToast('Banco de dados restaurado com sucesso!');
+                                  loadAllData();
+                                } else {
+                                  showToast('Erro: Dados de backup não encontrados.');
+                                }
+                              } catch (err) {
+                                showToast('Erro ao restaurar o backup.');
+                              }
+                            }}
+                            className="px-2.5 py-1 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-lg text-[10px] transition-colors cursor-pointer"
+                          >
+                            Restaurar
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Right: Manual JSON Upload */}
+                <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-4 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <h5 className="font-bold text-gray-800 text-xs uppercase flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-[16px] text-blue-600">file_upload</span>
+                      Restaurar Ficheiro de Backup (.JSON)
+                    </h5>
+                    <p className="text-[11px] text-gray-500 leading-relaxed">
+                      Se mudou de computador ou pretende repor um backup histórico, selecione o arquivo .json guardado previamente.
+                    </p>
+                  </div>
+                  
+                  <div className="p-4 border-2 border-dashed border-blue-200 bg-blue-50/50 rounded-xl text-center space-y-2">
+                    <input
+                      type="file"
+                      accept=".json"
+                      id="backup-upload"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        
+                        const reader = new FileReader();
+                        reader.onload = async (event) => {
+                          try {
+                            const content = event.target?.result as string;
+                            await dbService.importAllData(content);
+                            showToast('Recuperação efetuada com sucesso a partir do ficheiro de backup!');
+                            loadAllData();
+                          } catch (err) {
+                            showToast('Ficheiro de backup inválido ou corrompido.');
+                          }
+                        };
+                        reader.readAsText(file);
+                      }}
+                    />
+                    <span className="material-symbols-outlined text-blue-600 text-[28px]">upload_file</span>
+                    <div>
                       <label
                         htmlFor="backup-upload"
-                        className="w-full py-2 bg-blue-50 text-blue-700 border border-blue-200 rounded text-center block font-bold text-xs uppercase cursor-pointer hover:bg-blue-100 transition-colors flex items-center justify-center gap-1"
+                        className="inline-block px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs uppercase cursor-pointer transition-colors"
                       >
-                        <span className="material-symbols-outlined text-[14px]">upload_file</span>
-                        Carregar Ficheiro Backup (.JSON)
+                        Selecionar Ficheiro (.JSON)
                       </label>
+                      <p className="text-[10px] text-gray-500 mt-1.5">Formatos suportados: Ficheiros JSON exportados pelo ERP</p>
                     </div>
                   </div>
                 </div>
               </div>
+            </div>
+          )}
 
-              <div className="pt-4">
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 bg-primary text-white font-bold rounded uppercase hover:opacity-90 transition-opacity flex items-center gap-1 text-xs"
-                >
-                  <span className="material-symbols-outlined text-[16px]">save</span>
-                  Gravar Todas Configurações
-                </button>
+          {/* Sub-Tab 5: MANUTENÇÃO & EXERCÍCIO FISCAL */}
+          {settingsSubTab === 'sistema' && (
+            <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm space-y-5">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold flex items-center gap-2">
+                  <span className="material-symbols-outlined text-slate-800 text-[20px]">build</span>
+                  Manutenção Avançada, Ciclo Fiscal & Limpeza
+                </h4>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Ações críticas com privilégio de Técnico Master. Utilize com cautela após descarregar uma cópia de segurança.
+                </p>
               </div>
-            </form>
-          </div>
 
-          {/* Maintenance actions right sidebar */}
-          <div className="bg-white p-6 border border-gray-200 rounded-xl shadow-sm flex flex-col justify-between">
-            <div>
-              <h4 className="font-headline-md text-headline-md text-gray-800 font-bold border-b border-gray-100 pb-3">
-                Operações do Sistema
-              </h4>
-              <p className="text-[11px] text-gray-500 leading-relaxed mt-2">
-                Controles de desastre, backup e encerramento de ano. Estas ações requerem privilégio máximo de Técnico.
-              </p>
-            </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Fiscal Cycle Box */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <h5 className="font-bold text-slate-800 text-xs uppercase flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-indigo-600">calendar_month</span>
+                    Ciclo e Exercício Fiscal
+                  </h5>
+                  <p className="text-[11px] text-gray-600 leading-relaxed">
+                    Operações de fecho de exercício contábil anual e abertura do próximo ano financeiro.
+                  </p>
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleFecharAno}
+                      className="w-full py-2.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">lock</span>
+                      Fechar Ano Fiscal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleNovoAno}
+                      className="w-full py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">calendar_today</span>
+                      Novo Exercício Fiscal
+                    </button>
+                  </div>
+                </div>
 
-            <div className="space-y-2.5 mt-6">
-              <button
-                type="button"
-                onClick={handleEliminarHistoricoTeste}
-                className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded font-bold text-xs uppercase transition-colors shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <span className="material-symbols-outlined text-[16px]">delete_sweep</span>
-                Eliminar Histórico de Teste (Vendas, Facturas e Recibos)
-              </button>
-              <button
-                type="button"
-                onClick={handleZerarSistema}
-                className="w-full py-2.5 bg-red-50 text-red-700 border border-red-200 rounded font-bold text-xs uppercase hover:bg-red-100 transition-colors flex items-center justify-center gap-1"
-              >
-                <span className="material-symbols-outlined text-[14px]">delete_forever</span>
-                Zerar Sistema (Fiscal Reset)
-              </button>
-              <button
-                onClick={handleFecharAno}
-                className="w-full py-2.5 bg-gray-100 text-gray-700 border border-gray-200 rounded font-bold text-xs uppercase hover:bg-gray-200 transition-colors flex items-center justify-center gap-1"
-              >
-                <span className="material-symbols-outlined text-[14px]">lock</span>
-                Fechar Ano Fiscal
-              </button>
-              <button
-                onClick={handleNovoAno}
-                className="w-full py-2.5 bg-gray-100 text-gray-700 border border-gray-200 rounded font-bold text-xs uppercase hover:bg-gray-200 transition-colors flex items-center justify-center gap-1"
-              >
-                <span className="material-symbols-outlined text-[14px]">calendar_today</span>
-                Novo Exercício Fiscal
-              </button>
-              <button
-                onClick={handleBackupTotal}
-                className="w-full py-2.5 bg-primary text-white rounded font-bold text-xs uppercase hover:opacity-95 transition-opacity flex items-center justify-center gap-1"
-              >
-                <span className="material-symbols-outlined text-[14px]">backup</span>
-                Backup Total das Bases de Dados
-              </button>
+                {/* Database Reset & Testing Cleansing */}
+                <div className="p-4 bg-red-50/50 border border-red-200 rounded-xl space-y-3">
+                  <h5 className="font-bold text-red-900 text-xs uppercase flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-red-600">warning</span>
+                    Limpeza de Teste e Reposição de Fábrica
+                  </h5>
+                  <p className="text-[11px] text-red-700 leading-relaxed">
+                    Elimine transações de demonstração ou restaure o ERP para o estado inicial de implantação.
+                  </p>
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleEliminarHistoricoTeste}
+                      className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">delete_sweep</span>
+                      Eliminar Histórico de Teste (Vendas e Facturas)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleZerarSistema}
+                      className="w-full py-2.5 bg-white hover:bg-red-100 text-red-700 border border-red-300 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">delete_forever</span>
+                      Zerar Sistema (Fiscal Reset Total)
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
