@@ -88,14 +88,13 @@ async function startServer() {
   // Security Headers Middleware (Parte 6 - 6.3.5)
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
     res.setHeader("X-XSS-Protection", "1; mode=block");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("Permissions-Policy", "camera=(self), microphone=(), geolocation=()");
-    // Content-Security-Policy accommodating Firebase, Google Fonts, and Vite hot reload
+    // Content-Security-Policy accommodating Firebase, Google Fonts, Arena preview iframe, and Vite hot reload
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https://*.googleapis.com https://*.firebaseio.com https://*.firebase.com https://*.google.com https://*.gstatic.com https://unpkg.com https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://*.googleapis.com https://*.firebaseio.com https://*.firebase.com https://*.google.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com;"
+      "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; connect-src 'self' ws: wss: https: http:; img-src 'self' data: blob: https: http:; font-src 'self' data: https: http:; frame-ancestors 'self' https: http:;"
     );
     next();
   });
