@@ -816,16 +816,6 @@ export class FirebaseDBService {
 
   // --- Credentials ---
   public async getCredentials(): Promise<UserCredentials[]> {
-    const verifiedOfficialCreds: UserCredentials[] = [
-      { id: 'usr-ainira', username: 'Ainira', passwordHash: '131923', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
-      { id: 'usr-maria', username: 'Maria', passwordHash: 'Mara', role: 'Operador', roles: ['Operador'], mfaEnabled: false },
-      { id: 'usr-mazive', username: 'Mazive', passwordHash: '0147', role: 'Técnico', roles: ['Técnico'], mfaEnabled: false },
-      { id: 'usr-nelson', username: 'Nelson', passwordHash: '1987', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-      { id: 'usr-salvador', username: 'Salvador', passwordHash: '2000SC', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-      { id: 'usr-vanda', username: 'Vanda', passwordHash: '2060', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-      { id: 'usr-gestor1', username: 'gestor1', passwordHash: 'gestor123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false }
-    ];
-
     if (this.credentialsCache && this.credentialsCache.length > 0) {
       return this.credentialsCache;
     }
@@ -842,36 +832,19 @@ export class FirebaseDBService {
 
     const list = await this.getAll<UserCredentials>('credentials');
     if (list && list.length > 0) {
-      let hasUpdates = false;
-      const merged = [...list];
-      for (const off of verifiedOfficialCreds) {
-        const foundIdx = merged.findIndex(c => c.username.toLowerCase() === off.username.toLowerCase() || (off.username === 'Ainira' && c.username.toLowerCase() === 'ainara'));
-        if (foundIdx >= 0) {
-          const current = merged[foundIdx];
-          if (current.role !== off.role || current.passwordHash !== off.passwordHash || current.username !== off.username) {
-            merged[foundIdx] = { ...current, username: off.username, role: off.role, roles: off.roles, passwordHash: off.passwordHash };
-            this.saveCredential(merged[foundIdx]).catch(() => {});
-            hasUpdates = true;
-          }
-        } else {
-          merged.push(off);
-          this.saveCredential(off).catch(() => {});
-          hasUpdates = true;
-        }
-      }
-      this.credentialsCache = merged.sort((a, b) => a.username.localeCompare(b.username));
+      this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
       safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
       return this.credentialsCache;
     }
 
-    if (this.credentialsCache && this.credentialsCache.length > 0) {
-      return this.credentialsCache;
-    }
-
-    await this.upsertBatch('credentials', verifiedOfficialCreds);
-    this.credentialsCache = verifiedOfficialCreds;
-    safeStorage.setItem('agro_credentials_cache', JSON.stringify(verifiedOfficialCreds));
-    return verifiedOfficialCreds;
+    // Se a base de dados estiver completamente vazia, criamos um utilizador administrador inicial
+    const initialAdmin: UserCredentials[] = [
+      { id: 'usr-admin-inicial', username: 'admin', passwordHash: 'admin123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false }
+    ];
+    await this.upsertBatch('credentials', initialAdmin);
+    this.credentialsCache = initialAdmin;
+    safeStorage.setItem('agro_credentials_cache', JSON.stringify(initialAdmin));
+    return initialAdmin;
   }
 
   public async saveCredential(c: UserCredentials): Promise<void> {
