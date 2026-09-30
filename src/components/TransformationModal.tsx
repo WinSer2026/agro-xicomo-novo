@@ -37,6 +37,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
   onTransformationComplete
 }) => {
   const [selectedOriginalId, setSelectedOriginalId] = useState<string>('');
+  const [productSearchTerm, setProductSearchTerm] = useState<string>('');
   const [originalQty, setOriginalQty] = useState<number>(1);
   const [useBulkUnit, setUseBulkUnit] = useState<boolean>(false);
   const [notes, setNotes] = useState<string>('');
@@ -62,6 +63,18 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
   ]);
 
   const originalProduct = products.find(p => p.id === selectedOriginalId);
+
+  // Filtered available products in stock matching search term
+  const availableOriginalProducts = products.filter(p => {
+    const hasStock = p.stockQty > 0 || (p.stockQtyBulk || 0) > 0;
+    if (!hasStock) return false;
+    if (!productSearchTerm.trim()) return true;
+    const term = productSearchTerm.toLowerCase();
+    const nameMatch = (p.name || '').toLowerCase().includes(term);
+    const codeMatch = (p.code || '').toLowerCase().includes(term);
+    const catMatch = (p.category || '').toLowerCase().includes(term);
+    return nameMatch || codeMatch || catMatch;
+  });
 
   // Available stock of selected product
   const availableStock = originalProduct
@@ -543,39 +556,139 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
 
               {/* PASSO 1: Seleção do Produto Original */}
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
-                <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
-                  <span className="w-5 h-5 bg-emerald-700 text-white font-black rounded-full flex items-center justify-center text-[10px]">
-                    1
-                  </span>
-                  <h4 className="font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight">
-                    Requisição do Produto Original a Fracionar
-                  </h4>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 bg-emerald-700 text-white font-black rounded-full flex items-center justify-center text-[10px]">
+                      1
+                    </span>
+                    <h4 className="font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight">
+                      Requisição do Produto Original a Fracionar
+                    </h4>
+                  </div>
+                  {originalProduct && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedOriginalId('');
+                        setProductSearchTerm('');
+                      }}
+                      className="text-[10px] font-bold text-slate-500 hover:text-red-600 flex items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <span className="material-symbols-outlined text-[14px]">restart_alt</span>
+                      Trocar Artigo Selecionado
+                    </button>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 sm:gap-4 items-end">
-                  <div className="md:col-span-6">
-                    <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
-                      Selecionar Artigo do Stock
-                    </label>
-                    <select
-                      value={selectedOriginalId}
-                      onChange={(e) => handleOriginalProductChange(e.target.value)}
-                      className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600"
-                    >
-                      <option value="">-- Escolha o produto original --</option>
-                      {products
-                        .filter(p => p.stockQty > 0 || (p.stockQtyBulk || 0) > 0)
-                        .map(p => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} (Stock: {p.stockQtyBulk ? `${p.stockQtyBulk} ${p.parentUnit} / ` : ''}{p.stockQty} {p.baseUnit}) - Custo: {p.buyingPrice} MT
-                          </option>
-                        ))}
-                    </select>
-                  </div>
+                {!selectedOriginalId ? (
+                  <div className="space-y-3">
+                    {/* Search Bar for Products */}
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
+                        Pesquisar Artigo em Stock para Transformar
+                      </label>
+                      <div className="relative">
+                        <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[18px]">
+                          search
+                        </span>
+                        <input
+                          type="text"
+                          value={productSearchTerm}
+                          onChange={(e) => setProductSearchTerm(e.target.value)}
+                          placeholder="Digite o nome do produto, código ou categoria (ex: Ureia, NPK, Sementes)..."
+                          className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-8 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600 shadow-2xs"
+                          autoFocus
+                        />
+                        {productSearchTerm && (
+                          <button
+                            type="button"
+                            onClick={() => setProductSearchTerm('')}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">cancel</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
 
-                  {originalProduct && (
-                    <>
-                      <div className="md:col-span-3">
+                    {/* Quick Selection List */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase">
+                        <span>Produtos com Stock Disponível ({availableOriginalProducts.length})</span>
+                        {productSearchTerm && <span>Filtrado por: "{productSearchTerm}"</span>}
+                      </div>
+
+                      {availableOriginalProducts.length === 0 ? (
+                        <div className="p-5 bg-white border border-slate-200 rounded-xl text-center text-gray-400 text-xs">
+                          Nenhum produto com stock disponível encontrado para a pesquisa.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
+                          {availableOriginalProducts.map(p => {
+                            const hasBulk = (p.stockQtyBulk || 0) > 0 && p.parentUnit;
+                            return (
+                              <button
+                                key={p.id}
+                                type="button"
+                                onClick={() => handleOriginalProductChange(p.id)}
+                                className="text-left bg-white hover:bg-emerald-50/80 p-2.5 rounded-xl border border-slate-200 hover:border-emerald-300 shadow-2xs transition-all cursor-pointer group flex flex-col justify-between"
+                              >
+                                <div className="flex items-start justify-between gap-1.5">
+                                  <span className="font-bold text-slate-800 group-hover:text-emerald-900 text-xs">
+                                    {p.name}
+                                  </span>
+                                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0">
+                                    {p.category}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between mt-2 text-[10px]">
+                                  <span className="text-emerald-700 font-bold">
+                                    Stock: {hasBulk ? `${p.stockQtyBulk} ${p.parentUnit} (${p.stockQty} ${p.baseUnit})` : `${p.stockQty} ${p.baseUnit}`}
+                                  </span>
+                                  <span className="text-slate-500 font-mono">
+                                    Custo: {p.buyingPrice.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  /* When product is selected */
+                  <div className="space-y-3">
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 bg-emerald-600 text-white rounded-lg">
+                          <span className="material-symbols-outlined text-[20px]">check_circle</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-black uppercase text-emerald-800">Artigo Selecionado</span>
+                          <h5 className="font-bold text-emerald-950 text-xs sm:text-sm">{originalProduct.name}</h5>
+                          <span className="text-[10px] text-emerald-700">Categoria: {originalProduct.category} {originalProduct.code ? `• Código: ${originalProduct.code}` : ''}</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 sm:border-l sm:border-emerald-200 sm:pl-3 text-right sm:text-left">
+                        <div>
+                          <span className="text-[9px] font-black text-slate-500 uppercase block">Stock Disponível</span>
+                          <span className="text-xs font-black text-emerald-900">
+                            {originalProduct.stockQtyBulk ? `${originalProduct.stockQtyBulk} ${originalProduct.parentUnit} / ` : ''}{originalProduct.stockQty} {originalProduct.baseUnit}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] font-black text-slate-500 uppercase block">Custo Unitário</span>
+                          <span className="text-xs font-mono font-bold text-slate-700">
+                            {originalUnitCostPerBase.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT/{originalProduct.baseUnit}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end pt-1">
+                      <div className="md:col-span-6">
                         <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
                           Quantidade a Requisitar ({useBulkUnit && originalProduct.parentUnit ? originalProduct.parentUnit : originalProduct.baseUnit})
                         </label>
@@ -590,49 +703,47 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                         />
                       </div>
 
-                      <div className="md:col-span-3 flex items-center gap-2 pb-2">
+                      <div className="md:col-span-6 flex items-center gap-2 pb-2">
                         {originalProduct.parentUnit && (
-                          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-bold text-slate-700">
+                          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-bold text-slate-700 bg-white p-2 rounded-lg border border-slate-200 w-full">
                             <input
                               type="checkbox"
                               checked={useBulkUnit}
                               onChange={(e) => setUseBulkUnit(e.target.checked)}
                               className="rounded text-emerald-700 focus:ring-emerald-600"
                             />
-                            Requisitar em {originalProduct.parentUnit} (Sacos/Caixas)
+                            Requisitar em {originalProduct.parentUnit} (Volume/Saco Grande)
                           </label>
                         )}
                       </div>
-                    </>
-                  )}
-                </div>
+                    </div>
 
-                {/* Original Product Info Summary */}
-                {originalProduct && (
-                  <div className="bg-white p-3 rounded-lg border border-slate-200 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-                    <div>
-                      <span className="text-[9px] font-black text-slate-400 uppercase">Stock Disponível</span>
-                      <p className="text-xs font-black text-slate-700 mt-0.5">
-                        {availableStock} {useBulkUnit && originalProduct.parentUnit ? originalProduct.parentUnit : originalProduct.baseUnit}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-[9px] font-black text-slate-400 uppercase">Volume Base Total</span>
-                      <p className="text-xs font-black text-emerald-800 mt-0.5">
-                        {originalBaseQty} {originalProduct.baseUnit}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-[9px] font-black text-slate-400 uppercase">Custo Unitário Base</span>
-                      <p className="text-xs font-black text-slate-700 mt-0.5">
-                        {originalUnitCostPerBase.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT / {originalProduct.baseUnit}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-[9px] font-black text-slate-400 uppercase">Custo Total Requisitado</span>
-                      <p className="text-xs font-black text-emerald-700 mt-0.5">
-                        {originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
-                      </p>
+                    {/* Original Product Info Summary */}
+                    <div className="bg-white p-3 rounded-lg border border-slate-200 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                      <div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase">Stock Disponível</span>
+                        <p className="text-xs font-black text-slate-700 mt-0.5">
+                          {availableStock} {useBulkUnit && originalProduct.parentUnit ? originalProduct.parentUnit : originalProduct.baseUnit}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase">Volume Base Total</span>
+                        <p className="text-xs font-black text-emerald-800 mt-0.5">
+                          {originalBaseQty} {originalProduct.baseUnit}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase">Custo Unitário Base</span>
+                        <p className="text-xs font-black text-slate-700 mt-0.5">
+                          {originalUnitCostPerBase.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT / {originalProduct.baseUnit}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase">Custo Total Requisitado</span>
+                        <p className="text-xs font-black text-emerald-700 mt-0.5 font-mono">
+                          {originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}

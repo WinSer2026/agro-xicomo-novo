@@ -23,6 +23,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   const [transformations, setTransformations] = useState<ProductTransformation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Concluída' | 'Cancelada'>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState('');
   const [isReversing, setIsReversing] = useState<string | null>(null);
@@ -65,7 +66,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
     setTimeout(() => setToastMsg(''), 3000);
   };
 
-  // Filtered Transformations by Date Range and Search Query
+  // Filtered Transformations by Date Range, Status and Search Query
   const filteredTransformations = transformations.filter(t => {
     // 1. Date Range Filter using the actual date of transformation
     const trfDate = t.date || (t.createdAt ? t.createdAt.split('T')[0] : '');
@@ -73,14 +74,24 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       return false;
     }
 
-    // 2. Search Query filter
+    // 2. Status Filter
+    if (statusFilter !== 'all' && t.status !== statusFilter) {
+      return false;
+    }
+
+    // 3. Search Query filter (code, original product, code, operator, notes, resulting items)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const codeMatch = (t.code || '').toLowerCase().includes(q);
       const nameMatch = (t.originalProductName || '').toLowerCase().includes(q);
+      const origCodeMatch = (t.originalProductCode || '').toLowerCase().includes(q);
       const opMatch = (t.operatorName || '').toLowerCase().includes(q);
-      const itemsMatch = (t.items || []).some(it => it.resultingProductName.toLowerCase().includes(q));
-      if (!codeMatch && !nameMatch && !opMatch && !itemsMatch) return false;
+      const notesMatch = (t.notes || '').toLowerCase().includes(q);
+      const itemsMatch = (t.items || []).some(it => 
+        it.resultingProductName.toLowerCase().includes(q) || 
+        (it.resultingProductCode || '').toLowerCase().includes(q)
+      );
+      if (!codeMatch && !nameMatch && !origCodeMatch && !opMatch && !notesMatch && !itemsMatch) return false;
     }
 
     return true;
@@ -399,26 +410,83 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       </div>
 
       {/* Search & List of Transformations */}
-      <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-150 pb-4">
+      <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-gray-150 pb-4">
           <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-gray-600">history</span>
-            <h4 className="font-black text-gray-800 text-sm uppercase tracking-tight">
-              Histórico de Transformações Realizadas ({filteredTransformations.length})
-            </h4>
+            <span className="material-symbols-outlined text-emerald-700 text-xl">history</span>
+            <div>
+              <h4 className="font-black text-gray-800 text-sm uppercase tracking-tight">
+                Histórico de Transformações Realizadas
+              </h4>
+              <p className="text-[11px] text-gray-500">
+                A mostrar <strong className="text-emerald-700">{filteredTransformations.length}</strong> de {transformations.length} registos
+              </p>
+            </div>
           </div>
 
-          <div className="relative w-full sm:w-72">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[18px]">
-              search
-            </span>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Pesquisar código, artigo, responsável..."
-              className="w-full bg-gray-50 border border-gray-300 rounded-lg pl-9 pr-3 py-1.5 text-xs font-bold text-gray-800 focus:bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Status Filter Chips */}
+            <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl text-xs font-bold border border-gray-200">
+              <button
+                type="button"
+                onClick={() => setStatusFilter('all')}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  statusFilter === 'all'
+                    ? 'bg-white text-gray-800 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-800'
+                }`}
+              >
+                Todas
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('Concluída')}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                  statusFilter === 'Concluída'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'text-emerald-700 hover:bg-emerald-50'
+                }`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-current"></span>
+                Concluídas
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('Cancelada')}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                  statusFilter === 'Cancelada'
+                    ? 'bg-red-600 text-white shadow-xs'
+                    : 'text-red-700 hover:bg-red-50'
+                }`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-current"></span>
+                Canceladas
+              </button>
+            </div>
+
+            {/* Search Input with quick clear */}
+            <div className="relative w-full sm:w-80">
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[18px]">
+                search
+              </span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Pesquisar código, artigo, operador..."
+                className="w-full bg-gray-50 border border-gray-300 rounded-xl pl-9 pr-8 py-1.5 text-xs font-bold text-gray-800 focus:bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 cursor-pointer"
+                  title="Limpar pesquisa"
+                >
+                  <span className="material-symbols-outlined text-[16px]">cancel</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
