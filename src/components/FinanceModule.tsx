@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
@@ -103,7 +104,7 @@ export default function FinanceModule() {
   const totalCost = filteredSales.reduce((acc, sale) => {
     return acc + (sale.items || []).reduce((sum, item) => {
       const prod = products.find(p => p.id === item.productId);
-      const buyPrice = item.costPrice ?? item.buyingPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
+      const buyPrice = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
       return sum + (buyPrice * item.quantity);
     }, 0);
   }, 0);
@@ -152,8 +153,9 @@ export default function FinanceModule() {
   const reportCost = reportSales.reduce((acc, sale) => {
     return acc + sale.items.reduce((sum, item) => {
       const prod = products.find(p => p.id === item.productId);
-      const buyPrice = prod ? prod.buyingPrice : (item.unitPrice * 0.6);
-      return sum + (buyPrice * item.quantity);
+      const buyPrice = prod ? getUnitCost(prod, item.sellingUnit) : (item.unitPrice * 0.6);
+      const baseQty = getBaseUnitQuantity(prod, item.quantity, item.sellingUnit);
+      return sum + (buyPrice * baseQty);
     }, 0);
   }, 0);
   const reportProfit = Math.max(0, reportGrossSales - reportCost);
@@ -184,7 +186,7 @@ export default function FinanceModule() {
     const productData = products.map(p => {
       const soldQty = reportSales.reduce((sum, sale) => {
         const item = sale.items.find(it => it.productId === p.id);
-        return sum + (item ? item.quantity : 0);
+        return sum + (item ? getBaseUnitQuantity(p, item.quantity, item.sellingUnit) : 0);
       }, 0);
       return {
         'Produto/Serviço': p.name,
@@ -1785,10 +1787,12 @@ export default function FinanceModule() {
                       products.map(p => {
                         const soldQty = reportSales.reduce((sum, sale) => {
                           const item = sale.items.find(it => it.productId === p.id);
-                          return sum + (item ? item.quantity : 0);
+                          return sum + (item ? getBaseUnitQuantity(p, item.quantity, item.sellingUnit) : 0);
                         }, 0);
+                        // Produtos vendidos em saco e em quilo: relatório sempre na unidade base (kg)
+                        const unitCost = getUnitCost(p, 'Retail');
                         const faturado = soldQty * p.sellingPrice;
-                        const lucro = soldQty * (p.sellingPrice - p.buyingPrice);
+                        const lucro = soldQty * (p.sellingPrice - unitCost);
                         // Comprado can be simulated as catalog stockQty + soldQty historically
                         const totalComprado = p.stockQty + soldQty;
 

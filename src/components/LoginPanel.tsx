@@ -3,7 +3,9 @@ import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
 import { getUserRoles } from '../utils/roleHelper';
-import { verifyPassword } from '../utils/securityHelper';
+import { validateAccessPassword, verifyPassword } from '../utils/securityHelper';
+import { applyNewPassword } from '../utils/credentialsReset';
+import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
 
 interface LoginPanelProps {
   onLoginSuccess: (user: { username: string; role: string; roles?: AppRole[] }) => void;
@@ -19,6 +21,12 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
   const [show2FASetup, setShow2FASetup] = useState(false);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Primeiro acesso após o reset de credenciais: troca obrigatória de palavra-passe
+  const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changePasswordError, setChangePasswordError] = useState('');
 
   // Stats for the screen
   const [activeOpsCount, setActiveOpsCount] = useState(0);
@@ -106,17 +114,18 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     return () => clearInterval(interval);
   }, [lockoutUntil]);
 
-  const OFFICIAL_BACKUP_CREDS: UserCredentials[] = [
-    { id: 'usr-mazive', username: 'Mazive', passwordHash: '0147', role: 'Técnico', roles: ['Técnico'], mfaEnabled: false },
-    { id: 'usr-admin', username: 'admin', passwordHash: '0147', role: 'Técnico', roles: ['Técnico'], mfaEnabled: false },
-    { id: 'usr-salvador', username: 'Salvador', passwordHash: '2000SC', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-    { id: 'usr-gestor1', username: 'gestor1', passwordHash: 'gestor123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-    { id: 'usr-nelson', username: 'Nelson', passwordHash: '1987', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-    { id: 'usr-vanda', username: 'Vanda', passwordHash: '2060', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false },
-    { id: 'usr-ainara', username: 'Ainara', passwordHash: '131923', role: 'Contabilista', roles: ['Contabilista'], mfaEnabled: false },
-    { id: 'usr-ainira', username: 'Ainira', passwordHash: '131923', role: 'Contabilista', roles: ['Contabilista'], mfaEnabled: false },
-    { id: 'usr-maria', username: 'Maria', passwordHash: 'Mara', role: 'Operador', roles: ['Operador'], mfaEnabled: false }
-  ];
+  // Credenciais oficiais de contingência (usadas apenas se a base de dados ainda não tiver
+  // credenciais sincronizadas). Palavras-passe TEMPORÁRIAS: obrigam troca no primeiro login.
+  const OFFICIAL_BACKUP_CREDS: UserCredentials[] = OFFICIAL_RESET_CREDENTIALS.map(c => ({
+    id: c.id,
+    username: c.username,
+    passwordHash: c.passwordHash,
+    role: c.role,
+    roles: c.roles,
+    mfaEnabled: false,
+    mustChangePassword: true,
+    passwordResetVersion: CREDENTIALS_RESET_VERSION
+  }));
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -155,6 +164,24 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       if ((lower === 'mazive' || lower === 'admin') && (cleanPass === '0147' || cleanPass === 'admin' || cleanPass === '05082')) {
         safeStorage.removeItem('agro_login_failed_attempts');
         safeStorage.removeItem('agro_login_lockout_until');
+
+        // Mesmo com a chave mestre, se a conta tiver palavra-passe temporária do reset,
+        // o operador é obrigado a definir uma nova palavra-passe antes de entrar.
+        try {
+          const creds = await dbService.getCredentials();
+          const masterUser = (creds || []).find(c => c.username.toLowerCase() === lower);
+          if (masterUser && masterUser.mustChangePassword) {
+            setPendingUser(masterUser);
+            setNewPassword('');
+            setConfirmPassword('');
+            setChangePasswordError('');
+            setShowPasswordChange(true);
+            setIsSubmitting(false);
+            return;
+          }
+        } catch (e) {
+          console.warn('Master key credential check failed:', e);
+        }
 
         const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
         safeSessionStorage.setItem('agro_session_id', masterSessionId);
@@ -245,15 +272,63 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       safeStorage.removeItem('agro_login_failed_attempts');
       safeStorage.removeItem('agro_login_lockout_until');
 
-      const userRoles = getUserRoles(user);
-      const isTech = userRoles.includes('Técnico');
+      // 3. Primeiro acesso após o reset de credenciais: exigir nova palavra-passe
+      if (user.mustChangePassword) {
+        setPendingUser(user);
+        setNewPassword('');
+        setConfirmPassword('');
+        setChangePasswordError('');
+        setShowPasswordChange(true);
+        setIsSubmitting(false);
+        return;
+      }
 
-      // 3. Técnico / Admin direct login without blocker
+      // 4. Técnico / Admin direct login without blocker
       await finalizeSession(user, ipAddress);
 
     } catch (err) {
       console.error('Login error:', err);
       setError('Erro ao validar credenciais. Verifique os dados inseridos.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Primeiro acesso: o operador define a palavra-passe que quiser (4 a 6 caracteres)
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    setChangePasswordError('');
+
+    if (!pendingUser) return;
+
+    const policy = validateAccessPassword(newPassword);
+    if (!policy.strong) {
+      setChangePasswordError(policy.message || 'Palavra-passe inválida.');
+      return;
+    }
+    if (newPassword.trim() !== confirmPassword.trim()) {
+      setChangePasswordError('As palavras-passe introduzidas não coincidem.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const result = await applyNewPassword(pendingUser.username, newPassword.trim());
+      if (!result.ok) {
+        setChangePasswordError(result.message || 'Erro ao gravar a nova palavra-passe.');
+        return;
+      }
+
+      const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+      await finalizeSession({ ...pendingUser, passwordHash: '', mustChangePassword: false }, ipAddress);
+      setShowPasswordChange(false);
+      setPendingUser(null);
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      console.error('Password change error:', err);
+      setChangePasswordError('Erro ao gravar a nova palavra-passe. Tente novamente.');
     } finally {
       setIsSubmitting(false);
     }
@@ -373,7 +448,94 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
             </div>
           )}
 
-          {!showMFA && !show2FASetup ? (
+          {showPasswordChange ? (
+            <form onSubmit={handleChangePasswordSubmit} autoComplete="off" noValidate className="space-y-4">
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center space-y-1">
+                <span className="material-symbols-outlined text-[28px] text-amber-600">key</span>
+                <p className="text-xs font-black text-amber-900 uppercase">
+                  Primeiro acesso — atualize a sua palavra-passe
+                </p>
+                <p className="text-[11px] text-amber-800">
+                  Operador: <strong>{pendingUser?.username}</strong>
+                </p>
+              </div>
+
+              {changePasswordError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-xs font-bold flex items-center gap-2 animate-shake">
+                  <span className="material-symbols-outlined text-[18px] text-red-600">error</span>
+                  <span>{changePasswordError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-black uppercase text-gray-700 mb-1">
+                  Nova Palavra-passe
+                </label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  maxLength={6}
+                  autoComplete="new-password"
+                  placeholder="4 a 6 caracteres (letras ou números)"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black uppercase text-gray-700 mb-1">
+                  Repetir Nova Palavra-passe
+                </label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  maxLength={6}
+                  autoComplete="new-password"
+                  placeholder="Repita a nova palavra-passe"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
+                />
+              </div>
+
+              <p className="text-[10px] text-gray-500 text-center leading-relaxed">
+                Pode usar qualquer palavra-passe com 4 a 6 caracteres (apenas números, apenas letras ou mistos).
+                Não é obrigatório usar símbolos.
+              </p>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 disabled:bg-gray-300 transition-all text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-md flex items-center justify-center gap-2 cursor-pointer"
+              >
+                {isSubmitting ? (
+                  <>
+                    <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" />
+                    <span>A gravar...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-[18px]">verified_user</span>
+                    <span>Gravar e Entrar no Sistema</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPasswordChange(false);
+                  setPendingUser(null);
+                  setNewPassword('');
+                  setConfirmPassword('');
+                  setChangePasswordError('');
+                  setPassword('');
+                }}
+                className="w-full py-2 border border-gray-300 text-gray-700 font-bold text-xs rounded-xl hover:bg-gray-50 transition-colors cursor-pointer"
+              >
+                Voltar ao Login Principal
+              </button>
+            </form>
+          ) : !showMFA && !show2FASetup ? (
             <form onSubmit={handleLoginSubmit} autoComplete="off" noValidate className="space-y-4">
               <div>
                 <label className="block text-xs font-black uppercase text-gray-700 mb-1">

@@ -68,10 +68,10 @@ export const INITIAL_PRODUCTS: Product[] = [
   { id: 'sem-35', code: 'SEM035', name: 'NABO LONGO CHINES PACOTE 10G', category: 'Sementes', stockQty: 5, buyingPrice: 70, sellingPrice: 115, baseUnit: 'Pacotes' },
 
   // --- Category: Adubos ---
-  { id: 'fer-01', code: 'FER001', name: 'COMPOSTO - NPK-SACO 50KG', category: 'Adubos', stockQty: 200, stockQtyBulk: 4, stockQtyRetail: 0, buyingPrice: 3300, sellingPrice: 95, sellingPriceBulk: 4000, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
+  { id: 'fer-01', code: 'FER001', name: 'COMPOSTO - NPK-SACO 50KG', category: 'Adubos', stockQty: 200, stockQtyBulk: 4, stockQtyRetail: 0, buyingPriceBulk: 3300, buyingPrice: 66, sellingPrice: 95, sellingPriceBulk: 4000, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
   { id: 'fer-02', code: 'FER002', name: 'COMPOSTO - NPK-PACOTE 1KG', category: 'Adubos', stockQty: 41, buyingPrice: 75, sellingPrice: 95, baseUnit: 'Unidades' },
-  { id: 'fer-03', code: 'FER003', name: 'UREIA FINA - SACO 50KG', category: 'Adubos', stockQty: 500, stockQtyBulk: 10, stockQtyRetail: 0, buyingPrice: 3300, sellingPrice: 95, sellingPriceBulk: 4000, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
-  { id: 'fer-04', code: 'FER004', name: 'UREIA FINA AZUL - SACO 50KG', category: 'Adubos', stockQty: 400, stockQtyBulk: 8, stockQtyRetail: 0, buyingPrice: 3450, sellingPrice: 100, sellingPriceBulk: 4100, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
+  { id: 'fer-03', code: 'FER003', name: 'UREIA FINA - SACO 50KG', category: 'Adubos', stockQty: 500, stockQtyBulk: 10, stockQtyRetail: 0, buyingPriceBulk: 3300, buyingPrice: 66, sellingPrice: 95, sellingPriceBulk: 4000, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
+  { id: 'fer-04', code: 'FER004', name: 'UREIA FINA AZUL - SACO 50KG', category: 'Adubos', stockQty: 400, stockQtyBulk: 8, stockQtyRetail: 0, buyingPriceBulk: 3450, buyingPrice: 69, sellingPrice: 100, sellingPriceBulk: 4100, baseUnit: 'Kg', parentUnit: 'Sacos', conversionRate: 50 },
   { id: 'fer-05', code: 'FER005', name: 'UREIA FINA - PACOTE 1KG', category: 'Adubos', stockQty: 48, buyingPrice: 75, sellingPrice: 95, baseUnit: 'Unidades' },
   { id: 'fer-06', code: 'FER006', name: 'UREIA FINA AZUL - PACOTE 1KG', category: 'Adubos', stockQty: 56, buyingPrice: 80, sellingPrice: 100, baseUnit: 'Unidades' },
   { id: 'fer-07', code: 'FER007', name: 'FOLHAR - FORCROP 4-16-28 LT', category: 'Adubos', stockQty: 3, buyingPrice: 0, sellingPrice: 750, baseUnit: 'Litros' },

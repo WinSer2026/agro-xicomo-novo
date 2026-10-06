@@ -12,7 +12,8 @@ export interface Product {
   stockQty: number; // In base unit
   stockQtyBulk?: number; // Quantity in parentUnit (e.g. Sacos) for wholesale/resale
   stockQtyRetail?: number; // Quantity in baseUnit (e.g. Kg) for retail sale
-  buyingPrice: number; // Cost price per base unit in MT
+  buyingPrice: number; // Cost price per base unit in MT (for hybrid products it is the derived cost of the base unit, e.g. KG)
+  buyingPriceBulk?: number; // Cost price per bulk/parent unit (e.g. Saco) in MT — the price actually paid to the supplier
   sellingPrice: number; // Sell price per base unit in MT
   sellingPriceBulk?: number; // Sell price per bulk unit (e.g. Saco) in MT
   baseUnit: string; // 'Kg', 'Pacotes', 'Litros', 'Sacos', 'Caixas', 'Unidades', 'Metros', 'Metros Quadrados'
@@ -325,4 +326,8 @@ export interface UserCredentials {
   roles?: AppRole[];
   mfaEnabled: boolean;
   mfaSecret?: string;
+  /** When true, the operator is forced to define a new password on the next login (credential reset flow). */
+  mustChangePassword?: boolean;
+  /** Version of the credential reset already applied to this account (idempotency guard). */
+  passwordResetVersion?: number;
 }
