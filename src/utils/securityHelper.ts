@@ -90,10 +90,27 @@ export function sanitizeNumber(input: any, defaultValue: number = 0): number {
 
 /**
  * Password Strength Policy
+ * Política oficial: 4 a 6 caracteres, podendo ser apenas números, apenas letras ou mistos.
+ * Não é obrigatório usar símbolos e é permitido repetir uma palavra-passe antiga.
  */
 export function isPasswordStrong(password: string): { strong: boolean; message?: string } {
-  if (!password || password.length < 5) {
-    return { strong: false, message: 'A palavra-passe deve ter pelo menos 5 caracteres.' };
+  return validateAccessPassword(password);
+}
+
+export function validateAccessPassword(password: string): { strong: boolean; message?: string } {
+  const value = (password || '').trim();
+
+  if (!value) {
+    return { strong: false, message: 'A palavra-passe é obrigatória.' };
+  }
+  if (value.length < 4 || value.length > 6) {
+    return { strong: false, message: 'A palavra-passe deve ter entre 4 e 6 caracteres.' };
+  }
+  if (/\s/.test(value)) {
+    return { strong: false, message: 'A palavra-passe não pode conter espaços.' };
+  }
+  if (!/^[A-Za-zÀ-ÿ0-9@#$%&*!?._-]+$/.test(value)) {
+    return { strong: false, message: 'A palavra-passe só pode conter letras e números.' };
   }
   return { strong: true };
 }

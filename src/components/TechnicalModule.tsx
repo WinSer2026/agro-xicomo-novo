@@ -7,7 +7,8 @@ import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
-import { hashPassword } from '../utils/securityHelper';
+import { hashPassword, validateAccessPassword } from '../utils/securityHelper';
+import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import * as XLSX from 'xlsx';
 import { 
   connectSerialPrinter, 
@@ -100,6 +101,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [usrPassword, setUsrPassword] = useState('');
   const [usrRoles, setUsrRoles] = useState<AppRole[]>(['Operador']);
   const [usrMfa, setUsrMfa] = useState(false);
+  const [usrMustChange, setUsrMustChange] = useState(false);
   const [userToDelete, setUserToDelete] = useState<{ id: string; username: string } | null>(null);
 
   // Toast
@@ -262,7 +264,17 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     }
 
     const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
-    const finalPasswordHash = usrPassword.trim().startsWith('sha256:') ? usrPassword.trim() : await hashPassword(usrPassword.trim());
+
+    const isExistingHash = usrPassword.trim().startsWith('sha256:');
+    if (!isExistingHash) {
+      // Política oficial: 4 a 6 caracteres (apenas números, apenas letras ou mistos)
+      const policy = validateAccessPassword(usrPassword);
+      if (!policy.strong) {
+        showToast(policy.message || 'Palavra-passe inválida.');
+        return;
+      }
+    }
+    const finalPasswordHash = isExistingHash ? usrPassword.trim() : await hashPassword(usrPassword.trim());
 
     const newUser: UserCredentials = {
       id: editingUser ? editingUser.id : 'usr-' + Date.now(),
@@ -270,7 +282,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       passwordHash: finalPasswordHash,
       roles: rolesToSave,
       role: rolesToSave.join(', '),
-      mfaEnabled: usrMfa
+      mfaEnabled: usrMfa,
+      mustChangePassword: isExistingHash ? (editingUser?.mustChangePassword || false) : usrMustChange,
+      passwordResetVersion: editingUser?.passwordResetVersion
     };
 
     setIsSubmitting(true);
@@ -296,6 +310,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUsrPassword('');
       setUsrRoles(['Operador']);
       setUsrMfa(false);
+      setUsrMustChange(false);
 
       loadAllData();
     } catch (err) {
@@ -313,6 +328,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const userRoles = getUserRoles(user);
     setUsrRoles(userRoles.length > 0 ? userRoles : ['Operador']);
     setUsrMfa(user.mfaEnabled || false);
+    setUsrMustChange(user.mustChangePassword || false);
   };
 
   const promptDeleteUser = (id: string, username: string) => {
@@ -637,18 +653,26 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       // 3. Apply Product changes
       if (changes.newProduct) {
         const p = changes.newProduct;
-        const newProd: Product = {
-          id: 'prod-' + Date.now(),
-          code: p.code || 'PRD-' + Date.now().toString().substring(8),
-          name: p.name,
-          category: p.category || 'Adubos',
-          stockQty: Number(p.stockQty) || 0,
-          buyingPrice: Number(p.buyingPrice) || 0,
-          sellingPrice: Number(p.sellingPrice) || 0,
-          baseUnit: p.baseUnit || 'Unidades'
-        };
-        await dbService.saveProduct(newProd);
-        appliedCount++;
+        const aiBuy = Number(p.buyingPrice) || 0;
+        const aiSell = Number(p.sellingPrice) || 0;
+        // Regra: nunca gravar preços em que a compra seja igual ou superior à venda
+        const aiPriceError = validateStandardPrices(aiBuy, aiSell, false);
+        if (!aiPriceError) {
+          const newProd: Product = {
+            id: 'prod-' + Date.now(),
+            code: p.code || 'PRD-' + Date.now().toString().substring(8),
+            name: p.name,
+            category: p.category || 'Adubos',
+            stockQty: Number(p.stockQty) || 0,
+            buyingPrice: aiBuy,
+            sellingPrice: aiSell,
+            baseUnit: p.baseUnit || 'Unidades'
+          };
+          await dbService.saveProduct(newProd);
+          appliedCount++;
+        } else {
+          console.warn('[AI Apply] Produto ignorado por violar a regra de preços:', aiPriceError);
+        }
       }
 
       // 4. Apply Stock Updates (Batch update)
@@ -663,8 +687,25 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
           if (target) {
             target.stockQty += Number(update.quantityToAdd) || 0;
-            if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
-            if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
+
+            // Regra de preços: só aplica alterações que mantenham a compra abaixo da venda
+            const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : target.buyingPrice;
+            const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : target.sellingPrice;
+            const priceError = isHybridProduct(target)
+              ? validateHybridPrices(
+                  target.buyingPriceBulk ?? target.buyingPrice,
+                  target.sellingPriceBulk || proposedSell * (target.conversionRate || 1),
+                  proposedSell,
+                  Number(target.conversionRate) || 1
+                )
+              : validateStandardPrices(proposedBuy, proposedSell, target.isService);
+
+            if (!priceError) {
+              if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
+              if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
+            } else {
+              console.warn('[AI Apply] Preços não alterados (regra de preços):', priceError);
+            }
             
             // Re-calculate bulk/retail if applicable
             if (target.parentUnit && target.conversionRate && target.conversionRate > 1) {
@@ -1825,6 +1866,11 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                               Hash SHA-256
                             </span>
                           )}
+                          {u.mustChangePassword && (
+                            <span className="ml-2 text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-black uppercase">
+                              Troca de senha pendente
+                            </span>
+                          )}
                         </td>
                         <td className="p-3 text-center">
                           {u.mfaEnabled ? (
@@ -1883,9 +1929,13 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="4 a 6 caracteres (letras ou números)"
+                  maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
+                <p className="text-[10px] text-gray-500 mt-1">
+                  A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.
+                </p>
               </div>
 
               <div>
@@ -1945,6 +1995,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   onChange={(e) => setUsrMfa(e.target.checked)}
                 />
                 <label htmlFor="mfa" className="font-bold text-gray-700">Ativar Autenticação de Dois Fatores (MFA)</label>
+              </div>
+
+              <div className="flex items-center gap-2 py-2">
+                <input
+                  type="checkbox"
+                  id="mustChangePassword"
+                  checked={usrMustChange}
+                  onChange={(e) => setUsrMustChange(e.target.checked)}
+                  disabled={editingUser?.username === 'admin' && false}
+                />
+                <label htmlFor="mustChangePassword" className="font-bold text-gray-700">
+                  Exigir troca de palavra-passe no próximo login (acesso com palavra-passe temporária)
+                </label>
               </div>
 
               <div className="flex gap-2">

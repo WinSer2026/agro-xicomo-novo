@@ -31,6 +31,7 @@ import {
 } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
+import { getUnitCost } from './priceHelper';
 
 const app = initializeApp(firebaseConfig);
 
@@ -404,7 +405,9 @@ export class FirebaseDBService {
     const prods = await this.getProducts();
     const enrichedItems = (s.items || []).map(item => {
       const prod = prods.find(p => p.id === item.productId);
-      const cost = item.costPrice ?? item.buyingPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
+      // Produtos vendidos em saco e em quilo: o quilo não tem preço de compra próprio,
+      // o seu custo é derivado do preço de compra do saco ÷ fator de conversão.
+      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
       return {
         ...item,
         costPrice: cost,
@@ -451,7 +454,7 @@ export class FirebaseDBService {
     const prods = await this.getProducts();
     const enrichedItems = (sale.items || []).map(item => {
       const prod = prods.find(p => String(p.id) === String(item.productId));
-      const cost = item.costPrice ?? item.buyingPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
+      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
       return {
         ...item,
         costPrice: cost,
@@ -839,7 +842,16 @@ export class FirebaseDBService {
 
     // Se a base de dados estiver completamente vazia, criamos um utilizador administrador inicial
     const initialAdmin: UserCredentials[] = [
-      { id: 'usr-admin-inicial', username: 'admin', passwordHash: 'admin123', role: 'Gestor Geral', roles: ['Gestor Geral'], mfaEnabled: false }
+      {
+        id: 'usr-admin-inicial',
+        username: 'admin',
+        passwordHash: 'sha256:AXadmin2026:ffe6646a86429864a103ddd12a441381390e88eee2e1d639268c4360b0e67e02',
+        role: 'Técnico',
+        roles: ['Técnico'],
+        mfaEnabled: false,
+        mustChangePassword: true,
+        passwordResetVersion: 2
+      }
     ];
     await this.upsertBatch('credentials', initialAdmin);
     this.credentialsCache = initialAdmin;

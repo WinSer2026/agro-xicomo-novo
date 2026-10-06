@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { dbService } from '../utils/firebaseDB';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
+import { getUnitCost, isHybridProduct } from '../utils/priceHelper';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
 import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
@@ -235,9 +236,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         unitPrice: product.sellingPrice,
         totalPrice: product.sellingPrice,
         category: product.category || 'Outro',
-        costPrice: product.buyingPrice,
-        buyingPrice: product.buyingPrice,
-        isService: product.isService
+        costPrice: getUnitCost(product, 'Retail'),
+        buyingPrice: getUnitCost(product, 'Retail'),
+        isService: product.isService,
+        sellingUnit: 'Retail'
       };
       setRetroactiveCart(prev => [...prev, newItem]);
     }
@@ -1068,8 +1070,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           isService: product.isService,
           sellingUnit: selectedUnit,
           category: product.category || 'Outro',
-          costPrice: product.buyingPrice,
-          buyingPrice: product.buyingPrice
+          costPrice: getUnitCost(product, selectedUnit),
+          buyingPrice: getUnitCost(product, selectedUnit)
         }
       ]);
     }
@@ -1228,7 +1230,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
       const finalizedItems = cart.map(item => {
         const prod = products.find(p => p.id === item.productId);
-        const cost = item.costPrice ?? prod?.buyingPrice ?? (item.unitPrice * 0.6);
+        const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? (item.unitPrice * 0.6);
         const cat = item.category || prod?.category || 'Outro';
         return {
           ...item,

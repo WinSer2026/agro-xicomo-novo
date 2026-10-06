@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import { Product } from '../types';
 
 interface StockUpdate {
@@ -154,8 +155,25 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
         if (target) {
           target.stockQty += Number(update.quantityToAdd) || 0;
-          if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
-          if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
+
+          // Regra de preços: só aplica alterações que mantenham a compra abaixo da venda
+          const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : target.buyingPrice;
+          const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : target.sellingPrice;
+          const priceError = isHybridProduct(target)
+            ? validateHybridPrices(
+                target.buyingPriceBulk ?? target.buyingPrice,
+                target.sellingPriceBulk || proposedSell * (target.conversionRate || 1),
+                proposedSell,
+                Number(target.conversionRate) || 1
+              )
+            : validateStandardPrices(proposedBuy, proposedSell, target.isService);
+
+          if (!priceError) {
+            if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
+            if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
+          } else {
+            console.warn('[AI Stock Entry] Preços não alterados (regra de preços):', priceError);
+          }
           
           // Re-calculate bulk/retail if applicable
           if (target.parentUnit && target.conversionRate && target.conversionRate > 1) {

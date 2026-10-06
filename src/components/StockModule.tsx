@@ -5,6 +5,13 @@ import { dbService } from '../utils/firebaseDB';
 import { Product, LossRecord, SystemSettings } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
+import {
+  isHybridProduct,
+  getBulkCost,
+  getUnitCost,
+  validateStandardPrices,
+  validateHybridPrices
+} from '../utils/priceHelper';
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
@@ -76,6 +83,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [stockPassword, setStockPassword] = useState('');
   const [adjustError, setAdjustError] = useState('');
+  const [newProdError, setNewProdError] = useState('');
 
   // Fields for Editing
   const [editName, setEditName] = useState('');
@@ -541,8 +549,30 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     e.preventDefault();
     if (isSubmitting) return;
 
+    setNewProdError('');
+
     if (!newProdName) {
+      setNewProdError('Preencha o nome do produto.');
       triggerToast('Preencha o nome do produto.');
+      return;
+    }
+
+    const isBulkEnabled = Boolean(newParentUnit && newConversionRate > 1);
+
+    // REGRA DE PREÇOS: o preço de compra tem de ser inferior ao preço de venda.
+    // Nos produtos vendidos em saco E em quilo, o custo do quilo é derivado do preço do saco.
+    const priceError = isBulkEnabled
+      ? validateHybridPrices(
+          Number(newProdBuyPriceBulk),
+          Number(newProdSellPriceBulk),
+          Number(newProdSellPrice),
+          Number(newConversionRate)
+        )
+      : validateStandardPrices(Number(newProdBuyPrice), Number(newProdSellPrice), newProdIsService);
+
+    if (priceError) {
+      setNewProdError(priceError);
+      triggerToast(priceError);
       return;
     }
 
@@ -554,10 +584,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const cat = newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory;
       const finalProdName = newProdName.trim().toUpperCase();
 
-      const isBulkEnabled = newParentUnit && newConversionRate > 1;
       const computedStockQty = isBulkEnabled 
         ? (Number(newProdQtyBulk) * Number(newConversionRate)) + Number(newProdQtyRetail) 
         : Number(newProdQty);
+
+      const bulkBuyPrice = Number(newProdBuyPriceBulk);
 
       const newProduct: Product = {
         id: 'prod-' + Date.now(),
@@ -567,7 +598,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         stockQty: computedStockQty,
         stockQtyBulk: isBulkEnabled ? Number(newProdQtyBulk) : undefined,
         stockQtyRetail: isBulkEnabled ? Number(newProdQtyRetail) : undefined,
-        buyingPrice: Number(newProdBuyPrice),
+        buyingPriceBulk: isBulkEnabled ? bulkBuyPrice : undefined,
+        buyingPrice: isBulkEnabled ? bulkBuyPrice / Number(newConversionRate) : Number(newProdBuyPrice),
         sellingPrice: Number(newProdSellPrice),
         sellingPriceBulk: isBulkEnabled ? Number(newProdSellPriceBulk) : undefined,
         baseUnit: newProdUnit,
@@ -591,8 +623,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdQtyBulk(0);
       setNewProdQtyRetail(0);
       setNewProdBuyPrice(0);
+      setNewProdBuyPriceBulk(0);
       setNewProdSellPrice(0);
       setNewProdSellPriceBulk(0);
+      setNewProdError('');
       setNewProdExpiry('');
       setNewConversionRate(1);
       setNewParentUnit('');
@@ -1533,9 +1567,28 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (!selectedProduct) return;
 
+    const isBulkEnabled = Boolean(editParentUnit && editConversionRate > 1);
+
+    // REGRA DE PREÇOS: nunca gravar sem preço de compra e de venda e o preço de compra
+    // tem de ser inferior ao preço de venda (nunca igual). Para produtos vendidos em saco
+    // e em quilo, o custo do quilo é derivado do preço de compra do saco.
+    const priceError = isBulkEnabled
+      ? validateHybridPrices(
+          Number(editBuyingPriceBulk),
+          Number(editSellingPriceBulk),
+          Number(editSellingPrice),
+          Number(editConversionRate)
+        )
+      : validateStandardPrices(Number(editBuyingPrice), Number(editSellingPrice), editIsService);
+
+    if (priceError) {
+      setAdjustError(priceError);
+      triggerToast(priceError);
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      const isBulkEnabled = editParentUnit && editConversionRate > 1;
       const computedStockQty = isBulkEnabled 
         ? (Number(editStockQtyBulk) * Number(editConversionRate)) + Number(editStockQtyRetail) 
         : Number(editStockQty);
@@ -1554,7 +1607,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       selectedProduct.stockQty = computedStockQty;
       selectedProduct.stockQtyBulk = isBulkEnabled ? Number(editStockQtyBulk) : undefined;
       selectedProduct.stockQtyRetail = isBulkEnabled ? Number(editStockQtyRetail) : undefined;
-      selectedProduct.buyingPrice = Number(editBuyingPrice);
+      selectedProduct.buyingPriceBulk = isBulkEnabled ? Number(editBuyingPriceBulk) : undefined;
+      selectedProduct.buyingPrice = isBulkEnabled
+        ? Number(editBuyingPriceBulk) / Number(editConversionRate)
+        : Number(editBuyingPrice);
       selectedProduct.sellingPrice = Number(editSellingPrice);
       selectedProduct.sellingPriceBulk = isBulkEnabled ? Number(editSellingPriceBulk) : undefined;
       selectedProduct.expiryDate = editExpiryDate || undefined;
@@ -2110,7 +2166,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                               setEditSacksForRetail(initialSacksForRetail);
                               setEditReceivedSacks(initialBulk + initialSacksForRetail);
                               setEditBuyingPrice(prod.buyingPrice);
-                              setEditBuyingPriceBulk(prod.buyingPrice * (prod.conversionRate || 1));
+                              setEditBuyingPriceBulk(getBulkCost(prod));
                               setEditSellingPrice(prod.sellingPrice);
                               setEditSellingPriceBulk(prod.sellingPriceBulk || 0);
                               setEditExpiryDate(prod.expiryDate || '');
@@ -3001,6 +3057,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             </div>
 
             <form onSubmit={handleAddProduct} className="p-3 sm:p-5 space-y-3 text-xs overflow-y-auto flex-1 overscroll-contain">
+              {newProdError && (
+                <div className="bg-red-50 text-red-700 p-2 border border-red-200 rounded-lg font-bold text-center text-xs">
+                  {newProdError}
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 items-start">
                 
                 {/* Coluna 1: Identificação & Informações Básicas */}

@@ -2,7 +2,8 @@ import { safeStorage, safeSessionStorage } from "./utils/safeStorage";
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { dbService } from './utils/firebaseDB';
-import { runStockMigration } from './utils/migrateStock';
+import { runStockMigration, runHybridPriceMigration, runStockListUpdate } from './utils/migrateStock';
+import { runCredentialsReset } from './utils/credentialsReset';
 import LoginPanel from './components/LoginPanel';
 import { InlineHeaderSearch } from './components/InlineHeaderSearch';
 import { verifyPassword } from './utils/securityHelper';
@@ -189,6 +190,9 @@ export default function App() {
       try {
         await dbService.init();
         await runStockMigration();
+        await runStockListUpdate();
+        await runHybridPriceMigration();
+        await runCredentialsReset();
 
         const globalSettings = await dbService.getSettings();
         setSettings(globalSettings);
@@ -253,8 +257,9 @@ export default function App() {
     } else {
       const allCreds = await dbService.getCredentials();
       const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
-      if (user && user.passwordHash === gatePassword) {
-        isValid = true;
+      // Aceita a palavra-passe em texto simples (legado) ou com hash seguro (sha256)
+      if (user) {
+        isValid = await verifyPassword(gatePassword.trim(), user.passwordHash);
       }
     }
 
