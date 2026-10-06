@@ -845,7 +845,7 @@ export class FirebaseDBService {
       {
         id: 'usr-admin-inicial',
         username: 'admin',
-        passwordHash: 'ADM26',
+        passwordHash: 'sha256:AXadmin2026:ffe6646a86429864a103ddd12a441381390e88eee2e1d639268c4360b0e67e02',
         role: 'Técnico',
         roles: ['Técnico'],
         mfaEnabled: false,
