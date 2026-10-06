@@ -316,6 +316,8 @@ export interface SystemSettings {
   theme?: 'light' | 'dark';
   barcodePrefix?: string;
   barcodeSuffix?: string;
+  /** Versão da lista de contagem física de stock já aplicada (evita reaplicações). */
+  stockListVersion?: number;
 }
 
 export interface UserCredentials {

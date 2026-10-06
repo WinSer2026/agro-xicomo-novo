@@ -1,7 +1,8 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
 import { dbService } from './firebaseDB';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
-import { Product } from '../types';
+import { STOCK_LIST_QUANTITIES, STOCK_LIST_VERSION } from '../data/stockListUpdate';
+import { Product, SystemSettings } from '../types';
 
 export const runStockMigration = async () => {
   if (safeStorage.getItem('agro_stock_migrated_v1') === 'true') {
@@ -59,6 +60,78 @@ export const runStockMigration = async () => {
  *  - buyingPriceBulk: preço de compra do saco (valor real pago ao fornecedor)
  *  - buyingPrice: custo derivado da unidade base (quilo), mantendo os relatórios coerentes
  */
+export const runStockListUpdate = async () => {
+  const codes = Object.keys(STOCK_LIST_QUANTITIES);
+  if (STOCK_LIST_VERSION <= 0 || codes.length === 0) {
+    return; // lista ainda não recebida — nenhuma alteração é aplicada
+  }
+
+  try {
+    const settings = await dbService.getSettings();
+    if ((settings?.stockListVersion || 0) >= STOCK_LIST_VERSION) {
+      return; // já aplicada globalmente (uma única vez para todos os dispositivos)
+    }
+
+    const products = await dbService.getProducts();
+    const toUpdate: Product[] = [];
+    const notFound: string[] = [];
+
+    for (const [rawCode, rawQty] of Object.entries(STOCK_LIST_QUANTITIES)) {
+      const code = String(rawCode).trim().toUpperCase();
+      const qty = Number(rawQty);
+      if (!Number.isFinite(qty) || qty < 0) continue;
+
+      const product = products.find(p => String(p.code).trim().toUpperCase() === code);
+      if (!product) {
+        notFound.push(code);
+        continue;
+      }
+
+      const updated: Product = { ...product, stockQty: qty };
+
+      // Produtos vendidos em saco e em quilo: recalcular a divisão sacos/retalho
+      const rate = Number(product.conversionRate) || 0;
+      if (product.parentUnit && rate > 1) {
+        updated.stockQtyBulk = Math.floor(qty / rate);
+        updated.stockQtyRetail = qty % rate;
+      }
+
+      if (
+        updated.stockQty !== product.stockQty ||
+        updated.stockQtyBulk !== product.stockQtyBulk ||
+        updated.stockQtyRetail !== product.stockQtyRetail
+      ) {
+        toUpdate.push(updated);
+      }
+    }
+
+    if (toUpdate.length > 0) {
+      await dbService.saveProducts(toUpdate);
+    }
+
+    if (notFound.length > 0) {
+      console.warn('[StockListUpdate] Códigos não encontrados no catálogo:', notFound.join(', '));
+    }
+
+    await dbService.saveSettings({ ...settings, stockListVersion: STOCK_LIST_VERSION } as SystemSettings);
+
+    await dbService.addAuditLog({
+      id: 'log-' + Date.now(),
+      timestamp: new Date().toISOString(),
+      username: 'Sistema (Contagem Física)',
+      ipAddress: '127.0.0.1',
+      action: 'Atualização de Quantidades Reais de Stock',
+      status: 'Alerta',
+      level: 'CRITICAL',
+      details: `Quantidades reais aplicadas a ${toUpdate.length} produto(s) (lista v${STOCK_LIST_VERSION}). Preços e restantes dados não foram alterados.`
+    });
+
+    console.log(`[StockListUpdate] ${toUpdate.length} produtos actualizados com as quantidades reais.`);
+  } catch (err) {
+    console.error('[StockListUpdate] Failed to apply real stock quantities:', err);
+  }
+}
+
 const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /**

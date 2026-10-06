@@ -2,7 +2,7 @@ import { safeStorage, safeSessionStorage } from "./utils/safeStorage";
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { dbService } from './utils/firebaseDB';
-import { runStockMigration, runHybridPriceMigration } from './utils/migrateStock';
+import { runStockMigration, runHybridPriceMigration, runStockListUpdate } from './utils/migrateStock';
 import { runCredentialsReset } from './utils/credentialsReset';
 import LoginPanel from './components/LoginPanel';
 import { InlineHeaderSearch } from './components/InlineHeaderSearch';
@@ -190,6 +190,7 @@ export default function App() {
       try {
         await dbService.init();
         await runStockMigration();
+        await runStockListUpdate();
         await runHybridPriceMigration();
         await runCredentialsReset();
 
