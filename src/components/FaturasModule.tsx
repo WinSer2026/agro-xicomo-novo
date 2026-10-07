@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
-import { dbService } from '../utils/firebaseDB';
+import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
@@ -24,6 +24,16 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   const [startDate, setStartDate] = useState(defaultRange.startDate);
   const [endDate, setEndDate] = useState(defaultRange.endDate);
   const [datePreset, setDatePreset] = useState<DateRangePreset>('Este Mês');
+
+  // The invoice list is deliberately bounded. Totals come from Firestore
+  // aggregates, while "Carregar mais" advances with an opaque query cursor.
+  const [nextSalesCursor, setNextSalesCursor] = useState<FirestorePageCursor | null>(null);
+  const [hasMoreSales, setHasMoreSales] = useState(false);
+  const [isLoadingSales, setIsLoadingSales] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [salesSummary, setSalesSummary] = useState<SalesSummary | null>(null);
+  const [salesRefreshKey, setSalesRefreshKey] = useState(0);
+  const salesRequestVersion = useRef(0);
 
   // Preview / Print state
   const [invoiceToPrint, setInvoiceToPrint] = useState<Sale | null>(null);
@@ -70,38 +80,36 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     }, 4000);
   };
 
-  useEffect(() => {
-    loadData();
-
-    let debounceTimer: any = null;
-    const handleDbUpdate = (e: any) => {
-      const updatedTable = e.detail?.table;
-      if (!updatedTable || updatedTable === 'all' || updatedTable === 'sales' || updatedTable === 'settings' || updatedTable === 'products') {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          loadData();
-        }, 150);
-      }
-    };
-    window.addEventListener('db-update', handleDbUpdate);
-    return () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      window.removeEventListener('db-update', handleDbUpdate);
-    };
-  }, []);
+  const getCurrentSalesQuery = () => ({
+    startDate,
+    endDate,
+    status: faturasFilter === 'Todas' ? undefined : faturasFilter
+  });
 
   const loadData = async (notifyOnError = true) => {
+    const requestVersion = ++salesRequestVersion.current;
+    setIsLoadingSales(true);
+
     try {
       await dbService.init();
-      // Load sales
-      const saleList = await dbService.getSales();
-      // Sort sales by date descending (newest on top)
-      const sorted = [...saleList].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      setSales(sorted);
+      const queryOptions = getCurrentSalesQuery();
+      const [salesPage, globalSettings, summary] = await Promise.all([
+        dbService.getSalesPage({ ...queryOptions, pageSize: 30 }),
+        dbService.getSettings(),
+        // A summary is helpful, but a temporary aggregate/offline error must
+        // never hide an otherwise available invoice page.
+        dbService.getSalesSummary({ startDate, endDate }).catch(error => {
+          console.warn('[FaturasModule] Could not refresh sales summary:', error);
+          return null;
+        })
+      ]);
 
-      // Load settings
-      const globalSettings = await dbService.getSettings();
+      if (requestVersion !== salesRequestVersion.current) return;
+      setSales(salesPage.items);
+      setNextSalesCursor(salesPage.nextCursor);
+      setHasMoreSales(salesPage.hasMore);
       setSettings(globalSettings);
+      setSalesSummary(summary);
     } catch (err) {
       console.error('Error loading invoices data:', err);
       if (notifyOnError) {
@@ -111,8 +119,64 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       // Post-commit callers need the rejection so they can keep the successful
       // operation visible and treat only the refresh as non-critical.
       throw err;
+    } finally {
+      if (requestVersion === salesRequestVersion.current) {
+        setIsLoadingSales(false);
+      }
     }
   };
+
+  const loadMoreSales = async () => {
+    if (isLoadingSales || !hasMoreSales || !nextSalesCursor) return;
+
+    const requestVersion = salesRequestVersion.current;
+    setIsLoadingSales(true);
+    try {
+      const salesPage = await dbService.getSalesPage({
+        ...getCurrentSalesQuery(),
+        cursor: nextSalesCursor,
+        pageSize: 30
+      });
+      if (requestVersion !== salesRequestVersion.current) return;
+
+      setSales(previous => {
+        const seenIds = new Set(previous.map(sale => sale.id));
+        return [...previous, ...salesPage.items.filter(sale => !seenIds.has(sale.id))];
+      });
+      setNextSalesCursor(salesPage.nextCursor);
+      setHasMoreSales(salesPage.hasMore);
+    } catch (error) {
+      console.error('[FaturasModule] Could not load another invoice page:', error);
+      showToast('Não foi possível carregar mais facturas. Tente novamente.', 'warning');
+    } finally {
+      if (requestVersion === salesRequestVersion.current) {
+        setIsLoadingSales(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    void loadData();
+    // Changing period or status always starts a brand-new cursor chain.
+  }, [startDate, endDate, faturasFilter, salesRefreshKey]);
+
+  useEffect(() => {
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleDbUpdate = (e: any) => {
+      const updatedTable = e.detail?.table;
+      if (!updatedTable || updatedTable === 'all' || updatedTable === 'sales' || updatedTable === 'settings' || updatedTable === 'products') {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          setSalesRefreshKey(value => value + 1);
+        }, 150);
+      }
+    };
+    window.addEventListener('db-update', handleDbUpdate);
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      window.removeEventListener('db-update', handleDbUpdate);
+    };
+  }, []);
 
   const handleClearAllHistory = () => {
     askConfirmation(
@@ -341,100 +405,154 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     }
   };
 
-  // Filtering invoices based on user queries, date range, and selected status tab
-  const filteredSales = sales.filter(s => {
-    // 1. Date range filter
-    if (!isDateInRange(s.date, startDate, endDate)) {
-      return false;
-    }
-    // 2. Status filter
-    if (faturasFilter !== 'Todas' && s.status?.toLowerCase() !== faturasFilter.toLowerCase()) {
-      return false;
-    }
-    // 3. Search query
-    if (faturasSearch.trim()) {
-      const query = faturasSearch.toLowerCase();
-      const matchInvoice = s.invoiceNumber?.toLowerCase().includes(query);
-      const matchCustomer = s.customerName?.toLowerCase().includes(query);
-      const matchOperator = s.operatorName?.toLowerCase().includes(query) || s.operatorId?.toLowerCase().includes(query);
-      const matchPayment = s.paymentMethod?.toLowerCase().includes(query);
-      const matchNuit = s.customerNuit?.toLowerCase().includes(query);
-      const matchTotal = s.total?.toString().includes(query);
-      const matchItem = s.items?.some(i => i.productName?.toLowerCase().includes(query));
+  // The period/status constraints now run in Firestore. Free-text matching is
+  // intentionally applied to the currently loaded page; an export explicitly
+  // fetches all matching pages so it is never limited to what is visible.
+  const matchesInvoiceSearch = (sale: Sale, rawSearch = faturasSearch) => {
+    const search = rawSearch.trim().toLowerCase();
+    if (!search) return true;
 
-      return Boolean(matchInvoice || matchCustomer || matchOperator || matchPayment || matchNuit || matchTotal || matchItem);
-    }
-    return true;
-  });
+    const matchInvoice = sale.invoiceNumber?.toLowerCase().includes(search);
+    const matchCustomer = sale.customerName?.toLowerCase().includes(search);
+    const matchOperator = sale.operatorName?.toLowerCase().includes(search) || sale.operatorId?.toLowerCase().includes(search);
+    const matchPayment = sale.paymentMethod?.toLowerCase().includes(search);
+    const matchNuit = sale.customerNuit?.toLowerCase().includes(search);
+    const matchTotal = sale.total?.toString().includes(search);
+    const matchItem = sale.items?.some(item => (item.name || (item as any).productName || '').toLowerCase().includes(search));
 
-  // Calculate invoice statistical metrics for the selected period
-  const totalInvoiced = filteredSales.filter(s => s.status !== 'Cancelada').reduce((sum, s) => sum + s.total, 0);
-  const paidInvoiced = filteredSales.filter(s => s.status === 'Paga').reduce((sum, s) => sum + s.total, 0);
-  const pendingInvoiced = filteredSales.filter(s => s.status === 'Pendente').reduce((sum, s) => sum + s.total, 0);
-  const canceledInvoiced = filteredSales.filter(s => s.status === 'Cancelada').reduce((sum, s) => sum + s.total, 0);
-
-  const handleExportInvoicesExcel = () => {
-    const data = filteredSales.map(s => ({
-      'Nº Factura': s.invoiceNumber,
-      'Data': formatDatePT(s.date),
-      'Cliente': s.customerName || 'Consumidor Final',
-      'NUIT': s.customerNuit || '999999999',
-      'Operador': s.operatorName || 'Caixa',
-      'Método Pagamento': s.paymentMethod,
-      'Total (MT)': s.total,
-      'Estado': s.status
-    }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Facturas');
-    XLSX.writeFile(wb, `Relatorio_Facturas_${startDate}_a_${endDate}.xlsx`);
-    showToast('Planilha de Facturas exportada com sucesso!');
+    return Boolean(matchInvoice || matchCustomer || matchOperator || matchPayment || matchNuit || matchTotal || matchItem);
   };
 
-  const handleExportInvoicesPDF = () => {
-    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-    const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-    const nuit = settings?.companyNuit || '401976590';
+  const filteredSales = sales.filter(sale => {
+    // These redundant guards avoid showing a stale previous page while the
+    // server query for a newly selected period/status is in flight.
+    if (!isDateInRange(sale.date, startDate, endDate)) return false;
+    if (faturasFilter !== 'Todas' && sale.status !== faturasFilter) return false;
+    return matchesInvoiceSearch(sale);
+  });
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(14);
-    doc.setTextColor(0, 106, 78);
-    doc.text('MAPA RESUMO DE FACTURAÇÃO', 15, 20);
+  const pageSummary: SalesSummary = {
+    totalInvoiced: sales.filter(sale => sale.status !== 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
+    paidInvoiced: sales.filter(sale => sale.status === 'Paga').reduce((sum, sale) => sum + sale.total, 0),
+    pendingInvoiced: sales.filter(sale => sale.status === 'Pendente').reduce((sum, sale) => sum + sale.total, 0),
+    canceledInvoiced: sales.filter(sale => sale.status === 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
+    totalCount: sales.length,
+    paidCount: sales.filter(sale => sale.status === 'Paga').length,
+    pendingCount: sales.filter(sale => sale.status === 'Pendente').length,
+    canceledCount: sales.filter(sale => sale.status === 'Cancelada').length
+  };
+  const periodSummary = salesSummary || pageSummary;
 
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
-    doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${totalInvoiced.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 15, 29);
+  // Preserve the former behaviour of the cards when a status tab is active,
+  // but calculate from the server aggregate instead of only the current page.
+  const totalInvoiced = faturasFilter === 'Todas'
+    ? periodSummary.totalInvoiced
+    : faturasFilter === 'Paga'
+      ? periodSummary.paidInvoiced
+      : faturasFilter === 'Pendente'
+        ? periodSummary.pendingInvoiced
+        : 0;
+  const paidInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Paga' ? periodSummary.paidInvoiced : 0;
+  const pendingInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Pendente' ? periodSummary.pendingInvoiced : 0;
+  const canceledInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Cancelada' ? periodSummary.canceledInvoiced : 0;
+  const activeQueryCount = faturasFilter === 'Todas'
+    ? periodSummary.totalCount
+    : faturasFilter === 'Paga'
+      ? periodSummary.paidCount
+      : faturasFilter === 'Pendente'
+        ? periodSummary.pendingCount
+        : periodSummary.canceledCount;
 
-    doc.setDrawColor(0, 106, 78);
-    doc.line(15, 33, 195, 33);
+  const getSalesForExport = async () => {
+    const allSales = await dbService.getSalesForPeriod(getCurrentSalesQuery());
+    return allSales.filter(sale => matchesInvoiceSearch(sale));
+  };
 
-    let y = 43;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.text('Nº FACTURA', 15, y);
-    doc.text('DATA', 45, y);
-    doc.text('CLIENTE', 75, y);
-    doc.text('MÉTODO', 130, y);
-    doc.text('TOTAL (MT)', 160, y);
-    doc.text('ESTADO', 185, y);
+  const handleExportInvoicesExcel = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      const exportSales = await getSalesForExport();
+      const data = exportSales.map(sale => ({
+        'Nº Factura': sale.invoiceNumber,
+        'Data': formatDatePT(sale.date),
+        'Cliente': sale.customerName || 'Consumidor Final',
+        'NUIT': sale.customerNuit || '999999999',
+        'Operador': sale.operatorName || 'Caixa',
+        'Método Pagamento': sale.paymentMethod,
+        'Total (MT)': sale.total,
+        'Estado': sale.status
+      }));
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Facturas');
+      XLSX.writeFile(wb, `Relatorio_Facturas_${startDate}_a_${endDate}.xlsx`);
+      showToast(`Planilha de Facturas exportada com ${exportSales.length} registo(s).`);
+    } catch (error) {
+      console.error('[FaturasModule] Invoice Excel export failed:', error);
+      showToast('Não foi possível exportar a planilha de facturas.', 'error');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
-    y += 6;
-    doc.setFont('helvetica', 'normal');
-    filteredSales.forEach(s => {
-      if (y > 275) { doc.addPage(); y = 20; }
-      doc.text(s.invoiceNumber || '', 15, y);
-      doc.text(formatDatePT(s.date), 45, y);
-      doc.text((s.customerName || 'Consumidor Final').substring(0, 25), 75, y);
-      doc.text((s.paymentMethod || '').substring(0, 12), 130, y);
-      doc.text(s.total.toLocaleString('pt-PT', { minimumFractionDigits: 2 }), 160, y);
-      doc.text(s.status || '', 185, y);
+  const handleExportInvoicesPDF = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      const exportSales = await getSalesForExport();
+      const exportTotal = exportSales
+        .filter(sale => sale.status !== 'Cancelada')
+        .reduce((sum, sale) => sum + sale.total, 0);
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
+      const nuit = settings?.companyNuit || '401976590';
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(0, 106, 78);
+      doc.text('MAPA RESUMO DE FACTURAÇÃO', 15, 20);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
+      doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${exportTotal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 15, 29);
+
+      doc.setDrawColor(0, 106, 78);
+      doc.line(15, 33, 195, 33);
+
+      let y = 43;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('Nº FACTURA', 15, y);
+      doc.text('DATA', 45, y);
+      doc.text('CLIENTE', 75, y);
+      doc.text('MÉTODO', 130, y);
+      doc.text('TOTAL (MT)', 160, y);
+      doc.text('ESTADO', 185, y);
+
       y += 6;
-    });
+      doc.setFont('helvetica', 'normal');
+      exportSales.forEach(sale => {
+        if (y > 275) { doc.addPage(); y = 20; }
+        doc.text(sale.invoiceNumber || '', 15, y);
+        doc.text(formatDatePT(sale.date), 45, y);
+        doc.text((sale.customerName || 'Consumidor Final').substring(0, 25), 75, y);
+        doc.text((sale.paymentMethod || '').substring(0, 12), 130, y);
+        doc.text(sale.total.toLocaleString('pt-PT', { minimumFractionDigits: 2 }), 160, y);
+        doc.text(sale.status || '', 185, y);
+        y += 6;
+      });
 
-    doc.save(`Mapa_Facturacao_${startDate}_a_${endDate}.pdf`);
-    showToast('Mapa de Facturação descarregado com sucesso!');
+      doc.save(`Mapa_Facturacao_${startDate}_a_${endDate}.pdf`);
+      showToast(`Mapa de Facturação descarregado com ${exportSales.length} registo(s).`);
+    } catch (error) {
+      console.error('[FaturasModule] Invoice PDF export failed:', error);
+      showToast('Não foi possível exportar o mapa de facturação.', 'error');
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -534,10 +652,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           {/* Quick filter status tabs */}
           <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold w-full lg:w-auto custom-scrollbar">
             {(['Todas', 'Pendente', 'Paga', 'Cancelada'] as const).map(tab => {
-              const count = sales.filter(s => {
-                if (tab === 'Todas') return true;
-                return s.status === tab;
-              }).length;
+              const count = tab === 'Todas'
+                ? periodSummary.totalCount
+                : tab === 'Paga'
+                  ? periodSummary.paidCount
+                  : tab === 'Pendente'
+                    ? periodSummary.pendingCount
+                    : periodSummary.canceledCount;
               return (
                 <button
                   key={tab}
@@ -566,6 +687,19 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
               className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-slate-800"
             />
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+          <span>
+            {isLoadingSales
+              ? 'A atualizar facturas…'
+              : `${sales.length} de ${activeQueryCount} factura(s) carregada(s) para esta consulta.`}
+          </span>
+          {(faturasSearch.trim() || isExporting) && (
+            <span className="font-semibold text-amber-700">
+              {isExporting ? 'A preparar exportação completa do período…' : 'A pesquisa textual filtra as facturas já carregadas; a exportação pesquisa o período inteiro.'}
+            </span>
+          )}
         </div>
 
         {/* Detailed Scrollable Invoices Table/Grid */}
@@ -722,6 +856,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+          <p className="text-[10px] text-slate-400 text-center sm:text-left">
+            A lista é carregada por páginas de 30 facturas. Os totais e contagens acima referem-se ao período completo.
+          </p>
+          {hasMoreSales && (
+            <button
+              type="button"
+              onClick={() => void loadMoreSales()}
+              disabled={isLoadingSales}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-wait border border-emerald-200 text-emerald-800 rounded-lg text-xs font-black transition-colors"
+            >
+              <span className={`material-symbols-outlined text-[16px] ${isLoadingSales ? 'animate-spin' : ''}`}>expand_more</span>
+              {isLoadingSales ? 'A carregar…' : 'Carregar mais facturas'}
+            </button>
+          )}
         </div>
       </div>
 

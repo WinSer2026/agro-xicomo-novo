@@ -67,11 +67,16 @@ export default function FinanceModule() {
 
   const loadFinancials = async () => {
     await dbService.init();
-    const [salesList, lossesList, prodsList, logsList, config, trfList, payrollList] = await Promise.all([
+    // Finance computes complete-period reports, so it explicitly opts into
+    // full live sales/catalogue data rather than relying on history pages.
+    await dbService.enableLiveCatalogAndSalesSync();
+    const [salesList, lossesList, prodsList, auditPage, config, trfList, payrollList] = await Promise.all([
       dbService.getSales(),
       dbService.getLosses(),
       dbService.getProducts(),
-      dbService.getAuditLogs(),
+      // The Finance audit preview is bounded; complete history is fetched only
+      // if its dedicated PDF export is requested.
+      dbService.getAuditLogsPage({ pageSize: 100 }),
       dbService.getSettings(),
       dbService.getTransformations(),
       dbService.getPayrollPayments()
@@ -79,7 +84,7 @@ export default function FinanceModule() {
     setSales(salesList);
     setLosses(lossesList);
     setProducts(prodsList);
-    setAuditLogs(logsList);
+    setAuditLogs(auditPage.items);
     setSettings(config);
     setTransformations(trfList);
     setPayrollPayments(payrollList);
@@ -575,7 +580,10 @@ export default function FinanceModule() {
     showToast('Relatório de Vendas PDF descarregado!');
   };
 
-  const handleExportAuditPDF = () => {
+  const handleExportAuditPDF = async () => {
+    // A clicked export is intentionally complete, even though the preview list
+    // is paginated to protect normal Finance-module loading.
+    const reportLogs = await dbService.getAuditLogsForPeriod();
     const title = `Relatorio_Auditoria_Seguranca_ERP_${Date.now()}.pdf`;
     const doc = new jsPDF({
       orientation: 'portrait',
@@ -614,8 +622,8 @@ export default function FinanceModule() {
 
     doc.setFontSize(11);
     doc.setTextColor(185, 28, 28);
-    doc.text(`${auditLogs.length} Registos`, 20, 51);
-    doc.text(`${auditLogs.filter(l => l.status === 'Falha').length}`, 75, 51);
+    doc.text(`${reportLogs.length} Registos`, 20, 51);
+    doc.text(`${reportLogs.filter(l => l.status === 'Falha').length}`, 75, 51);
     doc.setTextColor(5, 150, 105);
     doc.text('HASH IMUTÁVEL ATIVO', 135, 51);
 
@@ -647,7 +655,7 @@ export default function FinanceModule() {
     doc.setFontSize(7.5);
     doc.setTextColor(51, 65, 85);
 
-    auditLogs.forEach((l, idx) => {
+    reportLogs.forEach((l, idx) => {
       if (currentY > 265) {
         doc.addPage();
         currentY = 20;
@@ -2271,11 +2279,11 @@ export default function FinanceModule() {
                 Rastreio Imutável de Auditoria de Cibersegurança
               </h4>
               <p className="text-xs text-gray-500">
-                Logs de segurança e acessos de utilizadores. Auditoria comercial imutável com rastreio de IPs.
+                Pré-visualização dos 100 registos mais recentes. Para filtros, arquivo e pesquisa histórica, use o painel Técnico.
               </p>
             </div>
             <button
-              onClick={handleExportAuditPDF}
+              onClick={() => { void handleExportAuditPDF(); }}
               className="flex items-center gap-2 px-3 py-1.5 bg-red-600 text-white rounded text-xs font-bold hover:bg-red-700 transition-colors self-start shadow-sm"
             >
               <span className="material-symbols-outlined text-[18px]">download_2</span>

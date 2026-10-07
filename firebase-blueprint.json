@@ -51,6 +51,10 @@
       "schema": "Sale",
       "description": "Audit Logs"
     },
+    "audit_logs_archive/{logId}": {
+      "schema": "Sale",
+      "description": "Archived audit logs; records are copied atomically from audit_logs before removal from the active collection"
+    },
     "active_sessions/{sessionId}": {
       "schema": "Sale",
       "description": "Active Sessions"

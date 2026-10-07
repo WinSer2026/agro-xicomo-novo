@@ -158,9 +158,8 @@ export default function App() {
   const loadCriticalProducts = async () => {
     try {
       await dbService.init();
-      const prodList = await dbService.getProducts();
       const critLevel = settings?.criticalStockLevel || 10;
-      const filtered = prodList.filter(p => !p.isService && p.stockQty <= critLevel);
+      const filtered = await dbService.getLowStockProducts(critLevel);
       setCriticalProducts(filtered);
     } catch (e) {
       console.log('Error loading critical products:', e);

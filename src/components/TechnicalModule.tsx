@@ -1,12 +1,12 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
-import { dbService } from '../utils/firebaseDB';
-import { SystemSettings, AuditLog, UserCredentials, Product, Sale, LossRecord, AppRole, ActiveSession } from '../types';
+import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
+import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, formatDatePT } from '../utils/dateRangeHelper';
 import { hashPassword, validateAccessPassword } from '../utils/securityHelper';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import * as XLSX from 'xlsx';
@@ -28,9 +28,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [users, setUsers] = useState<UserCredentials[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [sales, setSales] = useState<Sale[]>([]);
-  const [losses, setLosses] = useState<LossRecord[]>([]);
 
   // Active Technical Panel Tab
   const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
@@ -41,6 +38,20 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [logsStartDate, setLogsStartDate] = useState(defaultLogsRange.startDate);
   const [logsEndDate, setLogsEndDate] = useState(defaultLogsRange.endDate);
   const [logsPreset, setLogsPreset] = useState<DateRangePreset>('Este Mês');
+  const [auditLogSource, setAuditLogSource] = useState<'active' | 'archive'>('active');
+  const [nextAuditCursor, setNextAuditCursor] = useState<FirestorePageCursor | null>(null);
+  const [hasMoreAuditLogs, setHasMoreAuditLogs] = useState(false);
+  const [auditLoadError, setAuditLoadError] = useState('');
+  const [isLoadingAuditLogs, setIsLoadingAuditLogs] = useState(false);
+  const [isExportingAuditLogs, setIsExportingAuditLogs] = useState(false);
+  const [isArchivingAuditLogs, setIsArchivingAuditLogs] = useState(false);
+  const [auditRefreshKey, setAuditRefreshKey] = useState(0);
+  const auditRequestVersion = useRef(0);
+  const [archiveBeforeDate, setArchiveBeforeDate] = useState(() => {
+    const date = new Date();
+    date.setMonth(date.getMonth() - 6);
+    return date.toISOString().slice(0, 10);
+  });
 
   // Reconciliation Tool States
   const [techReconcileData, setTechReconcileData] = useState<any | null>(null);
@@ -113,92 +124,107 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [isVirtualMode, setIsVirtualMode] = useState(false);
   const [hardwareError, setHardwareError] = useState<{ msg: string; isIframe: boolean } | null>(null);
 
-  useEffect(() => {
-    setIsPrinterConnected(isSerialPrinterConnected());
-    setIsVirtualMode(isVirtualPrinterActive());
-  }, []);
+  const getCurrentAuditQuery = () => ({
+    startDate: logsStartDate,
+    endDate: logsEndDate,
+    source: auditLogSource
+  });
 
-  useEffect(() => {
-    loadAllData();
+  const loadAuditLogs = async (reset = true) => {
+    const requestVersion = reset ? ++auditRequestVersion.current : auditRequestVersion.current;
+    if (!reset && (!nextAuditCursor || !hasMoreAuditLogs)) return;
 
-    const handleDbUpdate = (e: any) => {
-      loadAllData(); // reload on any update for the technical settings view
-    };
-    window.addEventListener('db-update', handleDbUpdate);
-    return () => window.removeEventListener('db-update', handleDbUpdate);
-  }, []);
+    setIsLoadingAuditLogs(true);
+    setAuditLoadError('');
+    if (reset) {
+      // Do not momentarily label a previous period/source as the new query.
+      setAuditLogs([]);
+      setNextAuditCursor(null);
+      setHasMoreAuditLogs(false);
+    }
+    try {
+      const page = await dbService.getAuditLogsPage({
+        ...getCurrentAuditQuery(),
+        cursor: reset ? undefined : nextAuditCursor,
+        pageSize: 50
+      });
+      if (requestVersion !== auditRequestVersion.current) return;
+
+      setAuditLogs(previous => {
+        if (reset) return page.items;
+        const knownIds = new Set(previous.map(log => log.id));
+        return [...previous, ...page.items.filter(log => !knownIds.has(log.id))];
+      });
+      setNextAuditCursor(page.nextCursor);
+      setHasMoreAuditLogs(page.hasMore);
+    } catch (error) {
+      console.error('[TechnicalModule] Could not load audit log page:', error);
+      setAuditLoadError('Não foi possível carregar a auditoria. Confirme a ligação e a publicação dos índices Firestore.');
+      if (reset) {
+        setAuditLogs([]);
+        setNextAuditCursor(null);
+        setHasMoreAuditLogs(false);
+      }
+    } finally {
+      if (requestVersion === auditRequestVersion.current) {
+        setIsLoadingAuditLogs(false);
+      }
+    }
+  };
 
   const loadAllData = async () => {
     try {
       await dbService.init();
-    
-    // Load Firebase config inputs
-    const supConf = dbService.getFirebaseConfig();
-    if (supConf.url) setFirebaseUrlInput(supConf.url);
-    if (supConf.key) setFirebaseKeyInput(supConf.key);
 
-    // Load config settings
-    const config = await dbService.getSettings();
-    setSettings(config);
+      // Load Firebase config inputs
+      const supConf = dbService.getFirebaseConfig();
+      if (supConf.url) setFirebaseUrlInput(supConf.url);
+      if (supConf.key) setFirebaseKeyInput(supConf.key);
 
-    setCompName(config.companyName);
-    setStockCode(config.stockPasswordHash);
-    setLogoUrl(config.logoUrl || '');
-    setBanco((config as any).banco || 'First Capital Bank, S.A.');
-    setConta((config as any).numero_conta || '99466610001');
-    setNib((config as any).nib || '001000000099466610196');
-    setBanco2((config as any).banco2 || '');
-    setConta2((config as any).numero_conta2 || '');
-    setNib2((config as any).nib2 || '');
-    setMpesa((config as any).mpesa || '');
-    setEmola((config as any).emola || '');
-    setVodacom1(config.vodacom1 || '');
-    setVodacom2(config.vodacom2 || '');
-    setVodacom3(config.vodacom3 || '');
-    setMovitel1(config.movitel1 || '');
-    setMovitel2(config.movitel2 || '');
-    setMovitel3(config.movitel3 || '');
-    setFixo1(config.fixo1 || '');
-    setFixo2(config.fixo2 || '');
-    setEmail(config.email || '');
-    setCompanyNuit(config.companyNuit || '401976590');
-    setCriticalStockLevel(config.criticalStockLevel || 10);
-    setPrinterA4(config.printerA4 || 'Microsoft Print to PDF');
-    setPrinterThermal(config.printerThermal || 'Xprinter XP-80');
-    setBarcodePrefix(config.barcodePrefix || '');
-    setBarcodeSuffix(config.barcodeSuffix || '');
+      // Settings, users and sessions are small operational datasets. Sales,
+      // products and audit history intentionally do not load in full here.
+      const [config, creds, activeSess] = await Promise.all([
+        dbService.getSettings(),
+        dbService.getCredentials(),
+        dbService.getActiveSessions()
+      ]);
+      setSettings(config);
+      setUsers(creds);
+      setActiveSessions(activeSess);
 
-    // Load backups index from localStorage
-    try {
-      const indexStr = safeStorage.getItem('agro_erp_backups_index') || '[]';
-      setAutoBackupsList(JSON.parse(indexStr));
-    } catch (e) {
-      console.warn('Error loading backups index:', e);
-    }
+      setCompName(config.companyName);
+      setStockCode(config.stockPasswordHash);
+      setLogoUrl(config.logoUrl || '');
+      setBanco((config as any).banco || 'First Capital Bank, S.A.');
+      setConta((config as any).numero_conta || '99466610001');
+      setNib((config as any).nib || '001000000099466610196');
+      setBanco2((config as any).banco2 || '');
+      setConta2((config as any).numero_conta2 || '');
+      setNib2((config as any).nib2 || '');
+      setMpesa((config as any).mpesa || '');
+      setEmola((config as any).emola || '');
+      setVodacom1(config.vodacom1 || '');
+      setVodacom2(config.vodacom2 || '');
+      setVodacom3(config.vodacom3 || '');
+      setMovitel1(config.movitel1 || '');
+      setMovitel2(config.movitel2 || '');
+      setMovitel3(config.movitel3 || '');
+      setFixo1(config.fixo1 || '');
+      setFixo2(config.fixo2 || '');
+      setEmail(config.email || '');
+      setCompanyNuit(config.companyNuit || '401976590');
+      setCriticalStockLevel(config.criticalStockLevel || 10);
+      setPrinterA4(config.printerA4 || 'Microsoft Print to PDF');
+      setPrinterThermal(config.printerThermal || 'Xprinter XP-80');
+      setBarcodePrefix(config.barcodePrefix || '');
+      setBarcodeSuffix(config.barcodeSuffix || '');
 
-    // Load audit logs
-    const logs = await dbService.getAuditLogs();
-    setAuditLogs(logs);
-
-    // Load users (credentials)
-    const creds = await dbService.getCredentials();
-    setUsers(creds);
-
-    // Load products
-    const prods = await dbService.getProducts();
-    setProducts(prods);
-
-    // Load sales
-    const sls = await dbService.getSales();
-    setSales(sls);
-
-    // Load losses
-    const lss = await dbService.getLosses();
-    setLosses(lss);
-
-    // Load active sessions
-    const activeSess = await dbService.getActiveSessions();
-    setActiveSessions(activeSess);
+      try {
+        const indexStr = safeStorage.getItem('agro_erp_backups_index') || '[]';
+        setAutoBackupsList(JSON.parse(indexStr));
+      } catch (error) {
+        console.warn('Error loading backups index:', error);
+      }
     } catch (error) {
       // Refreshing technical panels is non-critical. In particular, do not let
       // it overwrite the confirmation of a user/configuration change that was
@@ -206,6 +232,27 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       console.warn('[TechnicalModule] Could not refresh all dashboard data:', error);
     }
   };
+
+  useEffect(() => {
+    setIsPrinterConnected(isSerialPrinterConnected());
+    setIsVirtualMode(isVirtualPrinterActive());
+  }, []);
+
+  useEffect(() => {
+    void loadAllData();
+
+    const handleDbUpdate = () => {
+      void loadAllData();
+      setAuditRefreshKey(value => value + 1);
+    };
+    window.addEventListener('db-update', handleDbUpdate);
+    return () => window.removeEventListener('db-update', handleDbUpdate);
+  }, []);
+
+  useEffect(() => {
+    void loadAuditLogs(true);
+    // A period/source change starts from the first cursor page.
+  }, [logsStartDate, logsEndDate, auditLogSource, auditRefreshKey]);
 
   const handleTerminateSession = async (sessionId: string, username: string) => {
     await dbService.removeActiveSession(sessionId);
@@ -241,6 +288,119 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  const handleArchiveAuditLogs = async () => {
+    if (isArchivingAuditLogs) return;
+    const confirmation = window.confirm(
+      `Arquivar registos de auditoria anteriores a ${formatDatePT(archiveBeforeDate)}? ` +
+      'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.'
+    );
+    if (!confirmation) return;
+
+    setIsArchivingAuditLogs(true);
+    try {
+      const result = await dbService.archiveAuditLogsBefore(archiveBeforeDate, 200);
+      if (result.archivedCount === 0) {
+        showToast('Não existem registos ativos anteriores à data indicada.');
+        return;
+      }
+
+      void dbService.addAuditLog({
+        id: `log-archive-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        username: 'Técnico',
+        ipAddress: '127.0.0.1',
+        action: 'Arquivo de Registos de Auditoria',
+        status: 'Sucesso',
+        details: `${result.archivedCount} registo(s) anterior(es) a ${archiveBeforeDate} foram movidos para audit_logs_archive sem eliminação definitiva.`
+      });
+      setAuditRefreshKey(value => value + 1);
+      showToast(
+        result.hasMore
+          ? `${result.archivedCount} registos arquivados. Existem mais; repita a operação para continuar.`
+          : `${result.archivedCount} registos arquivados com segurança.`
+      );
+    } catch (error) {
+      console.error('[TechnicalModule] Audit archive failed:', error);
+      showToast('Não foi possível arquivar os registos. Nenhum lote parcial foi eliminado.');
+    } finally {
+      setIsArchivingAuditLogs(false);
+    }
+  };
+
+  const handleExportAuditPDF = async () => {
+    if (isExportingAuditLogs) return;
+    setIsExportingAuditLogs(true);
+    try {
+      const exportLogs = await dbService.getAuditLogsForPeriod(getCurrentAuditQuery());
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
+      const nuit = settings?.companyNuit || '401976590';
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(30, 41, 59);
+      doc.text('RELATÓRIO DE AUDITORIA DE SEGURANÇA E ACESSOS', 15, 20);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
+      doc.text(`Período: ${formatDatePT(logsStartDate)} até ${formatDatePT(logsEndDate)}`, 15, 29);
+      doc.setDrawColor(30, 41, 59);
+      doc.line(15, 33, 195, 33);
+      let y = 43;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('DATA/HORA', 15, y);
+      doc.text('UTILIZADOR', 55, y);
+      doc.text('AÇÃO', 95, y);
+      doc.text('ESTADO', 145, y);
+      doc.text('IP', 170, y);
+      y += 6;
+      doc.setFont('helvetica', 'normal');
+      exportLogs.forEach(log => {
+        if (y > 275) { doc.addPage(); y = 20; }
+        doc.text(new Date(log.timestamp).toLocaleString('pt-MZ'), 15, y);
+        doc.text(log.username || '', 55, y);
+        doc.text((log.action || '').substring(0, 25), 95, y);
+        doc.text(log.status || '', 145, y);
+        doc.text(log.ipAddress || '', 170, y);
+        y += 6;
+      });
+      doc.save(`Auditoria_Seguranca_${logsStartDate}_a_${logsEndDate}.pdf`);
+      showToast(`Relatório de Auditoria PDF descarregado com ${exportLogs.length} registo(s).`);
+    } catch (error) {
+      console.error('[TechnicalModule] Audit PDF export failed:', error);
+      showToast('Não foi possível exportar o relatório de auditoria.');
+    } finally {
+      setIsExportingAuditLogs(false);
+    }
+  };
+
+  const handleExportAuditExcel = async () => {
+    if (isExportingAuditLogs) return;
+    setIsExportingAuditLogs(true);
+    try {
+      const exportLogs = await dbService.getAuditLogsForPeriod(getCurrentAuditQuery());
+      const data = exportLogs.map(log => ({
+        'Data / Hora': new Date(log.timestamp).toLocaleString('pt-MZ'),
+        'Utilizador': log.username,
+        'IP': log.ipAddress,
+        'Ação': log.action,
+        'Estado': log.status,
+        'Detalhes': log.details || ''
+      }));
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Audit_Logs');
+      XLSX.writeFile(wb, `Audit_Logs_${logsStartDate}_a_${logsEndDate}.xlsx`);
+      showToast(`Planilha de Auditoria descarregada com ${exportLogs.length} registo(s).`);
+    } catch (error) {
+      console.error('[TechnicalModule] Audit Excel export failed:', error);
+      showToast('Não foi possível exportar a planilha de auditoria.');
+    } finally {
+      setIsExportingAuditLogs(false);
+    }
   };
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -857,16 +1017,28 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   const handleBackupTotal = async () => {
-    const prods = await dbService.getProducts();
-    const sls = await dbService.getSales();
-    const lss = await dbService.getLosses();
-    const emps = await dbService.getEmployees();
-    const att = await dbService.getAttendance();
+    const [prods, sls, lss, emps, att, activeAuditLogs, archivedAuditLogs] = await Promise.all([
+      dbService.getProducts(),
+      dbService.getSales(),
+      dbService.getLosses(),
+      dbService.getEmployees(),
+      dbService.getAttendance(),
+      dbService.getAuditLogs(),
+      dbService.getAuditLogsForPeriod({ source: 'archive' })
+    ]);
 
     const fullBackup = {
       timestamp: new Date().toISOString(),
       app: 'AgroGestao Zero',
-      data: { prods, sales: sls, losses: lss, emps, att }
+      data: {
+        products: prods,
+        sales: sls,
+        losses: lss,
+        employees: emps,
+        attendance: att,
+        audit_logs: activeAuditLogs,
+        audit_logs_archive: archivedAuditLogs
+      }
     };
 
     const str = JSON.stringify(fullBackup, null, 2);
@@ -892,24 +1064,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     showToast('Ficheiro de Backup JSON gerado com sucesso!');
     loadAllData();
   };
-
-  // --- DASHBOARD ANALYTICS CALCULATIONS ---
-  const totalRevenue = sales.reduce((acc, sale) => acc + sale.total, 0);
-  
-  // Calculate Profit based on actual Cost Prices in database
-  const totalCost = sales.reduce((acc, sale) => {
-    return acc + sale.items.reduce((sum, item) => {
-      const prod = products.find(p => p.id === item.productId);
-      const buyPrice = prod ? prod.buyingPrice : (item.unitPrice * 0.6); // default to 60% of sale price if product missing
-      return sum + (buyPrice * item.quantity);
-    }, 0);
-  }, 0);
-  
-  const totalProfit = Math.max(0, totalRevenue - totalCost);
-  const avgTicket = sales.length > 0 ? (totalRevenue / sales.length) : 0;
-  
-  const stockAlerts = products.filter(p => p.stockQty <= 10);
-  const pendingSyncCount = sales.filter(s => !s.synced).length;
 
   return (
     <div className="space-y-6 animate-fade-in" id="tech_module">
@@ -2052,7 +2206,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       {/* --- 4. CYBERSECURITY AUDIT LOGS VIEW --- */}
       {activeTab === 'logs' && (
         <div className="space-y-6 animate-fade-in">
-          {/* Date Range Filter for Audit Logs */}
           <DateRangeFilter
             title="Filtrar Registos de Auditoria por Período"
             startDate={logsStartDate}
@@ -2063,69 +2216,79 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               setLogsEndDate(end);
               setLogsPreset(preset);
             }}
-            onExportPDF={() => {
-              const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-              const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-              const nuit = settings?.companyNuit || '401976590';
-              doc.setFont('helvetica', 'bold');
-              doc.setFontSize(14);
-              doc.setTextColor(30, 41, 59);
-              doc.text('RELATÓRIO DE AUDITORIA DE SEGURANÇA E ACESSOS', 15, 20);
-              doc.setFont('helvetica', 'normal');
-              doc.setFontSize(9);
-              doc.setTextColor(100, 116, 139);
-              doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
-              doc.text(`Período: ${formatDatePT(logsStartDate)} até ${formatDatePT(logsEndDate)}`, 15, 29);
-              doc.setDrawColor(30, 41, 59);
-              doc.line(15, 33, 195, 33);
-              let y = 43;
-              doc.setFont('helvetica', 'bold');
-              doc.setFontSize(8);
-              doc.text('DATA/HORA', 15, y);
-              doc.text('UTILIZADOR', 55, y);
-              doc.text('AÇÃO', 95, y);
-              doc.text('ESTADO', 145, y);
-              doc.text('IP', 170, y);
-              y += 6;
-              doc.setFont('helvetica', 'normal');
-              const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
-              filtered.forEach(log => {
-                if (y > 275) { doc.addPage(); y = 20; }
-                doc.text(new Date(log.timestamp).toLocaleString('pt-MZ'), 15, y);
-                doc.text(log.username || '', 55, y);
-                doc.text((log.action || '').substring(0, 25), 95, y);
-                doc.text(log.status || '', 145, y);
-                doc.text(log.ipAddress || '', 170, y);
-                y += 6;
-              });
-              doc.save(`Auditoria_Seguranca_${logsStartDate}_a_${logsEndDate}.pdf`);
-              setToastMessage('Relatório de Auditoria PDF descarregado!');
-            }}
-            onExportExcel={() => {
-              const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
-              const data = filtered.map(l => ({
-                'Data / Hora': new Date(l.timestamp).toLocaleString('pt-MZ'),
-                'Utilizador': l.username,
-                'IP': l.ipAddress,
-                'Ação': l.action,
-                'Estado': l.status,
-                'Detalhes': l.details || ''
-              }));
-              const ws = XLSX.utils.json_to_sheet(data);
-              const wb = XLSX.utils.book_new();
-              XLSX.utils.book_append_sheet(wb, ws, 'Audit_Logs');
-              XLSX.writeFile(wb, `Audit_Logs_${logsStartDate}_a_${logsEndDate}.xlsx`);
-              setToastMessage('Planilha de Auditoria descarregada com sucesso!');
-            }}
+            onExportPDF={() => { void handleExportAuditPDF(); }}
+            onExportExcel={() => { void handleExportAuditExcel(); }}
           />
 
-          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
-            <div>
-              <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Rastreio Imutável de Auditoria de Cibersegurança</h4>
-              <p className="text-xs text-gray-500">
-                Registos de tentativas de intrusão, acessos, fecho de turnos, e modificações de inventário.
-              </p>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col xl:flex-row gap-4 xl:items-end xl:justify-between">
+            <div className="space-y-2">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Origem da consulta</p>
+                <p className="text-xs text-slate-600">Alterne entre os registos operacionais e o arquivo histórico sem perder rastreabilidade.</p>
+              </div>
+              <div className="inline-flex rounded-lg overflow-hidden border border-slate-300 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setAuditLogSource('active')}
+                  className={`px-3 py-1.5 text-xs font-bold transition-colors ${auditLogSource === 'active' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  Registos ativos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuditLogSource('archive')}
+                  className={`px-3 py-1.5 text-xs font-bold transition-colors border-l border-slate-300 ${auditLogSource === 'archive' ? 'bg-indigo-700 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  Arquivo histórico
+                </button>
+              </div>
             </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-end gap-2 bg-white border border-amber-200 rounded-lg p-3">
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-wider text-amber-800 mb-1">Arquivar antes de</label>
+                <input
+                  type="date"
+                  value={archiveBeforeDate}
+                  onChange={(event) => setArchiveBeforeDate(event.target.value)}
+                  className="border border-amber-300 bg-amber-50 rounded-md px-2 py-1.5 text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleArchiveAuditLogs()}
+                disabled={isArchivingAuditLogs || !archiveBeforeDate}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-wait text-white rounded-md text-xs font-black transition-colors"
+                title="Move até 200 registos por lote para o arquivo, sem eliminação definitiva"
+              >
+                <span className={`material-symbols-outlined text-[16px] ${isArchivingAuditLogs ? 'animate-spin' : ''}`}>inventory_2</span>
+                {isArchivingAuditLogs ? 'A arquivar…' : 'Arquivar lote seguro'}
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div>
+                <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">
+                  {auditLogSource === 'archive' ? 'Arquivo Histórico de Auditoria' : 'Rastreio Imutável de Auditoria de Cibersegurança'}
+                </h4>
+                <p className="text-xs text-gray-500">
+                  {auditLogSource === 'archive'
+                    ? 'Registos preservados fora da coleção operacional. Pode filtrá-los e exportá-los pelo período.'
+                    : 'Registos de tentativas de intrusão, acessos, fecho de turnos e modificações de inventário.'}
+                </p>
+              </div>
+              <span className="text-[10px] font-bold bg-slate-100 text-slate-600 rounded-full px-2 py-1 whitespace-nowrap">
+                {isLoadingAuditLogs ? 'A atualizar…' : `${auditLogs.length} registo(s) carregado(s)`}
+              </span>
+            </div>
+
+            {auditLoadError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800">
+                {auditLoadError}
+              </div>
+            )}
 
             <div className="overflow-x-auto text-xs">
               <table className="w-full text-left border-collapse">
@@ -2140,18 +2303,16 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {(() => {
-                    const filtered = auditLogs.filter(l => isDateInRange(l.timestamp, logsStartDate, logsEndDate));
-                    if (filtered.length === 0) {
-                      return (
-                        <tr>
-                          <td colSpan={6} className="p-8 text-center text-gray-400 italic">
-                            Nenhum registo de auditoria encontrado no período selecionado.
-                          </td>
-                        </tr>
-                      );
-                    }
-                    return filtered.map(log => (
+                  {auditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-8 text-center text-gray-400 italic">
+                        {isLoadingAuditLogs
+                          ? 'A carregar registos de auditoria…'
+                          : 'Nenhum registo de auditoria encontrado no período selecionado.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    auditLogs.map(log => (
                       <tr key={log.id} className="hover:bg-gray-50">
                         <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
                         <td className="p-3 font-bold text-gray-800">{log.username}</td>
@@ -2170,10 +2331,30 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           {log.details}
                         </td>
                       </tr>
-                    ));
-                  })()}
+                    ))
+                  )}
                 </tbody>
               </table>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+              <p className="text-[10px] text-slate-400 text-center sm:text-left">
+                Consulta paginada: 50 registos por página. As exportações incluem todos os registos do período e da origem selecionada.
+              </p>
+              <div className="flex items-center gap-2">
+                {isExportingAuditLogs && <span className="text-[10px] text-amber-700 font-semibold">A preparar exportação completa…</span>}
+                {hasMoreAuditLogs && (
+                  <button
+                    type="button"
+                    onClick={() => void loadAuditLogs(false)}
+                    disabled={isLoadingAuditLogs}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 disabled:cursor-wait text-slate-800 rounded-lg text-xs font-black transition-colors"
+                  >
+                    <span className={`material-symbols-outlined text-[16px] ${isLoadingAuditLogs ? 'animate-spin' : ''}`}>expand_more</span>
+                    {isLoadingAuditLogs ? 'A carregar…' : 'Carregar mais'}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

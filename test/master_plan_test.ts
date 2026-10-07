@@ -3,6 +3,13 @@ import { hashPassword, verifyPassword, sanitizeString, sanitizeNumber } from '..
 import { generateNextReceiptNumber, generateNextInvoiceNumber } from '../src/utils/sequenceHelper';
 import { Product, ProductTransformation, SaleItem } from '../src/types';
 import { runPostCommitTask, runPostCommitTasks } from '../src/utils/postCommit';
+import {
+  getArchiveCutoffTimestamp,
+  getCursorPageMetadata,
+  getInclusiveDateBounds,
+  getSafeArchiveBatchSize,
+  normalizePageSize
+} from '../src/utils/paginationHelper';
 
 async function runTests() {
   console.log('--- STARTING MASTER PLAN AUDIT & ENHANCEMENT TESTS ---');
@@ -157,6 +164,23 @@ async function runTests() {
   } finally {
     console.warn = originalConsoleWarn;
   }
+
+  // TEST 8: Pagination and audit archive safeguards
+  console.log('\n--- Test Suite 8: Pagination & Audit Archive Safeguards ---');
+  assert(normalizePageSize(undefined) === 50, 'Default Firestore page size is bounded at 50 records');
+  assert(normalizePageSize(999) === 250, 'Requested page sizes are capped at the safe maximum');
+  assert(normalizePageSize(0) === 50, 'Invalid page size falls back to the default');
+
+  const firstPage = getCursorPageMetadata(51, 50);
+  assert(firstPage.itemCount === 50 && firstPage.hasMore, 'Sentinel document produces a next-page cursor decision');
+  const finalPage = getCursorPageMetadata(17, 50);
+  assert(finalPage.itemCount === 17 && !finalPage.hasMore, 'Short final page does not offer an invalid next cursor');
+
+  const bounds = getInclusiveDateBounds('2026-10-01', '2026-10-07');
+  assert(bounds.start === '2026-10-01' && bounds.end === '2026-10-07T23:59:59.999Z', 'Date range includes plain dates and ISO timestamps on the ending day');
+  assert(getArchiveCutoffTimestamp('2026-04-01') === '2026-04-01T00:00:00.000Z', 'Audit archive cutoff is exclusive from the selected day start');
+  assert(getSafeArchiveBatchSize(999) === 250, 'Audit archive batch stays within Firestore 500-write atomic limit');
+  assert(getSafeArchiveBatchSize(200) === 200, 'Requested safe archive batch size is preserved');
 
   console.log(`\n========================================`);
   console.log(`RESULTS: ${passed} Passed, ${failed} Failed`);

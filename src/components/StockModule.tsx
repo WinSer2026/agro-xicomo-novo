@@ -120,6 +120,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
+  // The inventory table renders in bounded pages. The full catalogue remains in
+  // memory for reconciliation, transformations and deliberate bulk actions.
+  const [inventoryPage, setInventoryPage] = useState(1);
   const [selectedProds, setSelectedProds] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<SystemSettings | null>(null);
 
@@ -467,6 +470,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   const loadInventoryData = async () => {
     await dbService.init();
+    // Inventory reconciliation and batch operations intentionally require the
+    // complete live catalogue, unlike the paged invoice/audit history views.
+    await dbService.enableLiveCatalogAndSalesSync();
     const list = await dbService.getProducts();
     const lossList = await dbService.getLosses();
     try {
@@ -1752,6 +1758,23 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       (p.reference && p.reference.toLowerCase().includes(q))
     );
   });
+  const inventoryPageSize = 50;
+  const totalInventoryPages = Math.max(1, Math.ceil(filteredProducts.length / inventoryPageSize));
+  const boundedInventoryPage = Math.min(inventoryPage, totalInventoryPages);
+  const visibleInventoryProducts = filteredProducts.slice(
+    (boundedInventoryPage - 1) * inventoryPageSize,
+    boundedInventoryPage * inventoryPageSize
+  );
+
+  useEffect(() => {
+    setInventoryPage(1);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (inventoryPage > totalInventoryPages) {
+      setInventoryPage(totalInventoryPages);
+    }
+  }, [inventoryPage, totalInventoryPages]);
 
   return (
     <div className="space-y-6" id="stock_module">
@@ -2014,11 +2037,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <th className="pl-3 pr-1 py-3.5 w-8 text-center">
                   <input
                     type="checkbox"
-                    checked={filteredProducts.length > 0 && filteredProducts.every(p => selectedProds[p.id])}
+                    checked={visibleInventoryProducts.length > 0 && visibleInventoryProducts.every(p => selectedProds[p.id])}
                     onChange={() => {
-                      const allSelected = filteredProducts.length > 0 && filteredProducts.every(p => selectedProds[p.id]);
+                      const allSelected = visibleInventoryProducts.length > 0 && visibleInventoryProducts.every(p => selectedProds[p.id]);
                       const updated = { ...selectedProds };
-                      filteredProducts.forEach(p => {
+                      visibleInventoryProducts.forEach(p => {
                         updated[p.id] = !allSelected;
                       });
                       setSelectedProds(updated);
@@ -2034,7 +2057,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <th className="px-8 py-3.5 min-w-[180px]">Validade Lote</th>
                 <th className="px-8 py-3.5 text-right min-w-[180px] w-48">
                   <div className="block text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md inline-block mb-0.5 text-center whitespace-nowrap leading-none">
-                    {filteredProducts.length} {filteredProducts.length === 1 ? 'Prod.' : 'Prods.'}
+                    {filteredProducts.length} {filteredProducts.length === 1 ? 'Prod.' : 'Prods.'} · Pág. {boundedInventoryPage}/{totalInventoryPages}
                   </div>
                   <div className="block font-black">Ações</div>
                 </th>
@@ -2048,7 +2071,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map(prod => (
+                visibleInventoryProducts.map(prod => (
                   <tr key={prod.id} className="hover:bg-emerald-50/70 hover:shadow-md hover:z-10 transition-all group border-b border-gray-100">
                     {/* Checkbox */}
                     <td className="pl-3 pr-1 py-4 text-center w-8">
@@ -2253,6 +2276,32 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             </tbody>
           </table>
         </div>
+        {filteredProducts.length > 0 && (
+          <div className="border-t border-slate-100 bg-slate-50 px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <p className="text-[10px] text-slate-500 text-center sm:text-left">
+              A mostrar {visibleInventoryProducts.length} de {filteredProducts.length} produto(s). A seleção geral aplica-se apenas à página visível.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setInventoryPage(page => Math.max(1, page - 1))}
+                disabled={boundedInventoryPage <= 1}
+                className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                Anterior
+              </button>
+              <span className="text-[10px] font-black text-slate-500 min-w-16 text-center">Página {boundedInventoryPage} / {totalInventoryPages}</span>
+              <button
+                type="button"
+                onClick={() => setInventoryPage(page => Math.min(totalInventoryPages, page + 1))}
+                disabled={boundedInventoryPage >= totalInventoryPages}
+                className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                Seguinte
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       )}
 

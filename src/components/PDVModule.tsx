@@ -708,6 +708,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
   const loadPDVData = async () => {
     await dbService.init();
+    // PDV deliberately keeps a complete live catalogue and sales cache: it
+    // needs them for barcode lookup, stock validation and receipt sequencing.
+    await dbService.enableLiveCatalogAndSalesSync();
     const prodList = await dbService.getProducts();
     setProducts(prodList);
 

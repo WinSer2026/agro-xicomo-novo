@@ -45,6 +45,8 @@ export default function DashboardModule({ currentUser, onNavigate }: DashboardMo
   const loadDashboardData = async () => {
     setLoading(true);
     await dbService.init();
+    // Dashboard charts and stock alerts are complete-dataset metrics.
+    await dbService.enableLiveCatalogAndSalesSync();
     
     const [salesList, prodsList, empsList, attList, sysSettings] = await Promise.all([
       dbService.getSales(),
