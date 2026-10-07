@@ -94,13 +94,19 @@ preços errados). A ferramenta faz as duas.
 | 6 | Ferramenta | Exportar o mapa em Excel **e** em PDF (imprimir) |
 | 7 | Ferramenta | Confirmar que o cartão "Efeito no stock" diz **"Stock NÃO é alterado"** |
 | 8 | Ferramenta | Botão **Anular N venda(s)** → palavra-passe de gestor → *Confirmar e executar* |
-| 9 | PDV | Relançar as vendas uma a uma, a partir do mapa exportado |
+| 9 | PDV → **Venda Antiga / Lançamento Retroactivo** | Relançar as vendas uma a uma, a partir do mapa exportado |
 | 10 | Stock → Reconciliação | Conferir 3 ou 4 artigos de maior rotação contra a prateleira |
 
-**Ao relançar, boas práticas:**
-- Manter a **mesma data** da venda original (o relatório do dia não se desloca).
-- Escrever no campo de notas/referência: `Substitui FAC-2026-XXXX anulada por corte de inventário`.
-- Repetir a **mesma forma de pagamento** — caso contrário o fecho de caixa não bate certo.
+**Ao relançar, use sempre o "Lançamento Retroactivo" (não a venda normal):**
+
+- Preencher **data e hora da venda original** — assim o relatório do dia não se desloca
+  para hoje e o fecho de caixa do dia mantém-se correcto.
+- Deixar **"deduzir stock" ligado**: é este desconto que acerta o inventário.
+- Nos produtos vendidos em saco e em quilo, escolher no catálogo o botão da unidade certa
+  (**Saco** ou **Kg/Unidade**) — o preço e o desconto de stock seguem a unidade escolhida.
+- Repetir a **mesma forma de pagamento** do documento original.
+- No campo de recibo manual, escrever a referência do documento anulado, por exemplo:
+  `Substitui FAC-2026-0012 anulada por corte de inventário`.
 - Não emitir novo recibo ao cliente que já levou um; o documento novo serve de registo interno.
 
 ### Via B — Descontar sem anular
@@ -166,6 +172,7 @@ e anotar os talões. No lançamento, usar a Regra 2 com a hora exacta do início
 | Acesso | `src/components/FaturasModule.tsx` · `src/components/StockModule.tsx` | Botão **Corte de Inventário** nos dois módulos |
 | Contagem com data/hora | `src/components/StockModule.tsx` | Campo *Momento real da contagem* + desconto automático das vendas posteriores |
 | Operações em lote | `src/utils/firebaseDB.ts` · `src/utils/indexedDB.ts` | `cancelSalesBulk()` e `applyStockCorrection()` — gravação em lotes, online e offline |
+| Relançamento fiel | `src/components/PDVModule.tsx` | Lançamento retroactivo passa a aceitar venda em **saco** (grosso) além do retalho, com desconto de stock correcto (factor de conversão + saldos de grosso/retalho) |
 | Testes | `test/inventory_cutoff_test.ts` | 47 testes, incluindo a prova de que as duas vias dão o mesmo saldo |
 
 ### Correcções de qualidade aproveitadas no caminho
@@ -176,6 +183,9 @@ e anotar os talões. No lançamento, usar a Regra 2 com a hora exacta do início
   não existia na lista oficial de motivos e quebrava a tipagem do sistema).
 - Produtos híbridos (saco + quilo) passam a ter os saldos de **grosso e retalho** corrigidos
   em conjunto com o saldo base, deixando de ficar incoerentes.
+- O lançamento retroactivo registava qualquer artigo em unidade base: uma venda de 2 sacos
+  entrava como 2 quilos e o stock de grosso nunca descia. Corrigido.
+- `npm run lint` passa agora sem erros (antes acusava 9 falhas de tipagem).
 
 ---
 
