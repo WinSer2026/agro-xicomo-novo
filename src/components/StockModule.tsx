@@ -172,7 +172,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const updated = await dbService.getProducts();
       setProducts(updated);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
@@ -256,7 +256,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       }
 
       // Log to Audit Log
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
@@ -510,7 +510,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         changed = true;
 
         // Audit Log
-        await dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
           username: 'Sistema Automático',
@@ -654,7 +654,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     await dbService.saveProduct(prod);
 
     // Log to Audit Trail
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
@@ -1457,7 +1457,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     await dbService.saveProduct(product);
 
     // Security Audit Log
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
@@ -1502,7 +1502,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       await dbService.saveProduct(reqProduct);
 
       // Audit Log
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
@@ -1536,13 +1536,23 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       async () => {
         if (isSubmitting) return;
         setIsSubmitting(true);
+        let catalogRestored = false;
         try {
           await dbService.resetProductsToInitial();
-          await loadInventoryData();
+          catalogRestored = true;
+          try {
+            await loadInventoryData();
+          } catch (refreshError) {
+            // The catalogue is already persisted. A later refresh must not
+            // turn that completed action into an apparent failure.
+            console.warn('Catálogo restaurado, mas a atualização visual falhou:', refreshError);
+          }
           triggerToast('Inventário oficial restaurado com sucesso!');
         } catch (err) {
           console.error('Erro ao restaurar catálogo:', err);
-          triggerToast('Erro ao restaurar catálogo oficial.');
+          triggerToast(catalogRestored
+            ? 'Inventário oficial restaurado. A atualização visual será tentada novamente.'
+            : 'Erro ao restaurar catálogo oficial.');
         } finally {
           setIsSubmitting(false);
         }
@@ -1620,7 +1630,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       await dbService.saveProduct(selectedProduct);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Operador / Técnico',
@@ -1691,7 +1701,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       });
 
     // Security Audit Log
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Operador',

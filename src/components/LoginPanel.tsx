@@ -357,7 +357,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       await finalizeSession(pendingUser, ipAddress);
     } else {
       setError('Código MFA incorreto. Tente novamente ou use a Chave de Emergência.');
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: pendingUser.username,

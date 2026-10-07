@@ -21,7 +21,7 @@ import {
 } from '../utils/posHardware';
 
 interface TechnicalModuleProps {
-  onSettingsUpdated?: () => void;
+  onSettingsUpdated?: () => void | Promise<void>;
 }
 
 export default function TechnicalModule({ onSettingsUpdated }: TechnicalModuleProps = {}) {
@@ -129,7 +129,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   }, []);
 
   const loadAllData = async () => {
-    await dbService.init();
+    try {
+      await dbService.init();
     
     // Load Firebase config inputs
     const supConf = dbService.getFirebaseConfig();
@@ -198,11 +199,17 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     // Load active sessions
     const activeSess = await dbService.getActiveSessions();
     setActiveSessions(activeSess);
+    } catch (error) {
+      // Refreshing technical panels is non-critical. In particular, do not let
+      // it overwrite the confirmation of a user/configuration change that was
+      // already saved successfully.
+      console.warn('[TechnicalModule] Could not refresh all dashboard data:', error);
+    }
   };
 
   const handleTerminateSession = async (sessionId: string, username: string) => {
     await dbService.removeActiveSession(sessionId);
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
@@ -218,7 +225,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleClearAllSessions = async () => {
     if (!window.confirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.')) return;
     await dbService.clearActiveSessions();
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
@@ -292,7 +299,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.saveCredential(newUser);
 
       // Log to Audit logs
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
@@ -354,7 +361,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.deleteCredential(id);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
@@ -419,7 +426,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.saveSettings(updated);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
@@ -431,7 +438,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
       showToast('Configurações gravadas com sucesso!');
       await loadAllData();
-      onSettingsUpdated?.();
+      void Promise.resolve(onSettingsUpdated?.()).catch(error => {
+        console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
+      });
     } catch (err) {
       console.error(err);
       showToast('Erro ao gravar configurações.');
@@ -722,7 +731,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
       if (appliedCount > 0) {
         // Log to Audit logs
-        await dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
           username: 'Técnico (Assistente IA)',
@@ -737,7 +746,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         setAiPrompt('');
         setAiAttachedFiles([]);
         await loadAllData();
-        onSettingsUpdated?.();
+        void Promise.resolve(onSettingsUpdated?.()).catch(error => {
+        console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
+      });
       } else {
         showToast("Nenhuma alteração detectada para aplicar.");
       }
@@ -759,7 +770,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.clearSystemData();
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
@@ -788,7 +799,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.clearSystemData();
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
@@ -812,7 +823,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const conf = window.confirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
     if (!conf) return;
 
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
@@ -831,7 +842,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
     await dbService.clearSystemData();
 
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
@@ -868,7 +879,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     link.click();
     document.body.removeChild(link);
 
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Técnico',

@@ -69,20 +69,18 @@ export async function runCredentialsReset(): Promise<void> {
       await dbService.saveCredential(cred);
     }
 
-    try {
-      await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Sistema (Reset de Credenciais)',
-        ipAddress: '127.0.0.1',
-        action: 'Reset Global de Credenciais',
-        status: 'Alerta',
-        level: 'CRITICAL',
-        details: `Reset de credenciais aplicado (versão ${CREDENTIALS_RESET_VERSION}) a ${toWrite.length} conta(s). Todos os operadores terão de definir nova palavra-passe no próximo login.`
-      });
-    } catch (e) {
-      console.warn('[CredentialsReset] Audit log error:', e);
-    }
+    // Auditoria é secundária ao reset concluído; a base guarda-a localmente e
+    // tenta sincronizá-la depois caso a ligação esteja indisponível.
+    void dbService.addAuditLog({
+      id: 'log-' + Date.now(),
+      timestamp: new Date().toISOString(),
+      username: 'Sistema (Reset de Credenciais)',
+      ipAddress: '127.0.0.1',
+      action: 'Reset Global de Credenciais',
+      status: 'Alerta',
+      level: 'CRITICAL',
+      details: `Reset de credenciais aplicado (versão ${CREDENTIALS_RESET_VERSION}) a ${toWrite.length} conta(s). Todos os operadores terão de definir nova palavra-passe no próximo login.`
+    });
   } catch (err) {
     console.error('[CredentialsReset] Failed to apply credential reset:', err);
   }
@@ -112,19 +110,15 @@ export async function applyNewPassword(
 
     await dbService.saveCredential(updated);
 
-    try {
-      await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: current.username,
-        ipAddress: '127.0.0.1',
-        action: 'Palavra-passe Atualizada',
-        status: 'Sucesso',
-        details: 'O operador definiu uma nova palavra-passe no primeiro acesso após o reset de credenciais.'
-      });
-    } catch (e) {
-      console.warn('[CredentialsReset] Audit log error:', e);
-    }
+    void dbService.addAuditLog({
+      id: 'log-' + Date.now(),
+      timestamp: new Date().toISOString(),
+      username: current.username,
+      ipAddress: '127.0.0.1',
+      action: 'Palavra-passe Atualizada',
+      status: 'Sucesso',
+      details: 'O operador definiu uma nova palavra-passe no primeiro acesso após o reset de credenciais.'
+    });
 
     return { ok: true };
   } catch (err) {

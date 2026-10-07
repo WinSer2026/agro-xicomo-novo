@@ -270,7 +270,7 @@ export default function App() {
     } else {
       setGateError('Senha incorreta.');
       // Audit log failed attempt
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
@@ -319,18 +319,23 @@ export default function App() {
     safeSessionStorage.removeItem('agro_session_id');
     safeSessionStorage.clear();
     if (currentUser) {
-      // Remove specific device session without terminating other sessions
-      if (activeSessionId) {
-        await dbService.removeActiveSession(activeSessionId);
-      } else {
-        const sessions = await dbService.getActiveSessions();
-        const userSess = sessions.find(s => s.username === currentUser.username);
-        if (userSess) {
-          await dbService.removeActiveSession(userSess.id);
+      // Remove specific device session without terminating other sessions. The
+      // local session must still close when the network is temporarily down.
+      try {
+        if (activeSessionId) {
+          await dbService.removeActiveSession(activeSessionId);
+        } else {
+          const sessions = await dbService.getActiveSessions();
+          const userSess = sessions.find(s => s.username === currentUser.username);
+          if (userSess) {
+            await dbService.removeActiveSession(userSess.id);
+          }
         }
+      } catch (error) {
+        console.warn('Não foi possível remover a sessão remota durante o logout:', error);
       }
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,

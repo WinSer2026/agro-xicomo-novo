@@ -11,6 +11,7 @@ import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSe
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
 import * as XLSX from 'xlsx';
 
 interface PDVModuleProps {
@@ -87,7 +88,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
   // Notification Toast
   const [toastMessage, setToastMessage] = useState('');
-  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('success');
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isPausingSale, setIsPausingSale] = useState(false);
 
@@ -269,6 +270,24 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       return;
     }
 
+    let salePersisted = false;
+    let completedSale: Sale | null = null;
+
+    const closeCompletedRetroactiveSale = (sale: Sale) => {
+      setShowRetroactiveModal(false);
+      setRetroactiveCart([]);
+      setRetroactiveReceiptNo('');
+      setRetroactiveCustomerName('Cliente Geral');
+      setRetroactiveCustomerNuit('');
+      setRetroactiveCustomerAddress('');
+      setRetroactiveSaveCustomer(false);
+      setSelectedRegisteredCustomer('');
+      setRetroactiveProductQuery('');
+      setRetroactivePaymentMethod('Dinheiro');
+      // The selected date is intentionally preserved across consecutive entries.
+      setRetroactiveCompletedSale(sale);
+    };
+
     try {
       const sub = getRetroactiveCartTotal();
       const disc = 0;
@@ -302,7 +321,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const invoiceNum = generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva');
       const manualRec = retroactiveReceiptNo.trim() || undefined;
       const receiptNum = manualRec || generateNextReceiptNumber(existingSales, 'Thermal');
-
       const saleDateISO = retroactiveDateTime ? new Date(retroactiveDateTime).toISOString() : new Date().toISOString();
 
       const newSale: Sale = {
@@ -330,18 +348,40 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       };
 
       if (retroactiveDeductStock) {
-        for (const item of retroactiveCart) {
-          const prod = products.find(p => p.id === item.productId);
-          if (prod && !prod.isService) {
-            prod.stockQty = Math.max(0, prod.stockQty - item.quantity);
-            await dbService.saveProduct(prod);
+        const deductionItems = retroactiveCart.flatMap(item => {
+          const prod = products.find(product => product.id === item.productId);
+          if (!prod || prod.isService) return [];
+
+          const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
+          if (hasConversion && item.sellingUnit === 'Bulk') {
+            return [{
+              productId: prod.id,
+              hasConversion: true,
+              sellingUnit: 'Bulk' as const,
+              qtyToReduce: item.quantity,
+              equivalentBaseQty: item.quantity * (prod.conversionRate || 1)
+            }];
           }
-        }
+          return [{
+            productId: prod.id,
+            hasConversion,
+            sellingUnit: hasConversion ? 'Retail' as const : undefined,
+            qtyToReduce: item.quantity
+          }];
+        });
+        // Keep the historic sale and its stock movement in one atomic batch.
+        await dbService.addSaleWithStockDeduction(newSale, deductionItems);
+      } else {
+        await dbService.addSale(newSale);
       }
 
-      await dbService.addSale(newSale);
+      salePersisted = true;
+      completedSale = newSale;
+      // Clear the form immediately after the committed write to prevent a
+      // duplicate sale if printing or a refresh has a temporary problem.
+      closeCompletedRetroactiveSale(newSale);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
@@ -351,36 +391,44 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         details: `Lançamento retroactivo de ${saleDateISO.slice(0, 10)}. Total: ${tot}MT. Recibo: ${manualRec || 'Auto'}`
       });
 
-      const updatedProds = await dbService.getProducts();
-      setProducts(updatedProds);
-      const updatedSales = await dbService.getSales();
-      setSales(updatedSales);
+      await runPostCommitTasks([
+        {
+          label: 'atualizar o catálogo depois da venda antiga',
+          task: async () => setProducts(await dbService.getProducts())
+        },
+        {
+          label: 'atualizar o histórico depois da venda antiga',
+          task: async () => setSales(await dbService.getSales())
+        }
+      ]);
 
-      // Print Xprinter XP 80C thermal receipt automatically
+      let receiptGenerated = true;
       if (settings) {
-        downloadThermalReceipt(newSale, settings);
+        receiptGenerated = await runPostCommitTask({
+          label: 'gerar o recibo da venda antiga',
+          task: () => downloadThermalReceipt(newSale, settings)
+        });
         if (isSerialPrinterConnected()) {
-          printDirectThermalESC_POS(newSale, settings);
+          void runPostCommitTask({
+            label: 'enviar o recibo antigo para a impressora térmica',
+            task: () => printDirectThermalESC_POS(newSale, settings)
+          });
         }
       }
 
-      setShowRetroactiveModal(false);
-      setRetroactiveCart([]);
-      setRetroactiveReceiptNo('');
-      setRetroactiveCustomerName('Cliente Geral');
-      setRetroactiveCustomerNuit('');
-      setRetroactiveCustomerAddress('');
-      setRetroactiveSaveCustomer(false);
-      setSelectedRegisteredCustomer('');
-      setRetroactiveProductQuery('');
-      setRetroactivePaymentMethod('Dinheiro');
-      // NOTE: retroactiveDateTime is intentionally PRESERVED across consecutive retroactive entries
-      setRetroactiveCompletedSale(newSale);
-      showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada! Recibo Xprinter XP 80C gerado.`, 'success');
-
+      if (receiptGenerated) {
+        showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada com sucesso!`, 'success');
+      } else {
+        showToast('Venda antiga registada com sucesso. O recibo não foi gerado agora; pode reimprimir pela janela de opções.', 'warning');
+      }
     } catch (err) {
       console.error('Error finalizing retroactive sale:', err);
-      showToast('Erro ao registar a venda antiga.', 'error');
+      if (salePersisted && completedSale) {
+        closeCompletedRetroactiveSale(completedSale);
+        showToast('A venda antiga foi registada com sucesso. Alguns passos posteriores falharam; confirme-a no histórico antes de repetir.', 'warning');
+      } else {
+        showToast('Erro ao registar a venda antiga.', 'error');
+      }
     }
   };
 
@@ -709,7 +757,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     isInitialLoadCompletedRef.current = true;
   };
 
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+  const showToast = (msg: string, type: 'success' | 'error' | 'warning' = 'success') => {
     setToastMessage(msg);
     setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
@@ -774,9 +822,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
     setIsPausingSale(true);
 
+    const pausedAt = new Date().toISOString();
     const pausedObj: PausedSale = {
       id: 'paused-' + Date.now(),
-      date: new Date().toISOString(),
+      date: pausedAt,
+      createdAt: pausedAt,
       customerName,
       customerNuit: customerNuit || undefined,
       customerAddress: customerAddress || undefined,
@@ -1220,6 +1270,18 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     }
 
     setIsFinalizing(true);
+    let salePersisted = false;
+
+    const clearCompletedCheckout = () => {
+      setCart([]);
+      setCustomerName('Cliente Geral');
+      setCustomerNuit('');
+      setCustomerAddress('');
+      setCustomSubtotalDiscount(0);
+      setIncludeIva(false);
+      setNewSaleStatus('Paga');
+      setAmountReceived('');
+    };
 
     try {
       const sub = getSubtotal();
@@ -1286,41 +1348,38 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         ivaAmount: iva
       };
 
-      // 1. Update stock quantities locally ONLY for FaturaDefinitiva
+      // The definitive invoice and stock movement are one Firestore batch. Do
+      // not acknowledge the sale until this critical write has completed.
       if (effectiveDocType === 'FaturaDefinitiva') {
         const deductionItems = [];
         for (const item of cart) {
           const prod = products.find(p => p.id === item.productId);
           if (prod && !prod.isService) {
             const hasConversion = !!(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
-            if (hasConversion) {
-              if (item.sellingUnit === 'Bulk') {
-                const qtyToReduce = item.quantity;
-                const equivalentBaseQty = qtyToReduce * (prod.conversionRate || 1);
-                deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Bulk', qtyToReduce, equivalentBaseQty });
-              } else {
-                const qtyToReduce = item.quantity;
-                deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Retail', qtyToReduce });
-              }
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              const qtyToReduce = item.quantity;
+              const equivalentBaseQty = qtyToReduce * (prod.conversionRate || 1);
+              deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Bulk', qtyToReduce, equivalentBaseQty });
+            } else if (hasConversion) {
+              deductionItems.push({ productId: prod.id, hasConversion, sellingUnit: 'Retail', qtyToReduce: item.quantity });
             } else {
               deductionItems.push({ productId: prod.id, hasConversion: false, qtyToReduce: item.quantity });
             }
           }
         }
-        if (deductionItems.length > 0 && typeof (dbService as any).addSaleWithStockDeduction === 'function') {
-          await (dbService as any).addSaleWithStockDeduction(newSale, deductionItems);
-        } else {
-          if (deductionItems.length > 0 && typeof (dbService as any).deductProductStock === 'function') {
-            await (dbService as any).deductProductStock(deductionItems);
-          }
-          await dbService.addSale(newSale);
-        }
+        await dbService.addSaleWithStockDeduction(newSale, deductionItems);
       } else {
         await dbService.addSale(newSale);
       }
 
-      // 3. Log Audit Trial
-      await dbService.addAuditLog({
+      salePersisted = true;
+      // Clear the cart as soon as the transaction is committed. A later PDF or
+      // refresh issue must never tempt the operator to submit the same sale.
+      clearCompletedCheckout();
+
+      // Audit, cash drawer, printing and screen refresh are post-commit tasks.
+      // Their failures are intentionally isolated from the completed sale.
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
@@ -1330,22 +1389,31 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         details: `Subtotal: ${sub}MT, Método: ${paymentMethod}`
       });
 
-      // 3.5. Trigger cash drawer pulse and metallic register chime automatically for cash payments
       if (paymentMethod === 'Dinheiro') {
         playChachingSound();
-        await sendCashDrawerPulse();
+        void runPostCommitTask({
+          label: 'acionar a gaveta de caixa',
+          task: () => sendCashDrawerPulse()
+        });
       }
 
-      // 3.6. Check if direct physical printer is active via Web Serial
       let directPrinted = false;
       if (isSerialPrinterConnected() && printFormat === 'Thermal') {
         const activeConfig = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as SystemSettings;
-        directPrinted = await printDirectThermalESC_POS(newSale, activeConfig);
+        await runPostCommitTask({
+          label: 'enviar o recibo para a impressora térmica',
+          task: async () => {
+            directPrinted = await printDirectThermalESC_POS(newSale, activeConfig);
+          }
+        });
       }
 
-      // 4. Trigger print modal and auto-download PDF
+      let documentGenerated = true;
       if (printFormat === 'FaturaProforma') {
-        downloadInvoicePDF(newSale, 'FaturaProforma');
+        documentGenerated = await runPostCommitTask({
+          label: 'gerar a fatura proforma',
+          task: () => downloadInvoicePDF(newSale, 'FaturaProforma')
+        });
         setInvoiceToPrint(newSale);
         setPrintType('FaturaProforma');
       } else if (directPrint) {
@@ -1353,46 +1421,59 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         setPrintType(null);
 
         if (!directPrinted) {
-          downloadInvoicePDF(newSale, printFormat);
-          
-          if (printFormat === 'Thermal') {
-            setTimeout(() => {
-              try {
-                window.print();
-              } catch (printErr) {
-                console.error('Falha ao disparar window.print():', printErr);
-                showToast('Não foi possível disparar a impressão automática.', 'error');
-              }
+          documentGenerated = await runPostCommitTask({
+            label: 'gerar o documento da venda',
+            task: () => downloadInvoicePDF(newSale, printFormat)
+          });
+
+          if (printFormat === 'Thermal' && documentGenerated) {
+            window.setTimeout(() => {
+              void runPostCommitTask({
+                label: 'abrir a impressão automática',
+                task: () => window.print()
+              }).then(completed => {
+                if (!completed) {
+                  showToast('Venda gravada com sucesso. A impressão automática não foi iniciada; pode reimprimir pelo histórico.', 'warning');
+                }
+              });
             }, 500);
           }
-        } else {
-          showToast('Impressão directa enviada para a impressora física via Porta Serial!', 'success');
         }
       } else {
-        downloadInvoicePDF(newSale, printFormat);
+        documentGenerated = await runPostCommitTask({
+          label: 'gerar a pré-visualização da venda',
+          task: () => downloadInvoicePDF(newSale, printFormat)
+        });
         setInvoiceToPrint(newSale);
         setPrintType(printFormat);
       }
 
-      setCart([]);
-      setCustomerName('Cliente Geral');
-      setCustomerNuit('');
-      setCustomerAddress('');
-      setCustomSubtotalDiscount(0);
-      setIncludeIva(false);
-      setNewSaleStatus('Paga');
-      setAmountReceived('');
-      setProducts(await dbService.getProducts()); // reload products state
-      setSales(await dbService.getSales()); // reload sales state
+      await runPostCommitTasks([
+        {
+          label: 'atualizar o catálogo depois da venda',
+          task: async () => setProducts(await dbService.getProducts())
+        },
+        {
+          label: 'atualizar o histórico de vendas',
+          task: async () => setSales(await dbService.getSales())
+        }
+      ]);
 
-      if (directPrint) {
-        showToast('Venda finalizada com sucesso! Documento impresso e descarregado automaticamente.', 'success');
+      if (!documentGenerated) {
+        showToast('Venda finalizada e gravada com sucesso. Não foi possível gerar o documento agora; use o histórico para reimprimir.', 'warning');
+      } else if (directPrint) {
+        showToast('Venda finalizada com sucesso! Documento enviado ou descarregado automaticamente.', 'success');
       } else {
         showToast('Venda finalizada com sucesso! Pré-visualização gerada.', 'success');
       }
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar a venda no sistema.', 'error');
+      console.error('Erro ao finalizar venda:', err);
+      if (salePersisted) {
+        clearCompletedCheckout();
+        showToast('A venda foi gravada com sucesso. Alguns passos posteriores não foram concluídos; consulte o histórico antes de repetir a operação.', 'warning');
+      } else {
+        showToast('Erro ao gravar a venda no sistema.', 'error');
+      }
     } finally {
       setIsFinalizing(false);
     }
@@ -1404,20 +1485,35 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       'Liquidar Fatura',
       `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString()} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
       async () => {
+        let paymentSaved = false;
         try {
           const updatedSale: Sale = { ...sale, status: 'Paga' };
           await dbService.addSale(updatedSale);
-          setSales(await dbService.getSales());
-          
-          // Auto print and download receipt PDF on A4
+          paymentSaved = true;
+
           setInvoiceToPrint(updatedSale);
           setPrintType('ReciboA4');
-          downloadInvoicePDF(updatedSale, 'ReciboA4');
-          
-          showToast(`Fatura ${sale.invoiceNumber} paga! Recibo impresso e descarregado em A4.`, 'success');
+          const receiptGenerated = await runPostCommitTask({
+            label: 'gerar o recibo da fatura liquidada',
+            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
+          });
+          await runPostCommitTask({
+            label: 'atualizar o histórico após liquidar a fatura',
+            task: async () => setSales(await dbService.getSales())
+          });
+
+          if (receiptGenerated) {
+            showToast(`Fatura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
+          } else {
+            showToast(`Fatura ${sale.invoiceNumber} foi liquidada com sucesso. O recibo pode ser reimpresso pelo histórico.`, 'warning');
+          }
         } catch (err) {
-          console.error(err);
-          showToast('Erro ao liquidar fatura.', 'error');
+          console.error('Erro ao liquidar fatura:', err);
+          if (paymentSaved) {
+            showToast(`A fatura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
+          } else {
+            showToast('Erro ao liquidar fatura.', 'error');
+          }
         }
       }
     );
@@ -1428,8 +1524,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       'Cancelar Fatura',
       `Deseja realmente cancelar a fatura ${sale.invoiceNumber}? Esta ação irá anular este documento no histórico de vendas de forma permanente.`,
       async () => {
+        let cancellationSaved = false;
         try {
-          // Revert stock if it was FaturaDefinitiva and status wasn't already Cancelada
+          // Revert stock and update the invoice in the same batch whenever this
+          // is a definitive invoice. This prevents a cancelled invoice from
+          // being shown as failed after its stock has already been restored.
           if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
             const products = await dbService.getProducts();
             const restockItems: any[] = [];
@@ -1437,82 +1536,110 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               if (!item) continue;
               const prod = products.find(p => String(p.id) === String(item.productId));
               if (prod && !prod.isService) {
-                const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+                const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
                 const qtyToAdd = Number(item.quantity) || 0;
-                if (qtyToAdd > 0) {
-                  if (hasConversion) {
-                    if (item.sellingUnit === 'Bulk') {
-                      const equivalentBaseQty = qtyToAdd * (Number(prod.conversionRate) || 1);
-                      restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Bulk', qtyToAdd, equivalentBaseQty });
-                    } else {
-                      restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
-                    }
-                  } else {
-                    restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
-                  }
+                if (qtyToAdd <= 0) continue;
+                if (hasConversion && item.sellingUnit === 'Bulk') {
+                  restockItems.push({
+                    productId: String(prod.id),
+                    hasConversion: true,
+                    sellingUnit: 'Bulk',
+                    qtyToAdd,
+                    equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+                  });
+                } else if (hasConversion) {
+                  restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+                } else {
+                  restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
                 }
               }
             }
-            if (restockItems.length > 0 && typeof (dbService as any).cancelSaleWithStockRestoration === 'function') {
-              await (dbService as any).cancelSaleWithStockRestoration(sale, restockItems);
-            } else {
-              const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
-              await dbService.addSale(updatedSale);
-            }
+            await dbService.cancelSaleWithStockRestoration(sale, restockItems);
           } else {
-            const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
-            await dbService.addSale(updatedSale);
+            await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
           }
-          setSales(await dbService.getSales());
-          await loadPDVData();
+
+          cancellationSaved = true;
+          await runPostCommitTasks([
+            {
+              label: 'atualizar o histórico depois de cancelar a fatura',
+              task: async () => setSales(await dbService.getSales())
+            },
+            {
+              label: 'atualizar os dados do PDV depois de cancelar a fatura',
+              task: () => loadPDVData()
+            }
+          ]);
           showToast(`Fatura ${sale.invoiceNumber} cancelada com sucesso.`, 'success');
         } catch (err) {
-          console.error(err);
-          showToast('Erro ao cancelar fatura.', 'error');
+          console.error('Erro ao cancelar fatura:', err);
+          if (cancellationSaved) {
+            showToast(`A fatura ${sale.invoiceNumber} foi cancelada com sucesso. Alguns dados visuais serão atualizados em seguida.`, 'warning');
+          } else {
+            showToast('Erro ao cancelar fatura.', 'error');
+          }
         }
       }
     );
   };
 
   const handleRestoreInvoice = async (sale: Sale) => {
+    let restorationSaved = false;
     try {
-      // Revert stock back (reduce stock) if the previous status was Cancelada and it is FaturaDefinitiva
+      const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
+
+      // Reapply the original stock deduction and restore the invoice status in
+      // one batch. A partial stock-only restore must never be reported as an
+      // error after the action has already changed the database.
       if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
         const products = await dbService.getProducts();
-        const deductionItems = [];
+        const deductionItems: any[] = [];
         for (const item of (sale.items || [])) {
           if (!item) continue;
           const prod = products.find(p => String(p.id) === String(item.productId));
-          if (prod && !prod.isService) {
-            const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-            const qtyToReduce = Number(item.quantity) || 0;
-            if (qtyToReduce > 0) {
-              if (hasConversion) {
-                if (item.sellingUnit === 'Bulk') {
-                  const equivalentBaseQty = qtyToReduce * (Number(prod.conversionRate) || 1);
-                  deductionItems.push({ productId: String(prod.id), hasConversion, sellingUnit: 'Bulk', qtyToReduce, equivalentBaseQty });
-                } else {
-                  deductionItems.push({ productId: String(prod.id), hasConversion, sellingUnit: 'Retail', qtyToReduce });
-                }
-              } else {
-                deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
-              }
-            }
+          if (!prod || prod.isService) continue;
+
+          const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+          const qtyToReduce = Number(item.quantity) || 0;
+          if (qtyToReduce <= 0) continue;
+          if (hasConversion && item.sellingUnit === 'Bulk') {
+            deductionItems.push({
+              productId: String(prod.id),
+              hasConversion: true,
+              sellingUnit: 'Bulk',
+              qtyToReduce,
+              equivalentBaseQty: qtyToReduce * (Number(prod.conversionRate) || 1)
+            });
+          } else if (hasConversion) {
+            deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce });
+          } else {
+            deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
           }
         }
-        if (deductionItems.length > 0 && typeof (dbService as any).deductProductStock === 'function') {
-          await (dbService as any).deductProductStock(deductionItems);
-        }
+        await dbService.addSaleWithStockDeduction(updatedSale, deductionItems);
+      } else {
+        await dbService.addSale(updatedSale);
       }
 
-      const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
-      await dbService.addSale(updatedSale);
-      setSales(await dbService.getSales());
-      await loadPDVData();
+      restorationSaved = true;
+      await runPostCommitTasks([
+        {
+          label: 'atualizar o histórico depois de restaurar a fatura',
+          task: async () => setSales(await dbService.getSales())
+        },
+        {
+          label: 'atualizar os dados do PDV depois de restaurar a fatura',
+          task: () => loadPDVData()
+        }
+      ]);
       showToast(`Fatura ${sale.invoiceNumber} restaurada para o estado Pendente.`, 'success');
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao restaurar fatura.', 'error');
+      console.error('Erro ao restaurar fatura:', err);
+      if (restorationSaved) {
+        showToast(`A fatura ${sale.invoiceNumber} foi restaurada com sucesso. Alguns dados visuais serão atualizados em seguida.`, 'warning');
+      } else {
+        showToast('Erro ao restaurar fatura.', 'error');
+      }
     }
   };
 
@@ -1692,10 +1819,14 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           {/* Toast Notification Banner */}
       {toastMessage && (
         <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border ${
-          toastType === 'success' ? 'bg-primary text-white border-green-700' : 'bg-red-600 text-white border-red-700'
+          toastType === 'success'
+            ? 'bg-primary text-white border-green-700'
+            : toastType === 'warning'
+              ? 'bg-amber-500 text-slate-950 border-amber-600'
+              : 'bg-red-600 text-white border-red-700'
         }`}>
           <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : 'warning'}
+            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
           </span>
           <span className="text-sm font-semibold">{toastMessage}</span>
         </div>
@@ -2128,7 +2259,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                         setIncludeIva(false);
                         setNewSaleStatus('Paga');
                         setAmountReceived('');
-                        showToast('Venda cancelada com sucesso.', 'error');
+                        showToast('Venda cancelada com sucesso.', 'success');
                       }
                     );
                   }}

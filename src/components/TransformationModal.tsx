@@ -318,7 +318,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
       await dbService.addTransformationWithStockUpdate(transformationRecord, itemsToCredit, originalDeduction);
 
       // Log audit
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,

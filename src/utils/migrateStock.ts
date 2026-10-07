@@ -115,7 +115,7 @@ export const runStockListUpdate = async () => {
 
     await dbService.saveSettings({ ...settings, stockListVersion: STOCK_LIST_VERSION } as SystemSettings);
 
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Contagem Física)',

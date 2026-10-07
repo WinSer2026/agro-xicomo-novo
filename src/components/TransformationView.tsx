@@ -294,7 +294,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
     try {
       await dbService.cancelTransformationWithStockReversal(trf);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,

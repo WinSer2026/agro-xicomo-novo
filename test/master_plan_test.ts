@@ -2,6 +2,7 @@ import { getDateRangeFromPreset, isDateInRange, formatDatePT } from '../src/util
 import { hashPassword, verifyPassword, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
 import { generateNextReceiptNumber, generateNextInvoiceNumber } from '../src/utils/sequenceHelper';
 import { Product, ProductTransformation, SaleItem } from '../src/types';
+import { runPostCommitTask, runPostCommitTasks } from '../src/utils/postCommit';
 
 async function runTests() {
   console.log('--- STARTING MASTER PLAN AUDIT & ENHANCEMENT TESTS ---');
@@ -87,11 +88,11 @@ async function runTests() {
   console.log('\n--- Test Suite 4: Immutable Sale Items & Snapshot Margins ---');
   const saleItem: SaleItem = {
     productId: 'prod-001',
-    productName: 'Adubo NPK 10-24-12 1kg',
+    name: 'Adubo NPK 10-24-12 1kg',
     quantity: 5,
     unitPrice: 120, // Sold at 120 MT
     costPrice: 80,  // Snapshotted cost at 80 MT
-    total: 600,
+    totalPrice: 600,
     unit: 'Pacote 1kg'
   };
 
@@ -127,6 +128,35 @@ async function runTests() {
   const dirtyParentUnit = 'Sacos font-bold';
   const cleanParentUnit = dirtyParentUnit.replace(/font-bold/gi, '').trim();
   assert(cleanParentUnit === 'Sacos', 'Dirty parent unit "Sacos font-bold" is sanitized to "Sacos"');
+
+  // TEST 7: Post-commit safeguards. A completed sale must not become an error
+  // just because a later refresh or document generation fails.
+  console.log('\n--- Test Suite 7: Post-Commit Operation Safeguards ---');
+  const originalConsoleWarn = console.warn;
+  // The utility deliberately logs contained post-commit failures in production.
+  // Silence that expected diagnostic output while asserting its return contract.
+  console.warn = () => undefined;
+  try {
+    const completedTask = await runPostCommitTask({
+      label: 'test successful refresh',
+      task: () => Promise.resolve()
+    });
+    assert(completedTask, 'Successful post-commit task reports completion');
+
+    const failedTask = await runPostCommitTask({
+      label: 'test failed print',
+      task: () => Promise.reject(new Error('printer unavailable'))
+    });
+    assert(!failedTask, 'Failed post-commit task is contained instead of throwing');
+
+    const failedLabels = await runPostCommitTasks([
+      { label: 'refresh catalogue', task: () => Promise.resolve() },
+      { label: 'generate document', task: () => Promise.reject(new Error('PDF unavailable')) }
+    ]);
+    assert(failedLabels.length === 1 && failedLabels[0] === 'generate document', 'Only failed post-commit tasks are reported');
+  } finally {
+    console.warn = originalConsoleWarn;
+  }
 
   console.log(`\n========================================`);
   console.log(`RESULTS: ${passed} Passed, ${failed} Failed`);

@@ -188,7 +188,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
       }
 
       if (updatedCount > 0) {
-        await dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
           username: 'Gestor de Stock (IA)',

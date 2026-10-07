@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
-import { Sale, SystemSettings, Product } from '../types';
+import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { runPostCommitTask } from '../utils/postCommit';
 import * as XLSX from 'xlsx';
 
 interface FaturasModuleProps {
@@ -30,7 +31,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   // Toast notification state
   const [toastMessage, setToastMessage] = useState('');
-  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('success');
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Custom confirmation modal to bypass standard window.confirm which is blocked by sandboxed iframes
@@ -61,7 +62,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     });
   };
 
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+  const showToast = (msg: string, type: 'success' | 'error' | 'warning' = 'success') => {
     setToastMessage(msg);
     setToastType(type);
     setTimeout(() => {
@@ -89,7 +90,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (notifyOnError = true) => {
     try {
       await dbService.init();
       // Load sales
@@ -103,7 +104,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       setSettings(globalSettings);
     } catch (err) {
       console.error('Error loading invoices data:', err);
-      showToast('Erro ao carregar dados de facturação.', 'error');
+      if (notifyOnError) {
+        showToast('Erro ao carregar dados de facturação.', 'error');
+        return;
+      }
+      // Post-commit callers need the rejection so they can keep the successful
+      // operation visible and treat only the refresh as non-critical.
+      throw err;
     }
   };
 
@@ -114,7 +121,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       async () => {
         try {
           await dbService.clearSystemData();
-          await loadData();
+          await runPostCommitTask({
+            label: 'atualizar a lista após limpar o histórico',
+            task: () => loadData(false)
+          });
           showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
         } catch (err) {
           console.error(err);
@@ -132,22 +142,37 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       async () => {
         if (isProcessing) return;
         setIsProcessing(true);
+        let paymentSaved = false;
         try {
           const allSales = await dbService.getSales();
           const receiptNum = generateNextReceiptNumber(allSales, 'ReciboA4');
           const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
           await dbService.addSale(updatedSale);
-          await loadData();
-          
-          // Auto print and download receipt PDF on A4
+          paymentSaved = true;
+
           setInvoiceToPrint(updatedSale);
           setPrintType('ReciboA4');
-          downloadInvoicePDF(updatedSale, 'ReciboA4');
-          
-          showToast(`Factura ${sale.invoiceNumber} paga! Recibo impresso e descarregado em A4.`, 'success');
+          const receiptGenerated = await runPostCommitTask({
+            label: 'gerar o recibo da fatura liquidada',
+            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
+          });
+          await runPostCommitTask({
+            label: 'atualizar as faturas depois da liquidação',
+            task: () => loadData(false)
+          });
+
+          if (receiptGenerated) {
+            showToast(`Factura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
+          } else {
+            showToast(`Factura ${sale.invoiceNumber} foi liquidada com sucesso. Pode reimprimir o recibo pelo histórico.`, 'warning');
+          }
         } catch (err) {
-          console.error(err);
-          showToast('Erro ao liquidar factura.', 'error');
+          console.error('Error paying invoice:', err);
+          if (paymentSaved) {
+            showToast(`A factura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
+          } else {
+            showToast('Erro ao liquidar factura.', 'error');
+          }
         } finally {
           setIsProcessing(false);
         }
@@ -190,84 +215,43 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
     setIsProcessing(true);
     setSecurityModal(prev => ({ ...prev, error: '' }));
+    let actionPersisted = false;
 
     try {
       if (securityModal.action === 'cancel') {
-        // 1. Revert stock if it was FaturaDefinitiva and status wasn't already Cancelada
         if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
           const restockItems: any[] = [];
-          const productsToUpdate: Product[] = [];
-
           for (const item of (sale.items || [])) {
             if (!item) continue;
             const prod = products.find(p => String(p.id) === String(item.productId));
-            if (prod && !prod.isService) {
-              const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-              const qtyToAdd = Number(item.quantity) || 0;
-              if (qtyToAdd > 0) {
-                if (hasConversion) {
-                  if (item.sellingUnit === 'Bulk') {
-                    const equivalentBaseQty = qtyToAdd * (Number(prod.conversionRate) || 1);
-                    restockItems.push({
-                      productId: String(prod.id),
-                      hasConversion: true,
-                      sellingUnit: 'Bulk',
-                      qtyToAdd,
-                      equivalentBaseQty
-                    });
-                    prod.stockQtyBulk = (Number(prod.stockQtyBulk) || 0) + qtyToAdd;
-                    prod.stockQty = (Number(prod.stockQty) || 0) + equivalentBaseQty;
-                  } else {
-                    restockItems.push({
-                      productId: String(prod.id),
-                      hasConversion: true,
-                      sellingUnit: 'Retail',
-                      qtyToAdd
-                    });
-                    prod.stockQtyRetail = (Number(prod.stockQtyRetail) || 0) + qtyToAdd;
-                    prod.stockQty = (Number(prod.stockQty) || 0) + qtyToAdd;
-                  }
-                } else {
-                  restockItems.push({
-                    productId: String(prod.id),
-                    hasConversion: false,
-                    qtyToAdd
-                  });
-                  prod.stockQty = (Number(prod.stockQty) || 0) + qtyToAdd;
-                }
-                productsToUpdate.push(prod);
-              }
-            }
-          }
+            if (!prod || prod.isService) continue;
 
-          if (restockItems.length > 0 && typeof (dbService as any).cancelSaleWithStockRestoration === 'function') {
-            await (dbService as any).cancelSaleWithStockRestoration(sale, restockItems);
-          } else {
-            if (productsToUpdate.length > 0) {
-              await dbService.saveProducts(productsToUpdate);
+            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+            const qtyToAdd = Number(item.quantity) || 0;
+            if (qtyToAdd <= 0) continue;
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              restockItems.push({
+                productId: String(prod.id),
+                hasConversion: true,
+                sellingUnit: 'Bulk',
+                qtyToAdd,
+                equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+              });
+            } else if (hasConversion) {
+              restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+            } else {
+              restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
             }
-            const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
-            await dbService.addSale(updatedSale);
           }
+          await dbService.cancelSaleWithStockRestoration(sale, restockItems);
         } else {
-          const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' };
-          await dbService.addSale(updatedSale);
+          await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
         }
 
-        // Close modal immediately and show notification
+        actionPersisted = true;
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
-        showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
-
-        // Refresh data
-        try {
-          await loadData();
-        } catch (loadErr) {
-          console.warn('[FaturasModule] Error reloading data after cancel:', loadErr);
-        }
-
-        // Log Audit asynchronously
-        dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
@@ -275,56 +259,47 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           action: 'Anulação de Venda (Autorizada)',
           status: 'Sucesso',
           details: `Venda ${sale.invoiceNumber} anulada com palavra-passe de autorização.`
-        }).catch(auditErr => {
-          console.warn('[FaturasModule] Failed to add audit log on cancel:', auditErr);
         });
-
-      } else if (securityModal.action === 'restore') {
-        // Revert stock back (reduce stock) if the previous status was Cancelada and it is FaturaDefinitiva
+        void runPostCommitTask({
+          label: 'atualizar as faturas depois da anulação',
+          task: () => loadData(false)
+        });
+        showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
+      } else {
+        const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
         if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
-          const productsToUpdate: Product[] = [];
+          const deductionItems: any[] = [];
           for (const item of (sale.items || [])) {
             if (!item) continue;
             const prod = products.find(p => String(p.id) === String(item.productId));
-            if (prod && !prod.isService) {
-              const hasConversion = !!(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-              const qtyToReduce = Number(item.quantity) || 0;
-              if (qtyToReduce > 0) {
-                if (hasConversion) {
-                  if (item.sellingUnit === 'Bulk') {
-                    const equivalentBaseQty = qtyToReduce * (Number(prod.conversionRate) || 1);
-                    prod.stockQtyBulk = Math.max(0, (Number(prod.stockQtyBulk) || 0) - qtyToReduce);
-                    prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - equivalentBaseQty);
-                  } else {
-                    prod.stockQtyRetail = Math.max(0, (Number(prod.stockQtyRetail) || 0) - qtyToReduce);
-                    prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - qtyToReduce);
-                  }
-                } else {
-                  prod.stockQty = Math.max(0, (Number(prod.stockQty) || 0) - qtyToReduce);
-                }
-                productsToUpdate.push(prod);
-              }
+            if (!prod || prod.isService) continue;
+
+            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+            const qtyToReduce = Number(item.quantity) || 0;
+            if (qtyToReduce <= 0) continue;
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              deductionItems.push({
+                productId: String(prod.id),
+                hasConversion: true,
+                sellingUnit: 'Bulk',
+                qtyToReduce,
+                equivalentBaseQty: qtyToReduce * (Number(prod.conversionRate) || 1)
+              });
+            } else if (hasConversion) {
+              deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce });
+            } else {
+              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
             }
           }
-          if (productsToUpdate.length > 0) {
-            await dbService.saveProducts(productsToUpdate);
-          }
+          await dbService.addSaleWithStockDeduction(updatedSale, deductionItems);
+        } else {
+          await dbService.addSale(updatedSale);
         }
 
-        const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
-        await dbService.addSale(updatedSale);
-
+        actionPersisted = true;
         setSecurityModal({ show: false, action: 'restore', sale: null, password: '', error: '' });
-        showToast(`Factura ${sale.invoiceNumber} restaurada para o estado Pendente com sucesso!`, 'success');
-
-        try {
-          await loadData();
-        } catch (loadErr) {
-          console.warn('[FaturasModule] Error reloading data after restore:', loadErr);
-        }
-
-        dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
@@ -332,14 +307,22 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           action: 'Restauração de Venda (Autorizada)',
           status: 'Sucesso',
           details: `Factura ${sale.invoiceNumber} restaurada para o estado Pendente com palavra-passe de autorização.`
-        }).catch(auditErr => {
-          console.warn('[FaturasModule] Failed to add audit log on restore:', auditErr);
         });
+        void runPostCommitTask({
+          label: 'atualizar as faturas depois da restauração',
+          task: () => loadData(false)
+        });
+        showToast(`Factura ${sale.invoiceNumber} restaurada para o estado Pendente com sucesso!`, 'success');
       }
     } catch (err: any) {
       console.error('[FaturasModule] Error in handleExecuteSecurityAction:', err);
-      const errMsg = err?.message || 'Falha ao processar a operação.';
-      setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação de segurança: ${errMsg}` }));
+      if (actionPersisted) {
+        setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
+        showToast('A ação foi gravada com sucesso. Alguns dados visuais serão atualizados em seguida.', 'warning');
+      } else {
+        const errMsg = err?.message || 'Falha ao processar a operação.';
+        setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação de segurança: ${errMsg}` }));
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -459,10 +442,14 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       {/* Toast Notification Banner */}
       {toastMessage && (
         <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
-          toastType === 'success' ? 'bg-emerald-600 text-white border-emerald-700' : 'bg-red-600 text-white border-red-700'
+          toastType === 'success'
+            ? 'bg-emerald-600 text-white border-emerald-700'
+            : toastType === 'warning'
+              ? 'bg-amber-500 text-slate-950 border-amber-600'
+              : 'bg-red-600 text-white border-red-700'
         }`}>
           <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : 'warning'}
+            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
           </span>
           <span className="text-sm font-semibold">{toastMessage}</span>
         </div>

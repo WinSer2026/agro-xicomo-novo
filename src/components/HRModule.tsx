@@ -222,7 +222,7 @@ export default function HRModule() {
     try {
       await dbService.saveAttendance(payload);
       showToast(`${emp.name}: Marcado como ${isAbsent ? 'Falta' : 'Presente'}!`);
-      loadData();
+      loadData(false);
     } catch (err) {
       console.error(err);
     } finally {
@@ -245,19 +245,19 @@ export default function HRModule() {
 
   // Load Initial Data
   useEffect(() => {
-    loadData();
+    loadData(true);
 
     const handleDbUpdate = (e: any) => {
       const updatedTable = e.detail?.table;
       if (!updatedTable || updatedTable === 'all' || updatedTable === 'employees' || updatedTable === 'attendance' || updatedTable === 'payroll_payments') {
-        loadData();
+        loadData(false);
       }
     };
     window.addEventListener('db-update', handleDbUpdate);
     return () => window.removeEventListener('db-update', handleDbUpdate);
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (notifyOnError = true) => {
     setIsLoading(true);
     try {
       await dbService.init();
@@ -335,7 +335,9 @@ export default function HRModule() {
       setSettings(config);
     } catch (error) {
       console.error('Erro ao carregar dados de Recursos Humanos:', error);
-      showToast('Erro ao carregar dados do sistema.');
+      if (notifyOnError) {
+        showToast('Erro ao carregar dados do sistema.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -386,7 +388,7 @@ export default function HRModule() {
       showToast(isEditing ? 'Funcionário atualizado!' : 'Funcionário cadastrado!');
       setShowEmpModal(false);
       resetEmployeeForm();
-      loadData();
+      loadData(false);
     } catch (err) {
       console.error(err);
       showToast('Erro ao gravar os dados.');
@@ -420,7 +422,7 @@ export default function HRModule() {
       try {
         await dbService.deleteEmployee(id);
         showToast('Colaborador eliminado.');
-        loadData();
+        loadData(false);
       } catch (err) {
         console.error(err);
       } finally {
@@ -483,7 +485,7 @@ export default function HRModule() {
       setPontoNightHours(0);
       setPontoOvertimeWeekday(0);
       setPontoOvertimeWeekend(0);
-      loadData();
+      loadData(false);
     } catch (err) {
       console.error(err);
     } finally {
@@ -582,7 +584,7 @@ export default function HRModule() {
     try {
       await dbService.savePayrollPayment(newPayment);
       showToast(`Pagamento do mês ${selectedMonth} efetuado para ${emp.name}!`);
-      loadData();
+      loadData(false);
     } catch (err) {
       console.error(err);
       showToast('Erro ao processar o pagamento.');
@@ -2438,7 +2440,7 @@ export default function HRModule() {
           employee={selectedEmployeeForDetail}
           onClose={() => setSelectedEmployeeForDetail(null)}
           onSave={() => {
-            loadData();
+            loadData(false);
           }}
           initialTab={detailModalInitialTab}
         />

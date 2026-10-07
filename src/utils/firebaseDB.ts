@@ -50,8 +50,18 @@ try {
 
 const db = dbInstance;
 
+/**
+ * Audit records are valuable, but they must not turn a completed sale or stock
+ * movement into an apparent failure. When Firestore is temporarily unavailable,
+ * keep the record locally and retry it on the next initialization or successful
+ * audit write.
+ */
+const PENDING_AUDIT_LOGS_KEY = 'agro_pending_audit_logs';
+const MAX_PENDING_AUDIT_LOGS = 100;
+
 export class FirebaseDBService {
   private initPromise: Promise<void> | null = null;
+  private pendingAuditFlush: Promise<void> | null = null;
   private productsCache: Product[] | null = null;
   private salesCache: Sale[] | null = null;
   private customersCache: Customer[] | null = null;
@@ -210,13 +220,85 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'paused_sales'), (snapshot) => {
       const paused: PausedSale[] = [];
       snapshot.forEach(d => paused.push(d.data() as PausedSale));
-      this.pausedSalesCache = paused.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      this.pausedSalesCache = paused.sort((a, b) => (b.createdAt || b.date).localeCompare(a.createdAt || a.date));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'paused_sales', count: paused.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (paused_sales):', error);
     }));
 
+    // Do not block the application startup if an old audit record cannot be
+    // resent yet. The business data listeners are already ready at this point.
+    void this.flushPendingAuditLogs();
+
     return this.initPromise;
+  }
+
+  /** Read deferred audit records defensively so a corrupt browser cache never blocks the ERP. */
+  private getPendingAuditLogs(): AuditLog[] {
+    try {
+      const raw = safeStorage.getItem(PENDING_AUDIT_LOGS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((item): item is AuditLog => Boolean(item && typeof item.id === 'string' && item.id))
+        .slice(-MAX_PENDING_AUDIT_LOGS);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Could not read deferred audit logs:', error);
+      return [];
+    }
+  }
+
+  private savePendingAuditLogs(logs: AuditLog[]): void {
+    try {
+      if (logs.length === 0) {
+        safeStorage.removeItem(PENDING_AUDIT_LOGS_KEY);
+        return;
+      }
+      safeStorage.setItem(PENDING_AUDIT_LOGS_KEY, JSON.stringify(logs.slice(-MAX_PENDING_AUDIT_LOGS)));
+    } catch (error) {
+      console.warn('[FirebaseDBService] Could not persist deferred audit logs:', error);
+    }
+  }
+
+  private queueAuditLog(log: AuditLog): void {
+    const queued = this.getPendingAuditLogs();
+    if (!queued.some(item => item.id === log.id)) {
+      queued.push(log);
+      this.savePendingAuditLogs(queued);
+    }
+  }
+
+  private removePendingAuditLog(id: string): void {
+    this.savePendingAuditLogs(this.getPendingAuditLogs().filter(log => log.id !== id));
+  }
+
+  private flushPendingAuditLogs(): Promise<void> {
+    if (this.pendingAuditFlush) return this.pendingAuditFlush;
+
+    this.pendingAuditFlush = this.doFlushPendingAuditLogs().finally(() => {
+      this.pendingAuditFlush = null;
+    });
+    return this.pendingAuditFlush;
+  }
+
+  private async doFlushPendingAuditLogs(): Promise<void> {
+    const queued = this.getPendingAuditLogs();
+    if (queued.length === 0) return;
+
+    const deliveredIds = new Set<string>();
+    for (const log of queued) {
+      try {
+        await this.upsert('audit_logs', log.id, log);
+        deliveredIds.add(log.id);
+      } catch (error) {
+        console.warn(`[FirebaseDBService] Deferred audit log ${log.id} is still pending:`, error);
+      }
+    }
+
+    // Preserve entries added while the asynchronous flush was running. Removing
+    // only IDs known to have reached Firestore avoids losing a newer audit log.
+    const currentQueue = this.getPendingAuditLogs();
+    this.savePendingAuditLogs(currentQueue.filter(log => !deliveredIds.has(log.id)));
   }
 
   // Generic DB methods
@@ -291,6 +373,10 @@ export class FirebaseDBService {
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, deletedId: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error deleting from ${colName}/${id}:`, e);
+      // A delete is a business mutation. Unlike telemetry, callers must be able
+      // to show a real failure instead of confirming an operation that did not
+      // reach the database.
+      throw e;
     }
   }
 
@@ -366,6 +452,8 @@ export class FirebaseDBService {
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
     } catch (e) {
       console.error("[FirebaseDBService] Error deducting stock:", e);
+      // Stock movements are critical and must not be silently acknowledged.
+      throw e;
     }
   }
 
@@ -738,7 +826,30 @@ export class FirebaseDBService {
     const list = await this.getAll<AuditLog>('audit_logs');
     return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
-  public async addAuditLog(l: AuditLog): Promise<void> { await this.upsert('audit_logs', l.id, l); }
+
+  /**
+   * Records an audit event without invalidating an already completed business
+   * action. If the audit collection is temporarily unavailable, the record is
+   * retained locally and sent again later.
+   *
+   * Returns true when Firestore accepted the record immediately and false when
+   * it was safely deferred.
+   */
+  public async addAuditLog(l: AuditLog): Promise<boolean> {
+    // Persist first so auditability is retained even when Firestore keeps an
+    // offline write pending for a long time.
+    this.queueAuditLog(l);
+    try {
+      await this.upsert('audit_logs', l.id, l);
+      this.removePendingAuditLog(l.id);
+      // A working write is a good opportunity to retry earlier deferred logs.
+      void this.flushPendingAuditLogs();
+      return true;
+    } catch (error) {
+      console.warn('[FirebaseDBService] Audit log deferred; the original operation remains successful:', error);
+      return false;
+    }
+  }
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
