@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { dbService } from '../utils/firebaseDB';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
-import { getUnitCost, isHybridProduct } from '../utils/priceHelper';
+import { getUnitCost, isHybridProduct, getBulkSellingPrice } from '../utils/priceHelper';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
 import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
@@ -221,33 +221,43 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   const [selectedRegisteredCustomer, setSelectedRegisteredCustomer] = useState<string>('');
   const [retroactiveCompletedSale, setRetroactiveCompletedSale] = useState<Sale | null>(null);
 
-  const addProductToRetroactiveCart = (product: Product) => {
-    const existingIndex = retroactiveCart.findIndex(item => item.productId === product.id);
+  /**
+   * Lançamento retroactivo: produtos híbridos (saco + quilo) podem ser relançados
+   * na unidade em que foram realmente vendidos. Sem isto, uma venda de 2 sacos seria
+   * registada como 2 quilos e o stock de grosso nunca desceria.
+   */
+  const addProductToRetroactiveCart = (product: Product, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    const useBulk = sellingUnit === 'Bulk' && isHybridProduct(product);
+    const effectiveUnit: 'Bulk' | 'Retail' = useBulk ? 'Bulk' : 'Retail';
+    const existingIndex = retroactiveCart.findIndex(
+      item => item.productId === product.id && (item.sellingUnit || 'Retail') === effectiveUnit
+    );
     if (existingIndex >= 0) {
       setRetroactiveCart(prev => prev.map((item, idx) => 
         idx === existingIndex ? { ...item, quantity: item.quantity + 1, totalPrice: (item.quantity + 1) * item.unitPrice } : item
       ));
     } else {
+      const unitPrice = useBulk ? getBulkSellingPrice(product) : product.sellingPrice;
       const newItem: SaleItem = {
         productId: product.id,
         name: product.name,
         quantity: 1,
-        unit: product.baseUnit,
-        unitPrice: product.sellingPrice,
-        totalPrice: product.sellingPrice,
+        unit: useBulk ? (product.parentUnit || 'Sacos') : product.baseUnit,
+        unitPrice,
+        totalPrice: unitPrice,
         category: product.category || 'Outro',
-        costPrice: getUnitCost(product, 'Retail'),
-        buyingPrice: getUnitCost(product, 'Retail'),
+        costPrice: getUnitCost(product, effectiveUnit),
+        buyingPrice: getUnitCost(product, effectiveUnit),
         isService: product.isService,
-        sellingUnit: 'Retail'
+        sellingUnit: effectiveUnit
       };
       setRetroactiveCart(prev => [...prev, newItem]);
     }
   };
 
-  const updateRetroactiveCartQty = (productId: string, delta: number) => {
+  const updateRetroactiveCartQty = (productId: string, delta: number, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
     setRetroactiveCart(prev => prev.map(item => {
-      if (item.productId === productId) {
+      if (item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit) {
         const newQty = Math.max(1, item.quantity + delta);
         return { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
       }
@@ -255,8 +265,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     }));
   };
 
-  const removeRetroactiveCartItem = (productId: string) => {
-    setRetroactiveCart(prev => prev.filter(item => item.productId !== productId));
+  const removeRetroactiveCartItem = (productId: string, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    setRetroactiveCart(prev => prev.filter(
+      item => !(item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit)
+    ));
   };
 
   const getRetroactiveCartTotal = () => {
@@ -330,12 +342,31 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       };
 
       if (retroactiveDeductStock) {
+        // Mesma regra do PDV normal: saco desconta grosso + equivalente em unidade base;
+        // retalho desconta retalho + unidade base.
+        const deductionItems: any[] = [];
         for (const item of retroactiveCart) {
           const prod = products.find(p => p.id === item.productId);
-          if (prod && !prod.isService) {
-            prod.stockQty = Math.max(0, prod.stockQty - item.quantity);
-            await dbService.saveProduct(prod);
+          const quantity = Number(item.quantity) || 0;
+          if (!prod || prod.isService || item.isService || quantity <= 0) continue;
+
+          const hasConversion = isHybridProduct(prod);
+          if (hasConversion && item.sellingUnit === 'Bulk') {
+            deductionItems.push({
+              productId: String(prod.id),
+              hasConversion: true,
+              sellingUnit: 'Bulk',
+              qtyToReduce: quantity,
+              equivalentBaseQty: quantity * (Number(prod.conversionRate) || 1)
+            });
+          } else if (hasConversion) {
+            deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce: quantity });
+          } else {
+            deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce: quantity });
           }
+        }
+        if (deductionItems.length > 0) {
+          await dbService.deductProductStock(deductionItems);
         }
       }
 
@@ -4156,11 +4187,13 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                         p.code.toLowerCase().includes(retroactiveProductQuery.toLowerCase()) ||
                         (p.category && p.category.toLowerCase().includes(retroactiveProductQuery.toLowerCase()))
                       )
-                      .map(p => (
+                      .map(p => {
+                        const hybrid = isHybridProduct(p);
+                        return (
                         <div
                           key={p.id}
-                          onClick={() => addProductToRetroactiveCart(p)}
-                          className="p-2.5 hover:bg-indigo-50/80 transition-colors flex items-center justify-between cursor-pointer group"
+                          onClick={() => { if (!hybrid) addProductToRetroactiveCart(p, 'Retail'); }}
+                          className={`p-2.5 hover:bg-indigo-50/80 transition-colors flex items-center justify-between group ${hybrid ? '' : 'cursor-pointer'}`}
                         >
                           <div className="space-y-0.5">
                             <p className="font-bold text-[11px] text-gray-900 group-hover:text-indigo-700 transition-colors">
@@ -4169,6 +4202,26 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                             <p className="text-[9.5px] text-gray-500 font-mono">
                               Cód: <span className="font-semibold text-gray-700">{p.code}</span> • <span className="font-medium text-gray-600">{p.category || 'Geral'}</span>
                             </p>
+                            {hybrid && (
+                              <div className="flex gap-1 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); addProductToRetroactiveCart(p, 'Bulk'); }}
+                                  className="px-2 py-0.5 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 rounded-lg text-[9px] font-black uppercase cursor-pointer"
+                                  title={`Vender em ${p.parentUnit || 'Sacos'} (${getBulkSellingPrice(p).toLocaleString('pt-PT')} MT)`}
+                                >
+                                  + {p.parentUnit || 'Saco'} · {getBulkSellingPrice(p).toLocaleString('pt-PT')} MT
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); addProductToRetroactiveCart(p, 'Retail'); }}
+                                  className="px-2 py-0.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-900 border border-indigo-300 rounded-lg text-[9px] font-black uppercase cursor-pointer"
+                                  title={`Vender em ${p.baseUnit} (${p.sellingPrice.toLocaleString('pt-PT')} MT)`}
+                                >
+                                  + {p.baseUnit} · {p.sellingPrice.toLocaleString('pt-PT')} MT
+                                </button>
+                              </div>
+                            )}
                           </div>
                           <div className="text-right shrink-0 ml-3">
                             <p className="font-black text-[11px] text-indigo-700 font-mono">
@@ -4179,7 +4232,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                             </p>
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                   </div>
 
                   <p className="text-[10px] text-gray-500 flex items-center justify-center gap-1 py-0.5 text-center font-medium">
@@ -4230,9 +4284,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-gray-800">
                         {retroactiveCart.map(item => (
-                          <tr key={item.productId} className="hover:bg-slate-50/80 transition-colors">
+                          <tr key={`${item.productId}-${item.sellingUnit || 'Retail'}`} className="hover:bg-slate-50/80 transition-colors">
                             <td className="p-2.5">
                               <p className="font-bold text-gray-900">{item.name}</p>
+                              <p className="text-[9px] font-black uppercase text-gray-500">
+                                {item.sellingUnit === 'Bulk' ? `Grosso • ${item.unit}` : `Retalho • ${item.unit}`}
+                              </p>
                             </td>
                             <td className="p-2.5 text-center font-mono font-semibold text-[10px]">
                               {item.unitPrice.toLocaleString('pt-PT')} MT
@@ -4241,7 +4298,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                               <div className="inline-flex items-center border border-gray-300 rounded-lg overflow-hidden bg-slate-50 shadow-2xs">
                                 <button
                                   type="button"
-                                  onClick={() => updateRetroactiveCartQty(item.productId, -1)}
+                                  onClick={() => updateRetroactiveCartQty(item.productId, -1, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                   className="px-2 py-0.5 text-gray-700 hover:bg-gray-200 font-black text-xs cursor-pointer transition-colors"
                                 >
                                   -
@@ -4251,7 +4308,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                                 </span>
                                 <button
                                   type="button"
-                                  onClick={() => updateRetroactiveCartQty(item.productId, 1)}
+                                  onClick={() => updateRetroactiveCartQty(item.productId, 1, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                   className="px-2 py-0.5 text-gray-700 hover:bg-gray-200 font-black text-xs cursor-pointer transition-colors"
                                 >
                                   +
@@ -4264,7 +4321,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                             <td className="p-2.5 text-center">
                               <button
                                 type="button"
-                                onClick={() => removeRetroactiveCartItem(item.productId)}
+                                onClick={() => removeRetroactiveCartItem(item.productId, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                 className="p-1 text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                                 title="Remover item"
                               >

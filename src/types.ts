@@ -22,6 +22,8 @@ export interface Product {
   expiryDate?: string; // ISO date YYYY-MM-DD
   imageUrl?: string;
   isService?: boolean;
+  /** Data/hora ISO da última actualização do registo (ajustes, contagens, correcções). */
+  updatedAt?: string;
 }
 
 export interface SaleItem {
@@ -37,6 +39,8 @@ export interface SaleItem {
   discountType?: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total';
   discountValue?: number;
   sellingUnit?: 'Bulk' | 'Retail'; // 'Bulk' for wholesale/sacks, 'Retail' for kilograms/units
+  /** Categoria do artigo no momento da venda (usada em relatórios por categoria). */
+  category?: string;
 }
 
 export interface PaymentBreakdown {
@@ -81,6 +85,8 @@ export interface Customer {
 export interface PausedSale {
   id: string;
   date: string;
+  /** Momento em que a venda foi colocada em pausa (ISO). */
+  createdAt?: string;
   customerName: string;
   customerNuit?: string;
   customerAddress?: string;
@@ -249,6 +255,8 @@ export interface PayrollPayment {
   absencesDiscount: number;
   finalNetWage: number;
   paymentDate: string;
+  /** Data alternativa do pagamento (registos antigos), usada como recurso na ordenação. */
+  date?: string;
 }
 
 export interface AuditLog {
