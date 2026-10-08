@@ -64,6 +64,7 @@ export class FirebaseDBService {
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
   private attendanceCache: Attendance[] | null = null;
+  private lastWriteAckAt: number | null = null;
   private unsubscribers: (() => void)[] = [];
 
   public async init(): Promise<void> {
@@ -255,6 +256,7 @@ export class FirebaseDBService {
       const sanitized = this.sanitizeData(data);
       console.log(`[FirebaseDBService] upsert() to collection: ${colName}, ID: ${validId}`);
       await setDoc(doc(db, colName, validId), sanitized);
+      this.lastWriteAckAt = Date.now();
       console.log(`[FirebaseDBService] upsert() successful on ${colName}/${validId}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, id: validId } }));
     } catch (e) {
@@ -306,10 +308,17 @@ export class FirebaseDBService {
     };
   }
 
+  /**
+   * Devolve SEMPRE cópias superficiais dos produtos.
+   * Vários módulos alteram o produto no próprio objecto (ex.: prod.stockQty = ...)
+   * antes de gravar. Como a cache partilhada era devolvida por referência, essas
+   * alterações ficavam "sujas" na cache mesmo quando a gravação falhava — e dois
+   * terminais passavam a ver valores diferentes. As cópias evitam esse efeito.
+   */
   public async getProducts(): Promise<Product[]> {
     if (this.productsCache && this.productsCache.length > 0) {
       console.log(`[FirebaseDBService] getProducts() returning cached products (${this.productsCache.length})`);
-      return this.productsCache;
+      return this.productsCache.map(p => ({ ...p }));
     }
     const cached = safeStorage.getItem('agro_products_cache');
     if (cached) {
@@ -318,7 +327,7 @@ export class FirebaseDBService {
         if (Array.isArray(parsed) && parsed.length > 0) {
           const cleaned = parsed.map(p => this.sanitizeProduct(p));
           this.productsCache = cleaned;
-          return cleaned;
+          return cleaned.map(p => ({ ...p }));
         }
       } catch (e) {}
     }
@@ -328,12 +337,12 @@ export class FirebaseDBService {
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
       await this.upsertBatch('products', seeded);
       this.productsCache = seeded;
-      return seeded;
+      return seeded.map(p => ({ ...p }));
     }
     const products = rawProducts.map(p => this.sanitizeProduct(p));
     this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
     safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
-    return this.productsCache;
+    return this.productsCache.map(p => ({ ...p }));
   }
 
   public async saveProduct(p: Product): Promise<void> {
@@ -383,7 +392,7 @@ export class FirebaseDBService {
 
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
-    if (this.salesCache && this.salesCache.length >= 0) {
+    if (this.salesCache && this.salesCache.length > 0) {
       console.log(`[FirebaseDBService] getSales() returning cached/realtime sales (${this.salesCache.length})`);
       this.getAll<Sale>('sales').then(fresh => {
         if (fresh && fresh.length !== this.salesCache?.length) {
@@ -515,7 +524,7 @@ export class FirebaseDBService {
 
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
-    if (this.lossesCache && this.lossesCache.length >= 0) {
+    if (this.lossesCache && this.lossesCache.length > 0) {
       return this.lossesCache;
     }
     const list = await this.getAll<LossRecord>('losses');
@@ -738,7 +747,18 @@ export class FirebaseDBService {
     const list = await this.getAll<AuditLog>('audit_logs');
     return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
-  public async addAuditLog(l: AuditLog): Promise<void> { await this.upsert('audit_logs', l.id, l); }
+  /**
+   * O registo de auditoria é importante, mas NUNCA pode deitar abaixo a operação
+   * principal (venda, gravação de utilizador, etc.). Por isso o erro é engolido
+   * e apenas assinalado na consola.
+   */
+  public async addAuditLog(l: AuditLog): Promise<void> {
+    try {
+      await this.upsert('audit_logs', l.id, l);
+    } catch (e) {
+      console.warn('[FirebaseDBService] Falha ao registar log de auditoria:', e);
+    }
+  }
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
@@ -884,7 +904,7 @@ export class FirebaseDBService {
 
   // --- Payroll Payments ---
   public async getPayrollPayments(): Promise<PayrollPayment[]> { 
-    if (this.payrollCache && this.payrollCache.length >= 0) {
+    if (this.payrollCache && this.payrollCache.length > 0) {
       return this.payrollCache;
     }
     const list = await this.getAll<PayrollPayment>('payroll_payments');
@@ -908,7 +928,7 @@ export class FirebaseDBService {
 
   // --- Paused Sales ---
   public async getPausedSales(): Promise<PausedSale[]> {
-    if (this.pausedSalesCache && this.pausedSalesCache.length >= 0) {
+    if (this.pausedSalesCache && this.pausedSalesCache.length > 0) {
       return this.pausedSalesCache;
     }
     const list = await this.getAll<PausedSale>('paused_sales');
@@ -1194,9 +1214,52 @@ export class FirebaseDBService {
   }
 
   // --- Misc Helpers ---
-  public isSSEActive(): boolean { return true; }
-  public getPendingCount(): number { return 0; }
+  /** Verdadeiro quando o navegador reporta ligação à internet. */
+  public isOnline(): boolean {
+    return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
+  }
+  public isSSEActive(): boolean { return this.isOnline(); }
+  public getPendingCount(): number { return this.isOnline() ? 0 : 1; }
   public getLastSyncTime(): string { return new Date().toLocaleTimeString(); }
+
+  /** timestamp da última escrita confirmada pelo servidor (null se nenhuma). */
+  public getLastWriteAck(): number | null { return this.lastWriteAckAt; }
+
+  /**
+   * Sonda REAL de escrita/leitura no Firestore.
+   * Serve para o técnico perceber, a partir da própria aplicação, se a base de
+   * dados está a aceitar escritas (antes isto devolvia sempre "sucesso" falso,
+   * o que escondia problemas de regras de segurança e de ligação).
+   */
+  public async probeDatabaseHealth(): Promise<{ ok: boolean; message: string; latencyMs?: number; code?: string }> {
+    const started = Date.now();
+    const probeId = 'probe';
+    try {
+      await this.upsert('_health', probeId, { at: new Date().toISOString(), origin: 'agro-xicomo' });
+      const snap = await getDoc(doc(db, '_health', probeId));
+      const latencyMs = Date.now() - started;
+      if (!snap.exists()) {
+        return { ok: false, message: 'A escrita foi aceite mas a leitura de confirmação não devolveu dados.', latencyMs };
+      }
+      try { await deleteDoc(doc(db, '_health', probeId)); } catch (e) {}
+      return {
+        ok: true,
+        latencyMs,
+        message: `Ligação OK. Escrita e leitura confirmadas em ${latencyMs} ms.`
+      };
+    } catch (e: any) {
+      const code = String(e?.code || '').replace(/^firestore\//, '');
+      let message = 'Falha na ligação à base de dados.';
+      if (code === 'permission-denied') {
+        message = 'A base de dados recusa escritas (regras de segurança). É necessário publicar as regras do Firestore que permitem leitura e escrita.';
+      } else if (code === 'unavailable' || code === 'deadline-exceeded') {
+        message = 'Sem ligação ao servidor da base de dados. Verifique a internet.';
+      } else if (e && e.message) {
+        message = `Falha na ligação: ${e.message}`;
+      }
+      return { ok: false, message, latencyMs: Date.now() - started, code };
+    }
+  }
 
   // --- Active Cart ---
   public async saveActiveCart(cartData: any): Promise<void> {
@@ -1224,7 +1287,8 @@ export class FirebaseDBService {
   public setFirebaseConfig(url: string, key: string): void {}
   public clearFirebaseConfig(): void {}
   public async testConnection(customUrl?: string, customKey?: string): Promise<{ success: boolean; message: string; latencyMs?: number }> {
-    return { success: true, message: 'Firebase conectado com sucesso e operando com sincronização em tempo real!', latencyMs: 38 };
+    const probe = await this.probeDatabaseHealth();
+    return { success: probe.ok, message: probe.message, latencyMs: probe.latencyMs };
   }
   public async syncAllWithFirebase(): Promise<{ success: boolean; logs: string[]; summary: Record<string, { local: number; cloud: number; synced: number }> }> {
     return { success: true, logs: ['Sincronização Firebase em Tempo Real ativa e consistente.'], summary: {} };

@@ -17,6 +17,7 @@ const FinanceModule = lazy(() => import('./components/FinanceModule'));
 const TechnicalModule = lazy(() => import('./components/TechnicalModule'));
 import { SystemSettings, AppRole } from './types';
 import { getUserRoles } from './utils/roleHelper';
+import { uid } from './utils/idHelper';
 
 type ERPModule = 'vendas' | 'faturas' | 'stock' | 'rh' | 'financas' | 'tecnico';
 
@@ -86,6 +87,7 @@ export default function App() {
   useEffect(() => {
     const updateSyncStatus = () => {
       setSseConnected(dbService.isSSEActive());
+      setIsOnline(dbService.isOnline());
       setPendingCount(dbService.getPendingCount());
       setLastSyncTime(dbService.getLastSyncTime());
     };
@@ -96,6 +98,22 @@ export default function App() {
     return () => {
       clearInterval(interval);
       window.removeEventListener('db-update', updateSyncStatus);
+    };
+  }, []);
+
+  // Estado de ligação à internet (antes o sistema dizia sempre "sincronizado")
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator === 'undefined' ? true : navigator.onLine !== false
+  );
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
     };
   }, []);
 
@@ -141,7 +159,7 @@ export default function App() {
       if (diff >= 300000) {
         setIsSessionLocked(true);
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser.username,
           ipAddress: '127.0.0.1',
@@ -271,7 +289,7 @@ export default function App() {
       setGateError('Senha incorreta.');
       // Audit log failed attempt
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -331,7 +349,7 @@ export default function App() {
       }
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -455,6 +473,14 @@ export default function App() {
         </div>
       )}
       
+      {/* Aviso global de ausência de ligação (explica por que as gravações "não acontecem") */}
+      {!isOnline && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] bg-amber-500 text-amber-950 px-4 py-2 flex items-center justify-center gap-2 text-[11px] sm:text-xs font-black uppercase tracking-wide shadow-lg">
+          <span className="material-symbols-outlined text-[18px]">wifi_off</span>
+          Sem ligação à internet — as gravações ficam em fila e serão enviadas quando a rede voltar.
+        </div>
+      )}
+
       {/* Mobile Sidebar Overlay */}
       {isMobileSidebarOpen && (
         <div 

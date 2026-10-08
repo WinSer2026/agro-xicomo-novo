@@ -27,6 +27,8 @@ export interface Product {
 export interface SaleItem {
   productId: string;
   name: string;
+  /** Categoria do artigo no momento da venda (usada nos relatórios por categoria). */
+  category?: string;
   quantity: number;
   unit: string;
   unitPrice: number; // in MT
@@ -81,6 +83,8 @@ export interface Customer {
 export interface PausedSale {
   id: string;
   date: string;
+  /** Carimbo de criação (usado na ordenação das vendas pausadas). */
+  createdAt?: string;
   customerName: string;
   customerNuit?: string;
   customerAddress?: string;
@@ -98,7 +102,7 @@ export interface LossRecord {
   quantity: number;
   unit: string;
   date: string;
-  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Quebras de Inventário' | 'Perda em Transformação' | 'Outro';
+  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Deterioração' | 'Quebras de Inventário' | 'Perda em Transformação' | 'Outro';
   responsibleEmployeeId?: string;
   justification: string;
   costValue: number; // total cost lost in MT
@@ -249,6 +253,8 @@ export interface PayrollPayment {
   absencesDiscount: number;
   finalNetWage: number;
   paymentDate: string;
+  /** Campo legado (alguns registos antigos gravaram a data em `date`). */
+  date?: string;
 }
 
 export interface AuditLog {

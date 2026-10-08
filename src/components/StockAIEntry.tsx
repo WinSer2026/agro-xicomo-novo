@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import { Product } from '../types';
+import Toast from './Toast';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 
 interface StockUpdate {
   productSearch: string;
@@ -28,6 +31,9 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
   const [loading, setLoading] = useState(false);
   const [aiResponse, setAiResponse] = useState<AIResponse | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  // Mensagens dentro do modal: `alert()` é bloqueado em iframes em sandbox e
+  // dava a sensação de "cliquei e não aconteceu nada".
+  const [feedback, setFeedback] = useState<{ text: string; type: 'error' | 'success' } | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
@@ -98,7 +104,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
       setIsRecording(true);
     } catch (err) {
       console.error('Erro ao acessar microfone:', err);
-      alert('Não foi possível acessar o microfone.');
+      setFeedback({ text: 'Não foi possível acessar o microfone. Verifique as permissões do navegador.', type: 'error' });
     }
   };
 
@@ -111,7 +117,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
   const processWithAI = async () => {
     if (!prompt && files.length === 0) {
-      alert('Por favor, insira um comando de voz, texto ou anexe um documento.');
+      setFeedback({ text: 'Por favor, insira um comando de voz, texto ou anexe um documento.', type: 'error' });
       return;
     }
 
@@ -131,7 +137,9 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
       setAiResponse(data);
     } catch (err: any) {
       console.error('Erro IA:', err);
-      alert('Erro ao processar com IA: ' + err.message);
+      const info = describeError(err, 'Erro ao processar com IA.');
+      console.error('[StockAI]', info.raw);
+      setFeedback({ text: `${info.title} ${info.hint}`.trim(), type: 'error' });
     } finally {
       setLoading(false);
     }
@@ -189,7 +197,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
       if (updatedCount > 0) {
         await dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Gestor de Stock (IA)',
           ipAddress: '127.0.0.1',
@@ -198,21 +206,27 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
           details: `Atualizado stock de ${updatedCount} produtos via processamento inteligente.`
         });
 
-        alert(`${updatedCount} produtos atualizados com sucesso!`);
+        setFeedback({ text: `${updatedCount} produtos atualizados com sucesso!`, type: 'success' });
         onSuccess();
         onClose();
       } else {
-        alert('Nenhum produto correspondente foi encontrado no sistema para as atualizações sugeridas.');
+        setFeedback({ text: 'Nenhum produto correspondente foi encontrado no sistema para as atualizações sugeridas.', type: 'error' });
       }
     } catch (err) {
       console.error('Erro ao aplicar alterações:', err);
-      alert('Erro ao salvar alterações no banco de dados.');
+      const info = describeError(err, 'Erro ao salvar as alterações na base de dados.');
+      console.error('[StockAI]', info.raw);
+      setFeedback({ text: `${info.title} ${info.hint}`.trim(), type: 'error' });
     } finally {
       setLoading(false);
     }
   };
 
   return (
+    <>
+    {feedback && feedback.type === 'success' && (
+      <Toast message={feedback.text} type="success" duration={4000} onClose={() => setFeedback(null)} />
+    )}
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-200">
         {/* Header */}
@@ -227,6 +241,22 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
         </div>
 
         <div className="p-6 overflow-y-auto space-y-6">
+          {feedback && (
+            <div className={`flex items-start gap-2 p-3 rounded-lg border text-xs font-bold ${
+              feedback.type === 'error'
+                ? 'bg-red-50 border-red-300 text-red-800'
+                : 'bg-emerald-50 border-emerald-300 text-emerald-800'
+            }`}>
+              <span className="material-symbols-outlined text-[18px] shrink-0">
+                {feedback.type === 'error' ? 'error' : 'check_circle'}
+              </span>
+              <p className="leading-snug">{feedback.text}</p>
+              <button type="button" onClick={() => setFeedback(null)} className="ml-auto opacity-60 hover:opacity-100 cursor-pointer">
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            </div>
+          )}
+
           {/* Instructions */}
           <div className="bg-indigo-50 border-l-4 border-indigo-500 p-3 rounded text-indigo-800 text-xs">
             <p className="font-bold mb-1">Como usar:</p>
@@ -382,5 +412,6 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
         </div>
       </div>
     </div>
+    </>
   );
 };
