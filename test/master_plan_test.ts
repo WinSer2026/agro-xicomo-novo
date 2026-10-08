@@ -87,11 +87,11 @@ async function runTests() {
   console.log('\n--- Test Suite 4: Immutable Sale Items & Snapshot Margins ---');
   const saleItem: SaleItem = {
     productId: 'prod-001',
-    productName: 'Adubo NPK 10-24-12 1kg',
+    name: 'Adubo NPK 10-24-12 1kg',
     quantity: 5,
     unitPrice: 120, // Sold at 120 MT
     costPrice: 80,  // Snapshotted cost at 80 MT
-    total: 600,
+    totalPrice: 600,
     unit: 'Pacote 1kg'
   };
 

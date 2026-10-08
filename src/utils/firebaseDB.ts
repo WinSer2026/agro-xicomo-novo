@@ -32,6 +32,7 @@ import {
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
+import type { StockCorrectionSnapshot } from './inventoryCutoff';
 
 const app = initializeApp(firebaseConfig);
 
@@ -520,6 +521,68 @@ export class FirebaseDBService {
     this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — grava saldos absolutos de stock em lote.
+   *
+   * Usa valores absolutos (e não incrementos) porque a operação é sempre precedida de
+   * uma pré-visualização: o saldo que o gestor aprovou no ecrã é exactamente o saldo
+   * que fica gravado, sem surpresas de concorrência.
+   */
+  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
+    const list = (snapshots || []).filter(s => s && s.productId);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400; // limite seguro abaixo das 500 operações por batch do Firestore
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const snapshot of list.slice(i, i + CHUNK)) {
+        const payload: Record<string, number> = { stockQty: Math.max(0, Number(snapshot.stockQty) || 0) };
+        if (snapshot.stockQtyBulk !== undefined) payload.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+        if (snapshot.stockQtyRetail !== undefined) payload.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+        batch.set(doc(db, 'products', String(snapshot.productId)), payload, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-correction' } }));
+    return list.length;
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — anula várias vendas numa só operação.
+   *
+   * @param sales      documentos já marcados como 'Cancelada' (ver annotateCancelledSale).
+   * @param snapshots  saldos de stock a gravar em simultâneo. Deixar vazio quando a
+   *                   anulação NÃO deve mexer no stock (caso típico: a contagem física
+   *                   já lançada no sistema é anterior a estas vendas).
+   */
+  public async cancelSalesBulk(sales: Sale[], snapshots: StockCorrectionSnapshot[] = []): Promise<number> {
+    const list = (sales || []).filter(Boolean);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400;
+    const stockList = (snapshots || []).filter(s => s && s.productId);
+
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const sale of list.slice(i, i + CHUNK)) {
+        const saleId = String(sale.id || sale.invoiceNumber || Date.now());
+        batch.set(doc(db, 'sales', saleId), this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' }), { merge: true });
+      }
+      await batch.commit();
+    }
+
+    if (stockList.length > 0) {
+      await this.applyStockCorrection(stockList);
+    }
+
+    this.salesCache = null;
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: list.length } }));
+    return list.length;
   }
 
   // --- Losses ---
