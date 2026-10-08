@@ -7,6 +7,7 @@ import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter'
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { REPORT_CATEGORIES, matchCategory } from '../utils/categoryHelper';
@@ -2326,10 +2327,7 @@ export default function FinanceModule() {
 
       {/* Toast banner */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700">
-          <span className="material-symbols-outlined text-emerald-500">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast message={toastMessage} type="success" duration={4000} onClose={() => setToastMessage('')} />
       )}
     </div>
   );

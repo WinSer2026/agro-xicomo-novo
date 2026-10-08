@@ -1,6 +1,7 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
+import { uid } from './idHelper';
 import type { StockCorrectionSnapshot } from './inventoryCutoff';
 
 const DB_NAME = 'AgroGestaoZeroDB';
@@ -1892,7 +1893,7 @@ export class IndexedDBService {
       } else {
         const newProd: Product = {
           id: item.productId,
-          code: item.code || ('TRF-' + Date.now()),
+          code: item.code || (uid('TRF-')),
           name: item.name,
           category: item.category || 'Transformados',
           stockQty: item.qtyToAdd,

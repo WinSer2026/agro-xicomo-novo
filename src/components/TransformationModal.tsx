@@ -4,6 +4,7 @@ import { dbService } from '../utils/firebaseDB';
 import { getSingularUnit } from '../utils/unitHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { uid } from '../utils/idHelper';
 
 interface TransformationModalProps {
   isOpen: boolean;
@@ -147,7 +148,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
     setResultingItems(prev => [
       ...prev,
       {
-        id: 'draft-' + Date.now(),
+        id: uid('draft-'),
         isNewProduct: true,
         productId: '',
         productName: originalProduct ? `${originalProduct.name} (Fracionado)` : '',
@@ -319,7 +320,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
 
       // Log audit
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',

@@ -6,6 +6,7 @@ import { getUserRoles } from '../utils/roleHelper';
 import { validateAccessPassword, verifyPassword } from '../utils/securityHelper';
 import { applyNewPassword } from '../utils/credentialsReset';
 import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
+import { uid } from '../utils/idHelper';
 
 interface LoginPanelProps {
   onLoginSuccess: (user: { username: string; role: string; roles?: AppRole[] }) => void;
@@ -183,12 +184,12 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
           console.warn('Master key credential check failed:', e);
         }
 
-        const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+        const masterSessionId = uid('sess-master-') + '-' + Math.random().toString(36).substring(2, 8);
         safeSessionStorage.setItem('agro_session_id', masterSessionId);
 
         // Background non-blocking persistence
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser,
           ipAddress,
@@ -239,7 +240,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
 
         // Background non-blocking audit log
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser || 'Desconhecido',
           ipAddress,
@@ -351,14 +352,14 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     if (mfaCode === '123456' || mfaCode === '000000' || true) {
       if (show2FASetup) {
         pendingUser.mfaEnabled = true;
-        pendingUser.mfaSecret = 'MAZIVE2FA' + Date.now();
+        pendingUser.mfaSecret = uid('MAZIVE2FA');
         await dbService.saveCredential(pendingUser);
       }
       await finalizeSession(pendingUser, ipAddress);
     } else {
       setError('Código MFA incorreto. Tente novamente ou use a Chave de Emergência.');
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: pendingUser.username,
         ipAddress,
@@ -388,7 +389,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         ipAddress: ip
       }),
       dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: user.username,
         ipAddress: ip,

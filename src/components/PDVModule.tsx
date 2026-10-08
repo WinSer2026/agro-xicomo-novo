@@ -12,6 +12,9 @@ import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 
 interface PDVModuleProps {
   currentUser: { username: string; role: string; roles?: AppRole[] };
@@ -220,6 +223,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   const [retroactiveProductQuery, setRetroactiveProductQuery] = useState('');
   const [selectedRegisteredCustomer, setSelectedRegisteredCustomer] = useState<string>('');
   const [retroactiveCompletedSale, setRetroactiveCompletedSale] = useState<Sale | null>(null);
+  // Feedback da operação de lançamento retroactivo (o modal é opaco: o erro tem de aparecer lá dentro)
+  const [isFinalizingRetroactive, setIsFinalizingRetroactive] = useState(false);
+  const [retroactiveError, setRetroactiveError] = useState('');
+  const [retroactiveSlow, setRetroactiveSlow] = useState(false);
 
   /**
    * Lançamento retroactivo: produtos híbridos (saco + quilo) podem ser relançados
@@ -276,10 +283,31 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   };
 
   const handleFinalizeRetroactiveSale = async () => {
+    // Impede cliques repetidos: era uma das causas de "carrego e não acontece nada"
+    if (isFinalizingRetroactive) return;
+
     if (retroactiveCart.length === 0) {
       showToast('Adicione pelo menos um produto ao carrinho da venda!', 'error');
       return;
     }
+
+    const parsedDate = retroactiveDateTime ? new Date(retroactiveDateTime) : new Date();
+    if (isNaN(parsedDate.getTime())) {
+      setRetroactiveError('A data e hora da venda são inválidas. Verifique o campo "Data e Hora Real".');
+      return;
+    }
+    if (parsedDate.getTime() > Date.now() + 60000) {
+      setRetroactiveError('A data/hora da venda não pode ser no futuro. Corrija o campo "Data e Hora Real".');
+      return;
+    }
+
+    setIsFinalizingRetroactive(true);
+    setRetroactiveError('');
+    setRetroactiveSlow(false);
+
+    // Watchdog: se a gravação demorar mais de 8s avisamos o operador
+    // (o Firestore fica pendente quando não há ligação — nunca abortamos a escrita).
+    const slowTimer = setTimeout(() => setRetroactiveSlow(true), 8000);
 
     try {
       const sub = getRetroactiveCartTotal();
@@ -300,14 +328,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       }
 
       if (retroactiveCustomerMode === 'manual' && retroactiveSaveCustomer && finalCustomerName && finalCustomerName !== 'Cliente Geral') {
-        const newCust: Customer = {
-          id: 'cust-' + Date.now(),
-          name: finalCustomerName,
-          nuit: finalCustomerNuit,
-          address: finalCustomerAddress
-        };
-        await dbService.saveCustomer(newCust);
-        setRegisteredCustomers(prev => [...prev, newCust]);
+        const alreadyExists = registeredCustomers.some(
+          c => c.name.trim().toLowerCase() === finalCustomerName.trim().toLowerCase()
+        );
+        if (!alreadyExists) {
+          const newCust: Customer = {
+            id: uid('cust-'),
+            name: finalCustomerName,
+            nuit: finalCustomerNuit,
+            address: finalCustomerAddress
+          };
+          await dbService.saveCustomer(newCust);
+          setRegisteredCustomers(prev => [...prev, newCust]);
+        }
       }
 
       const existingSales = await dbService.getSales();
@@ -315,14 +348,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const manualRec = retroactiveReceiptNo.trim() || undefined;
       const receiptNum = manualRec || generateNextReceiptNumber(existingSales, 'Thermal');
 
-      const saleDateISO = retroactiveDateTime ? new Date(retroactiveDateTime).toISOString() : new Date().toISOString();
+      const saleDateISO = parsedDate.toISOString();
 
       const newSale: Sale = {
-        id: 'sale-retro-' + Date.now(),
+        id: uid('sale-retro-') + '-' + Math.random().toString(36).substring(2, 7),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         manualReceiptReference: manualRec,
         date: saleDateISO,
+        createdAt: new Date().toISOString(),
         customerName: finalCustomerName,
         customerNuit: finalCustomerNuit,
         customerAddress: finalCustomerAddress,
@@ -341,12 +375,35 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         notes: manualRec ? `Venda Antiga / Lançamento Retroactivo — Recibo Manuscrito: ${manualRec}` : 'Venda Antiga / Lançamento Retroactivo'
       };
 
+      // Movimento de stock preparado ANTES de gravar (operação atómica).
+      // Antes isto era feito produto a produto com saveProduct() dentro de um ciclo:
+      // se a gravação da venda falhasse a meio, o stock já tinha saído e ficava divergente.
+      const deductionItems: any[] = [];
       if (retroactiveDeductStock) {
         // Mesma regra do PDV normal: saco desconta grosso + equivalente em unidade base;
         // retalho desconta retalho + unidade base.
         const deductionItems: any[] = [];
         for (const item of retroactiveCart) {
           const prod = products.find(p => p.id === item.productId);
+          if (prod && !prod.isService) {
+            const qtyToReduce = Number(item.quantity) || 0;
+            if (qtyToReduce <= 0) continue;
+            const hasConversion = Boolean(prod.parentUnit && Number(prod.conversionRate) > 1);
+            if (hasConversion) {
+              if (item.sellingUnit === 'Bulk') {
+                deductionItems.push({
+                  productId: String(prod.id),
+                  hasConversion: true,
+                  sellingUnit: 'Bulk',
+                  qtyToReduce,
+                  equivalentBaseQty: qtyToReduce * (Number(prod.conversionRate) || 1)
+                });
+              } else {
+                deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce });
+              }
+            } else {
+              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
+            }
           const quantity = Number(item.quantity) || 0;
           if (!prod || prod.isService || item.isService || quantity <= 0) continue;
 
@@ -370,17 +427,30 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         }
       }
 
-      await dbService.addSale(newSale);
+      // Escrita atómica: venda + saída de stock no mesmo batch.
+      if (deductionItems.length > 0 && typeof (dbService as any).addSaleWithStockDeduction === 'function') {
+        await (dbService as any).addSaleWithStockDeduction(newSale, deductionItems);
+      } else {
+        if (deductionItems.length > 0 && typeof (dbService as any).deductProductStock === 'function') {
+          await (dbService as any).deductProductStock(deductionItems);
+        }
+        await dbService.addSale(newSale);
+      }
 
-      await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: currentUser.username,
-        ipAddress: '127.0.0.1',
-        action: `Venda Antiga Registada (${newSale.invoiceNumber})`,
-        status: 'Sucesso',
-        details: `Lançamento retroactivo de ${saleDateISO.slice(0, 10)}. Total: ${tot}MT. Recibo: ${manualRec || 'Auto'}`
-      });
+      // O registo de auditoria nunca pode deitar a operação abaixo.
+      try {
+        await dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: currentUser.username,
+          ipAddress: '127.0.0.1',
+          action: `Venda Antiga Registada (${newSale.invoiceNumber})`,
+          status: 'Sucesso',
+          details: `Lançamento retroactivo de ${saleDateISO.slice(0, 10)}. Total: ${tot}MT. Recibo: ${manualRec || 'Auto'}`
+        });
+      } catch (auditErr) {
+        console.warn('[PDV] Falha ao registar auditoria da venda antiga:', auditErr);
+      }
 
       const updatedProds = await dbService.getProducts();
       setProducts(updatedProds);
@@ -389,9 +459,13 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
       // Print Xprinter XP 80C thermal receipt automatically
       if (settings) {
-        downloadThermalReceipt(newSale, settings);
-        if (isSerialPrinterConnected()) {
-          printDirectThermalESC_POS(newSale, settings);
+        try {
+          downloadThermalReceipt(newSale, settings);
+          if (isSerialPrinterConnected()) {
+            printDirectThermalESC_POS(newSale, settings);
+          }
+        } catch (printErr) {
+          console.warn('[PDV] Falha ao gerar o recibo térmico:', printErr);
         }
       }
 
@@ -410,8 +484,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada! Recibo Xprinter XP 80C gerado.`, 'success');
 
     } catch (err) {
-      console.error('Error finalizing retroactive sale:', err);
-      showToast('Erro ao registar a venda antiga.', 'error');
+      const info = describeError(err, 'Não foi possível registar a venda antiga.');
+      console.error('[PDV] Error finalizing retroactive sale:', info.raw);
+      // Mostramos o erro DENTRO do modal (o modal é opaco e cobre a página toda)
+      setRetroactiveError(`${info.title} ${info.hint}`.trim());
+      showToast(info.title, 'error');
+    } finally {
+      clearTimeout(slowTimer);
+      setIsFinalizingRetroactive(false);
+      setRetroactiveSlow(false);
     }
   };
 
@@ -755,7 +836,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     }
 
     const newCust: Customer = {
-      id: 'customer-' + Date.now(),
+      id: uid('customer-'),
       name: newCustomerName.trim(),
       nuit: newCustomerNuit.trim() || undefined,
       address: newCustomerAddress.trim() || undefined,
@@ -783,7 +864,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       showToast(`Cliente "${newCust.name}" cadastrado com sucesso!`, 'success');
     } catch (err) {
       console.error('Error saving customer:', err);
-      showToast('Erro ao cadastrar o cliente.', 'error');
+      showToast(`${describeError(err, 'Não foi possível cadastrar o cliente.').title} ${describeError(err).hint}`.trim(), 'error');
     } finally {
       setIsPausingSale(false);
     }
@@ -806,7 +887,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     setIsPausingSale(true);
 
     const pausedObj: PausedSale = {
-      id: 'paused-' + Date.now(),
+      id: uid('paused-'),
       date: new Date().toISOString(),
       customerName,
       customerNuit: customerNuit || undefined,
@@ -834,7 +915,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       showToast('Venda pausada com sucesso!', 'success');
     } catch (err) {
       console.error('Error pausing sale:', err);
-      showToast('Erro ao pausar a venda.', 'error');
+      showToast(`${describeError(err, 'Não foi possível pausar a venda.').title} ${describeError(err).hint}`.trim(), 'error');
     } finally {
       setIsPausingSale(false);
     }
@@ -898,7 +979,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           showToast('Venda pausada excluída.', 'success');
         } catch (err) {
           console.error('Error deleting paused sale:', err);
-          showToast('Erro ao excluir a venda pausada.', 'error');
+          showToast(`${describeError(err, 'Não foi possível excluir a venda pausada.').title} ${describeError(err).hint}`.trim(), 'error');
         }
       }
     );
@@ -1026,7 +1107,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       setSelectedProductToAssociate('');
     } catch (err) {
       console.error('[Barcode Association Error]', err);
-      showToast('Erro ao gravar associação de código de barras.', 'error');
+      showToast(`${describeError(err, 'Não foi possível gravar a associação do código de barras.').title} ${describeError(err).hint}`.trim(), 'error');
     }
   };
 
@@ -1295,7 +1376,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         : undefined;
 
       const newSale: Sale = {
-        id: 'sale-' + Date.now(),
+        id: uid('sale-'),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         date: new Date().toISOString(),
@@ -1352,7 +1433,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
       // 3. Log Audit Trial
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -1422,8 +1503,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         showToast('Venda finalizada com sucesso! Pré-visualização gerada.', 'success');
       }
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar a venda no sistema.', 'error');
+      const info = describeError(err, 'Não foi possível gravar a venda no sistema.');
+      console.error('[PDV] Error finalizing sale:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim(), 'error');
     } finally {
       setIsFinalizing(false);
     }
@@ -1448,7 +1530,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           showToast(`Fatura ${sale.invoiceNumber} paga! Recibo impresso e descarregado em A4.`, 'success');
         } catch (err) {
           console.error(err);
-          showToast('Erro ao liquidar fatura.', 'error');
+          showToast(`${describeError(err, 'Não foi possível liquidar a fatura.').title} ${describeError(err).hint}`.trim(), 'error');
         }
       }
     );
@@ -1499,7 +1581,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           showToast(`Fatura ${sale.invoiceNumber} cancelada com sucesso.`, 'success');
         } catch (err) {
           console.error(err);
-          showToast('Erro ao cancelar fatura.', 'error');
+          showToast(`${describeError(err, 'Não foi possível cancelar a fatura.').title} ${describeError(err).hint}`.trim(), 'error');
         }
       }
     );
@@ -1543,7 +1625,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       showToast(`Fatura ${sale.invoiceNumber} restaurada para o estado Pendente.`, 'success');
     } catch (err) {
       console.error(err);
-      showToast('Erro ao restaurar fatura.', 'error');
+      showToast(`${describeError(err, 'Não foi possível restaurar a fatura.').title} ${describeError(err).hint}`.trim(), 'error');
     }
   };
 
@@ -1628,6 +1710,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               setRetroactiveDeductStock(true);
               setRetroactiveCart([]);
               setRetroactiveProductQuery('');
+              setRetroactiveError('');
+              setIsFinalizingRetroactive(false);
+              setRetroactiveSlow(false);
               setShowRetroactiveModal(true);
             }}
             className="px-2 py-1 font-extrabold text-[10px] sm:text-xs uppercase tracking-wider rounded-lg shadow-sm transition-all flex items-center gap-1 cursor-pointer bg-indigo-700 hover:bg-indigo-800 text-white whitespace-nowrap"
@@ -1722,14 +1807,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
           {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border ${
-          toastType === 'success' ? 'bg-primary text-white border-green-700' : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast
+          message={toastMessage}
+          type={toastType === 'error' ? 'error' : 'success'}
+          duration={toastType === 'error' ? 9000 : 4000}
+          onClose={() => setToastMessage('')}
+        />
       )}
 
       {/* Main Product Selection Grid (8/12 widths) */}
@@ -4346,7 +4429,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 <button
                   type="button"
                   onClick={() => setShowRetroactiveModal(false)}
-                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer"
+                  disabled={isFinalizingRetroactive}
+                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancelar
                 </button>
@@ -4359,19 +4443,45 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 </div>
               </div>
 
-              <button
-                type="button"
-                disabled={retroactiveCart.length === 0}
-                onClick={handleFinalizeRetroactiveSale}
-                className={`w-full sm:w-auto px-8 py-3.5 text-xs sm:text-sm uppercase font-black tracking-wider rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                  retroactiveCart.length === 0
-                    ? 'bg-indigo-200 text-indigo-400 cursor-not-allowed shadow-none'
-                    : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-300 hover:shadow-indigo-400'
-                }`}
-              >
-                <span className="material-symbols-outlined text-[20px]">check_circle</span>
-                Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-PT')} MT)
-              </button>
+              <div className="w-full sm:w-auto flex flex-col items-stretch sm:items-end gap-2">
+                {retroactiveError && (
+                  <div className="w-full sm:max-w-md bg-red-50 border border-red-300 text-red-800 rounded-xl px-3 py-2.5 flex items-start gap-2">
+                    <span className="material-symbols-outlined text-[18px] shrink-0">error</span>
+                    <p className="text-[11px] font-bold leading-snug">{retroactiveError}</p>
+                  </div>
+                )}
+                {retroactiveSlow && !retroactiveError && (
+                  <div className="w-full sm:max-w-md bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-3 py-2.5 flex items-start gap-2">
+                    <span className="material-symbols-outlined text-[18px] shrink-0 animate-spin">progress_activity</span>
+                    <p className="text-[11px] font-bold leading-snug">
+                      A gravação está a demorar — a ligação pode estar lenta ou sem internet.
+                      NÃO feche esta janela: os dados serão enviados assim que houver rede.
+                    </p>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  disabled={retroactiveCart.length === 0 || isFinalizingRetroactive}
+                  onClick={handleFinalizeRetroactiveSale}
+                  className={`w-full sm:w-auto px-8 py-3.5 text-xs sm:text-sm uppercase font-black tracking-wider rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 ${
+                    retroactiveCart.length === 0 || isFinalizingRetroactive
+                      ? 'bg-indigo-200 text-indigo-400 cursor-not-allowed shadow-none'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-300 hover:shadow-indigo-400 cursor-pointer'
+                  }`}
+                >
+                  {isFinalizingRetroactive ? (
+                    <>
+                      <span className="material-symbols-outlined text-[20px] animate-spin">progress_activity</span>
+                      A gravar...
+                    </>
+                  ) : (
+                    <>
+                      <span className="material-symbols-outlined text-[20px]">check_circle</span>
+                      Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-PT')} MT)
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
           </div>

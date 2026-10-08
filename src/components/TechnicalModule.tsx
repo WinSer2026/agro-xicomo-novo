@@ -10,6 +10,10 @@ import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } 
 import { hashPassword, validateAccessPassword } from '../utils/securityHelper';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
+import ConfirmDialog from './ConfirmDialog';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 import { 
   connectSerialPrinter, 
   disconnectSerialPrinter, 
@@ -103,6 +107,38 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [usrMfa, setUsrMfa] = useState(false);
   const [usrMustChange, setUsrMustChange] = useState(false);
   const [userToDelete, setUserToDelete] = useState<{ id: string; username: string } | null>(null);
+
+  // Caixa de confirmação própria (o window.confirm é bloqueado dentro de iframes em sandbox)
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    message: string;
+    confirmLabel?: string;
+    danger?: boolean;
+    requireTypedText?: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  const askConfirm = (
+    title: string,
+    message: string,
+    onConfirm: () => void | Promise<void>,
+    opts?: { confirmLabel?: string; danger?: boolean; requireTypedText?: string }
+  ) => {
+    setConfirmBusy(false);
+    setConfirmState({ title, message, onConfirm, ...(opts || {}) });
+  };
+
+  const runConfirm = async () => {
+    if (!confirmState) return;
+    setConfirmBusy(true);
+    try {
+      await confirmState.onConfirm();
+    } finally {
+      setConfirmBusy(false);
+      setConfirmState(null);
+    }
+  };
 
   // Toast
   const [toastMessage, setToastMessage] = useState('');
@@ -203,7 +239,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleTerminateSession = async (sessionId: string, username: string) => {
     await dbService.removeActiveSession(sessionId);
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -215,11 +251,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     loadAllData();
   };
 
-  const handleClearAllSessions = async () => {
-    if (!window.confirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.')) return;
+  const handleClearAllSessions = () => {
+    askConfirm(
+      'Limpar todas as sessões',
+      'Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.',
+      doClearAllSessions,
+      { confirmLabel: 'Limpar sessões', danger: true }
+    );
+  };
+
+  const doClearAllSessions = async () => {
     await dbService.clearActiveSessions();
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -258,32 +302,62 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
-    if (!usrUsername || !usrPassword) {
+    if (!usrUsername || (!usrPassword && !editingUser)) {
       showToast('Por favor, indique o utilizador e palavra-passe.');
       return;
     }
 
-    const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
+    const cleanUsername = usrUsername.trim();
+    if (!cleanUsername) {
+      showToast('O nome de utilizador não pode ficar vazio.');
+      return;
+    }
 
-    const isExistingHash = usrPassword.trim().startsWith('sha256:');
-    if (!isExistingHash) {
-      // Política oficial: 4 a 6 caracteres (apenas números, apenas letras ou mistos)
-      const policy = validateAccessPassword(usrPassword);
+    // Impede duplicados: o username é case-insensitive no login.
+    const duplicate = users.find(
+      u => u.username.toLowerCase() === cleanUsername.toLowerCase()
+        && (!editingUser || u.id !== editingUser.id)
+    );
+    if (duplicate) {
+      showToast(`Já existe o utilizador "${duplicate.username}". Escolha outro nome.`);
+      return;
+    }
+
+    // Palavra-passe:
+    //  - na EDIÇÃO o campo vem vazio; se o operador não escrever nada mantém-se a actual
+    //    (isto resolve o caso das contas antigas com password em texto simples, que
+    //    antes eram rejeitadas pela política de 4 a 6 caracteres ao clicar em Gravar);
+    //  - na CRIAÇÃO a palavra-passe é obrigatória e validada pela política oficial.
+    const typedPassword = usrPassword.trim();
+    const keepCurrentPassword = Boolean(editingUser) && typedPassword.length === 0;
+    const isUnchangedHash = Boolean(editingUser) && typedPassword === editingUser!.passwordHash;
+
+    let finalPasswordHash: string;
+    if (keepCurrentPassword || isUnchangedHash) {
+      finalPasswordHash = editingUser!.passwordHash;
+    } else {
+      const policy = validateAccessPassword(typedPassword);
       if (!policy.strong) {
         showToast(policy.message || 'Palavra-passe inválida.');
         return;
       }
+      finalPasswordHash = await hashPassword(typedPassword);
     }
-    const finalPasswordHash = isExistingHash ? usrPassword.trim() : await hashPassword(usrPassword.trim());
 
+    const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
+
+    // Ao editar, reaproveitamos o id do registo existente (mesmo que o username
+    // mude de maiúsculas/minúsculas) para não deixar registos duplicados na base.
     const newUser: UserCredentials = {
-      id: editingUser ? editingUser.id : 'usr-' + Date.now(),
-      username: usrUsername.trim(),
+      id: editingUser ? editingUser.id : uid('usr-'),
+      username: cleanUsername,
       passwordHash: finalPasswordHash,
       roles: rolesToSave,
       role: rolesToSave.join(', '),
       mfaEnabled: usrMfa,
-      mustChangePassword: isExistingHash ? (editingUser?.mustChangePassword || false) : usrMustChange,
+      mustChangePassword: keepCurrentPassword || isUnchangedHash
+        ? (editingUser?.mustChangePassword || false)
+        : usrMustChange,
       passwordResetVersion: editingUser?.passwordResetVersion
     };
 
@@ -291,19 +365,23 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.saveCredential(newUser);
 
-      // Log to Audit logs
-      await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Técnico',
-        ipAddress: '127.0.0.1',
-        action: editingUser ? 'Utilizador Editado' : 'Utilizador Criado',
-        status: 'Sucesso',
-        details: `Utilizador ${usrUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
-      });
+      // Log de auditoria: nunca pode deitar a operação abaixo
+      try {
+        await dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: 'Técnico',
+          ipAddress: '127.0.0.1',
+          action: editingUser ? 'Utilizador Editado' : 'Utilizador Criado',
+          status: 'Sucesso',
+          details: `Utilizador ${cleanUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
+        });
+      } catch (auditErr) {
+        console.warn('[Técnico] Falha ao registar auditoria de utilizador:', auditErr);
+      }
 
       showToast(editingUser ? 'Utilizador atualizado!' : 'Novo utilizador registado!');
-      
+
       // Clear user form
       setEditingUser(null);
       setUsrUsername('');
@@ -312,10 +390,11 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUsrMfa(false);
       setUsrMustChange(false);
 
-      loadAllData();
+      await loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar utilizador.');
+      const info = describeError(err, 'Não foi possível gravar o utilizador.');
+      console.error('[Técnico] handleSaveUser:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -324,7 +403,10 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const startEditUser = (user: UserCredentials) => {
     setEditingUser(user);
     setUsrUsername(user.username);
-    setUsrPassword(user.passwordHash);
+    // O campo da palavra-passe fica VAZIO: o hash actual só é mantido se o
+    // técnico não escrever nada. Carregar o hash para o campo (como antes)
+    // fazia o utilizador falhar a validação de 4 a 6 caracteres ao gravar.
+    setUsrPassword('');
     const userRoles = getUserRoles(user);
     setUsrRoles(userRoles.length > 0 ? userRoles : ['Operador']);
     setUsrMfa(user.mfaEnabled || false);
@@ -355,7 +437,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.deleteCredential(id);
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -368,8 +450,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUserToDelete(null);
       loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao eliminar utilizador.');
+      const info = describeError(err, 'Não foi possível eliminar o utilizador.');
+      console.error('[Técnico] confirmDeleteUser:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -420,7 +503,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.saveSettings(updated);
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -433,8 +516,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await loadAllData();
       onSettingsUpdated?.();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar configurações.');
+      const info = describeError(err, 'Não foi possível gravar as configurações.');
+      console.error('[Técnico] handleSaveSettings:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -500,7 +584,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1];
         const newFile = {
-          id: 'file-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          id: uid('file-') + '-' + Math.random().toString(36).substr(2, 4),
           base64,
           mime: file.type,
           name: file.name
@@ -530,7 +614,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         reader.onload = () => {
           const base64 = (reader.result as string).split(',')[1];
           const newFile = {
-            id: 'voice-' + Date.now(),
+            id: uid('voice-'),
             base64,
             mime: 'audio/webm',
             name: 'gravaçao_voz_tecnico.webm'
@@ -640,7 +724,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       if (changes.newUser) {
         const u = changes.newUser;
         const newUser: UserCredentials = {
-          id: 'usr-' + Date.now(),
+          id: uid('usr-'),
           username: u.username.trim(),
           passwordHash: u.password || u.passwordHash || '123456',
           role: u.role || 'Operador',
@@ -659,8 +743,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         const aiPriceError = validateStandardPrices(aiBuy, aiSell, false);
         if (!aiPriceError) {
           const newProd: Product = {
-            id: 'prod-' + Date.now(),
-            code: p.code || 'PRD-' + Date.now().toString().substring(8),
+            id: uid('prod-'),
+            code: p.code || uid('PRD-').toString().substring(8),
             name: p.name,
             category: p.category || 'Adubos',
             stockQty: Number(p.stockQty) || 0,
@@ -723,7 +807,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       if (appliedCount > 0) {
         // Log to Audit logs
         await dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Técnico (Assistente IA)',
           ipAddress: '127.0.0.1',
@@ -743,24 +827,29 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       }
     } catch (error: any) {
       console.error(error);
-      showToast("Erro ao aplicar alterações: " + error.message);
+      showToast(`${describeError(error, 'Não foi possível aplicar as alterações.').title} ${describeError(error).hint}`.trim());
     }
   };
 
   // --- MAINTENANCE & SYSTEM PROCESSORS ---
-  const handleEliminarHistoricoTeste = async () => {
-    if (isSubmitting) return;
-    const conf = window.confirm(
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.'
+  const handleEliminarHistoricoTeste = () => {
+    askConfirm(
+      'Eliminar histórico de teste',
+      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
+      doEliminarHistoricoTeste,
+      { confirmLabel: 'Eliminar histórico', danger: true, requireTypedText: 'ELIMINAR' }
     );
-    if (!conf) return;
+  };
+
+  const doEliminarHistoricoTeste = async () => {
+    if (isSubmitting) return;
 
     setIsSubmitting(true);
     try {
       await dbService.clearSystemData();
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -773,23 +862,30 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       loadAllData();
     } catch (err) {
       console.error(err);
-      showToast('Erro ao limpar histórico de teste.');
+      showToast(`${describeError(err, 'Não foi possível limpar o histórico de teste.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleZerarSistema = async () => {
+  const handleZerarSistema = () => {
+    askConfirm(
+      'Zerar o sistema',
+      'TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.',
+      doZerarSistema,
+      { confirmLabel: 'Zerar sistema', danger: true, requireTypedText: 'ZERAR' }
+    );
+  };
+
+  const doZerarSistema = async () => {
     if (isSubmitting) return;
-    const conf = window.confirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
-    if (!conf) return;
 
     setIsSubmitting(true);
     try {
       await dbService.clearSystemData();
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -802,18 +898,24 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       loadAllData();
     } catch (err) {
       console.error(err);
-      showToast('Erro ao zerar o sistema.');
+      showToast(`${describeError(err, 'Não foi possível zerar o sistema.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleFecharAno = async () => {
-    const conf = window.confirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
-    if (!conf) return;
+  const handleFecharAno = () => {
+    askConfirm(
+      'Fechar exercício fiscal',
+      'Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.',
+      doFecharAno,
+      { confirmLabel: 'Fechar exercício', danger: true }
+    );
+  };
 
+  const doFecharAno = async () => {
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -825,14 +927,20 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     showToast('Ano Fiscal fechado e arquivado com sucesso!');
   };
 
-  const handleNovoAno = async () => {
-    const conf = window.confirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
-    if (!conf) return;
+  const handleNovoAno = () => {
+    askConfirm(
+      'Novo exercício comercial',
+      'Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.',
+      doNovoAno,
+      { confirmLabel: 'Iniciar novo exercício', danger: true }
+    );
+  };
 
+  const doNovoAno = async () => {
     await dbService.clearSystemData();
 
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -843,6 +951,23 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
     showToast('Novo Exercício Fiscal Inicializado!');
     loadAllData();
+  };
+
+  const handleRestoreBackup = async (ts: string) => {
+    try {
+      const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
+      if (backupData) {
+        await dbService.importAllData(backupData);
+        showToast('Banco de dados restaurado com sucesso!');
+        await loadAllData();
+      } else {
+        showToast('Erro: Dados de backup não encontrados.');
+      }
+    } catch (err) {
+      const info = describeError(err, 'Não foi possível restaurar o backup.');
+      console.error('[Técnico] handleRestoreBackup:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
+    }
   };
 
   const handleBackupTotal = async () => {
@@ -869,7 +994,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     document.body.removeChild(link);
 
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -904,10 +1029,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     <div className="space-y-6 animate-fade-in" id="tech_module">
       {/* Toast banner */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">shield_person</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast message={toastMessage} type="success" duration={4000} onClose={() => setToastMessage('')} />
       )}
 
       {/* Title */}
@@ -1654,21 +1776,13 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           </div>
                           <button
                             type="button"
-                            onClick={async () => {
-                              const conf = window.confirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
-                              if (!conf) return;
-                              try {
-                                const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
-                                if (backupData) {
-                                  await dbService.importAllData(backupData);
-                                  showToast('Banco de dados restaurado com sucesso!');
-                                  loadAllData();
-                                } else {
-                                  showToast('Erro: Dados de backup não encontrados.');
-                                }
-                              } catch (err) {
-                                showToast('Erro ao restaurar o backup.');
-                              }
+                            onClick={() => {
+                              askConfirm(
+                                'Restaurar backup',
+                                `Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`,
+                                () => handleRestoreBackup(ts),
+                                { confirmLabel: 'Restaurar', danger: true }
+                              );
                             }}
                             className="px-2.5 py-1 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-lg text-[10px] transition-colors cursor-pointer"
                           >
@@ -1913,15 +2027,17 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                 <input
                   type="text"
                   value={usrUsername}
-                  onChange={(e) => setUsrUsername(e.target.value)}
+                  onChange={(e) => setUsrUsername(e.target.value.replace(/\s/g, ''))}
                   placeholder="Ex: operador3"
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
-                  disabled={editingUser?.username === 'admin'}
+                  disabled={editingUser?.username === 'admin' || isSubmitting}
                 />
               </div>
 
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Palavra-passe de Acesso</label>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">
+                  {editingUser ? 'Nova Palavra-passe (opcional)' : 'Palavra-passe de Acesso'}
+                </label>
                 <input
                   type="password"
                   autoComplete="new-password"
@@ -1929,12 +2045,14 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder="4 a 6 caracteres (letras ou números)"
+                  placeholder={editingUser ? 'Deixe em branco para manter a actual' : '4 a 6 caracteres (letras ou números)'}
                   maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
                 <p className="text-[10px] text-gray-500 mt-1">
-                  A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.
+                  {editingUser
+                    ? 'Se não escrever nada, a palavra-passe actual é mantida (inclui contas antigas com senha em texto simples).'
+                    : 'A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.'}
                 </p>
               </div>
 
@@ -2013,9 +2131,13 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               <div className="flex gap-2">
                 <button
                   type="submit"
-                  className="flex-1 py-2 bg-primary hover:opacity-95 text-white font-bold rounded uppercase text-[10px] transition-opacity"
+                  disabled={isSubmitting}
+                  className={`flex-1 py-2 bg-primary hover:opacity-95 text-white font-bold rounded uppercase text-[10px] transition-opacity flex items-center justify-center gap-2 ${
+                    isSubmitting ? 'opacity-60 cursor-wait' : 'cursor-pointer'
+                  }`}
                 >
-                  {editingUser ? 'Guardar Alterações' : 'Admitir Utilizador'}
+                  {isSubmitting && <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>}
+                  {isSubmitting ? 'A gravar...' : editingUser ? 'Guardar Alterações' : 'Admitir Utilizador'}
                 </button>
                 {editingUser && (
                   <button
@@ -2454,6 +2576,19 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
             </div>
           </div>
         </div>
+      )}
+      {confirmState && (
+        <ConfirmDialog
+          open={Boolean(confirmState)}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmLabel={confirmState.confirmLabel}
+          danger={confirmState.danger}
+          busy={confirmBusy}
+          requireTypedText={confirmState.requireTypedText}
+          onConfirm={runConfirm}
+          onCancel={() => { if (!confirmBusy) setConfirmState(null); }}
+        />
       )}
     </div>
   );

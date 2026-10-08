@@ -2,10 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { ProductTransformation, Product, SystemSettings } from '../types';
 import { dbService } from '../utils/firebaseDB';
 import { DateRangeFilter } from './DateRangeFilter';
+import Toast from './Toast';
+import ConfirmDialog from './ConfirmDialog';
+import { describeError } from '../utils/errorHelper';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import { uid } from '../utils/idHelper';
 
 interface TransformationViewProps {
   products: Product[];
@@ -26,6 +30,24 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'Concluída' | 'Cancelada'>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState('');
+  // Caixa de confirmação própria (window.confirm é bloqueado em iframes em sandbox)
+  const [confirmState, setConfirmState] = useState<{
+    title: string; message: string; confirmLabel?: string; danger?: boolean;
+    requireTypedText?: string; onConfirm: () => void | Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  const askConfirm = (
+    title: string, message: string, onConfirm: () => void | Promise<void>,
+    opts?: { confirmLabel?: string; danger?: boolean; requireTypedText?: string }
+  ) => { setConfirmBusy(false); setConfirmState({ title, message, onConfirm, ...(opts || {}) }); };
+
+  const runConfirm = async () => {
+    if (!confirmState) return;
+    setConfirmBusy(true);
+    try { await confirmState.onConfirm(); }
+    finally { setConfirmBusy(false); setConfirmState(null); }
+  };
   const [isReversing, setIsReversing] = useState<string | null>(null);
 
   // Date Range Filter States (Default: Este Mês)
@@ -284,18 +306,23 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
     showToast('Exportação para Excel concluída com sucesso!');
   };
 
-  const handleCancelTransformation = async (trf: ProductTransformation) => {
+  const handleCancelTransformation = (trf: ProductTransformation) => {
     if (trf.status === 'Cancelada') return;
+    askConfirm(
+      'Anular transformação',
+      `Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`,
+      () => doCancelTransformation(trf),
+      { confirmLabel: 'Anular transformação', danger: true }
+    );
+  };
 
-    const confirmed = window.confirm(`Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`);
-    if (!confirmed) return;
-
+  const doCancelTransformation = async (trf: ProductTransformation) => {
     setIsReversing(trf.id);
     try {
       await dbService.cancelTransformationWithStockReversal(trf);
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -307,8 +334,9 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       showToast(`Transformação ${trf.code} anulada e stock reposto com sucesso!`);
       loadTransformations();
     } catch (err: any) {
-      console.error('Error reversing transformation:', err);
-      alert('Erro ao anular transformação: ' + err.message);
+      const info = describeError(err, 'Não foi possível anular a transformação.');
+      console.error('[Transformações]', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsReversing(null);
     }
@@ -319,10 +347,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       
       {/* Toast */}
       {toastMsg && (
-        <div className="fixed bottom-5 right-5 z-50 bg-emerald-800 text-white px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-bottom-2">
-          <span className="material-symbols-outlined text-[18px]">check_circle</span>
-          <span>{toastMsg}</span>
-        </div>
+        <Toast message={toastMsg} type="success" duration={4000} onClose={() => setToastMsg('')} />
       )}
 
       {/* Top Banner & Action */}
@@ -674,6 +699,19 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
           </div>
         )}
       </div>
+      {confirmState && (
+        <ConfirmDialog
+          open={Boolean(confirmState)}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmLabel={confirmState.confirmLabel}
+          danger={confirmState.danger}
+          busy={confirmBusy}
+          requireTypedText={confirmState.requireTypedText}
+          onConfirm={runConfirm}
+          onCancel={() => { if (!confirmBusy) setConfirmState(null); }}
+        />
+      )}
     </div>
   );
 };

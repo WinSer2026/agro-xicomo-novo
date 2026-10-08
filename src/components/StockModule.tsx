@@ -25,6 +25,10 @@ import {
   selectSalesAfter
 } from '../utils/inventoryCutoff';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
+import ConfirmDialog from './ConfirmDialog';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 
 interface StockModuleProps {
   currentUser?: { username: string; role: string } | null;
@@ -147,6 +151,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   // Notification Banner
   const [toastMessage, setToastMessage] = useState('');
+  // Caixa de confirmação própria (window.confirm é bloqueado em iframes em sandbox)
+  const [confirmState, setConfirmState] = useState<{
+    title: string; message: string; confirmLabel?: string; danger?: boolean;
+    requireTypedText?: string; onConfirm: () => void | Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  const askConfirm = (
+    title: string, message: string, onConfirm: () => void | Promise<void>,
+    opts?: { confirmLabel?: string; danger?: boolean; requireTypedText?: string }
+  ) => { setConfirmBusy(false); setConfirmState({ title, message, onConfirm, ...(opts || {}) }); };
+
+  const runConfirm = async () => {
+    if (!confirmState) return;
+    setConfirmBusy(true);
+    try { await confirmState.onConfirm(); }
+    finally { setConfirmBusy(false); setConfirmState(null); }
+  };
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
@@ -203,7 +225,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setProducts(updated);
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
         ipAddress: '197.218.10.1',
@@ -271,7 +293,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             lossCount++;
 
             await dbService.addLoss({
-              id: 'loss-phy-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+              id: uid('loss-phy-') + '-' + Math.random().toString(36).substring(2, 6),
               date: new Date().toISOString().split('T')[0],
               productId: prod.id,
               productName: prod.name,
@@ -308,7 +330,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Log to Audit Log
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
         ipAddress: '197.218.10.1',
@@ -408,9 +430,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     return `${abbreviation}-${lotNumber}`;
   };
 
-  const handleRegenerateReferencesAll = async () => {
+  const handleRegenerateReferencesAll = () => {
+    askConfirm(
+      'Gerar novas referências',
+      'Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?',
+      doRegenerateReferencesAll,
+      { confirmLabel: 'Gerar referências', danger: true }
+    );
+  };
+
+  const doRegenerateReferencesAll = async () => {
     if (isSubmitting) return;
-    if (!window.confirm("Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?")) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -422,17 +452,27 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast("Novas referências geradas para todos os produtos!");
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.");
+      triggerToast(`${describeError(err, 'Não foi possível gerar as referências.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleRegenerateReferencesSelected = async () => {
+  const handleRegenerateReferencesSelected = () => {
+    const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
+    if (selectedIds.length === 0) return;
+    askConfirm(
+      'Gerar novas referências',
+      `Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`,
+      doRegenerateReferencesSelected,
+      { confirmLabel: 'Gerar referências', danger: true }
+    );
+  };
+
+  const doRegenerateReferencesSelected = async () => {
     if (isSubmitting) return;
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`)) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -448,7 +488,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast(`Novas referências geradas para os produtos selecionados!`);
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.");
+      triggerToast(`${describeError(err, 'Não foi possível gerar as referências.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -554,7 +594,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         const lostCost = prod.stockQty * prod.buyingPrice;
         
         await dbService.addLoss({
-          id: 'loss-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          id: uid('loss-') + '-' + Math.random().toString(36).substr(2, 4),
           productId: prod.id,
           productName: prod.name + ' (VENCIDO - AUTO REMOVIDO)',
           quantity: prod.stockQty,
@@ -572,7 +612,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
         // Audit Log
         await dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Sistema Automático',
           ipAddress: '127.0.0.1',
@@ -652,7 +692,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const bulkBuyPrice = Number(newProdBuyPriceBulk);
 
       const newProduct: Product = {
-        id: 'prod-' + Date.now(),
+        id: uid('prod-'),
         code: codeToUse,
         name: finalProdName,
         category: cat || 'Geral',
@@ -699,7 +739,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdImageUrl('');
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao cadastrar produto.');
+      triggerToast(`${describeError(err, 'Não foi possível cadastrar o produto.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -716,7 +756,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Log to Audit Trail
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
       ipAddress: '127.0.0.1',
@@ -1492,19 +1532,44 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   };
 
   // Direct Inline Adjustment helper with password dialog verification
-  const adjustProductStockDirectly = async (product: Product, newQty: number) => {
+  // Janela própria de palavra-passe: `prompt()` e `window.confirm()` são bloqueados
+  // pelo navegador quando a app corre dentro de um iframe em sandbox.
+  const [stockPwRequest, setStockPwRequest] = useState<{ product: Product; newQty: number } | null>(null);
+  const [stockPw, setStockPw] = useState('');
+  const [stockPwError, setStockPwError] = useState('');
+
+  const adjustProductStockDirectly = (product: Product, newQty: number) => {
     if (newQty < 0) {
       triggerToast('A quantidade em stock não pode ser negativa.');
       return;
     }
+    setStockPw('');
+    setStockPwError('');
+    setStockPwRequest({ product, newQty });
+  };
 
+  const confirmStockAdjustment = async () => {
+    if (!stockPwRequest) return;
+    const { product, newQty } = stockPwRequest;
     const inputPw = (settings?.stockPasswordHash || '05082').trim();
-    const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
-    if (!pw || (pw.trim() !== inputPw && pw.trim() !== '05082' && pw.trim() !== '0147')) {
-      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.');
+    const pw = stockPw.trim();
+    if (!pw || (pw !== inputPw && pw !== '05082' && pw !== '0147')) {
+      setStockPwError('Palavra-passe de segurança do stock incorreta.');
       return;
     }
 
+    setIsSubmitting(true);
+    setStockPwError('');
+    try {
+      await doAdjustStock(product, newQty);
+      setStockPwRequest(null);
+      setStockPw('');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const doAdjustStock = async (product: Product, newQty: number) => {
     const prevQty = product.stockQty;
     product.stockQty = newQty;
     
@@ -1519,7 +1584,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Security Audit Log
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
       ipAddress: '127.0.0.1',
@@ -1564,7 +1629,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Audit Log
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
         ipAddress: '127.0.0.1',
@@ -1603,7 +1668,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           triggerToast('Inventário oficial restaurado com sucesso!');
         } catch (err) {
           console.error('Erro ao restaurar catálogo:', err);
-          triggerToast('Erro ao restaurar catálogo oficial.');
+          triggerToast(`${describeError(err, 'Não foi possível restaurar o catálogo oficial.').title} ${describeError(err).hint}`.trim());
         } finally {
           setIsSubmitting(false);
         }
@@ -1682,7 +1747,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       await dbService.saveProduct(selectedProduct);
 
       await dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Operador / Técnico',
         ipAddress: '127.0.0.1',
@@ -1740,7 +1805,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Register loss
       await dbService.addLoss({
-        id: 'loss-' + Date.now(),
+        id: uid('loss-'),
         productId: lossProduct.id,
         productName: lossProduct.name,
         quantity: Number(lossQty),
@@ -1753,7 +1818,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Security Audit Log
     await dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador',
       ipAddress: '127.0.0.1',
@@ -1770,7 +1835,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     loadInventoryData();
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao registar quebra.');
+      triggerToast(`${describeError(err, 'Não foi possível registar a quebra.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -1808,10 +1873,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     <div className="space-y-6" id="stock_module">
       {/* Toast banner */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast message={toastMessage} type="success" duration={4000} onClose={() => setToastMessage('')} />
       )}
 
       {/* RENDER IN PORTAL (TOP HEADER ACTIONS, SIDE OF DATE) */}
@@ -4387,6 +4449,67 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         </div>
       )}
 
+      {/* Janela de autorização por palavra-passe (substitui window.prompt) */}
+      {stockPwRequest && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[9998] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-sm p-5 sm:p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined">lock</span>
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">Autorização de Stock</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Introduza a palavra-passe de autorização para alterar o stock de{' '}
+                  <strong>{stockPwRequest.product.name}</strong> para{' '}
+                  <strong>{stockPwRequest.newQty} {stockPwRequest.product.baseUnit}</strong>.
+                </p>
+              </div>
+            </div>
+            <input
+              type="password"
+              value={stockPw}
+              autoFocus
+              onChange={(e) => setStockPw(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') confirmStockAdjustment(); }}
+              placeholder="Palavra-passe de autorização"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-emerald-600"
+            />
+            {stockPwError && <p className="text-[11px] font-bold text-red-600">{stockPwError}</p>}
+            <div className="flex gap-2 justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => { setStockPwRequest(null); setStockPw(''); setStockPwError(''); }}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs uppercase tracking-wider hover:bg-white transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmStockAdjustment}
+                disabled={isSubmitting}
+                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isSubmitting ? 'A gravar...' : 'Confirmar Ajuste'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmState && (
+        <ConfirmDialog
+          open={Boolean(confirmState)}
+          title={confirmState.title}
+          message={confirmState.message}
+          confirmLabel={confirmState.confirmLabel}
+          danger={confirmState.danger}
+          busy={confirmBusy}
+          requireTypedText={confirmState.requireTypedText}
+          onConfirm={runConfirm}
+          onCancel={() => { if (!confirmBusy) setConfirmState(null); }}
+        />
+      )}
     </div>
   );
 }

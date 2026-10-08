@@ -8,6 +8,9 @@ import { DateRangeFilter } from './DateRangeFilter';
 import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 
 interface FaturasModuleProps {
   currentUser?: { username: string; role: string; roles?: string[] } | null;
@@ -107,7 +110,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       setSettings(globalSettings);
     } catch (err) {
       console.error('Error loading invoices data:', err);
-      showToast('Erro ao carregar dados de facturação.', 'error');
+      showToast(`${describeError(err, 'Não foi possível carregar os dados de facturação.').title} ${describeError(err).hint}`.trim(), 'error');
     }
   };
 
@@ -122,7 +125,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
         } catch (err) {
           console.error(err);
-          showToast('Erro ao limpar histórico.', 'error');
+          showToast(`${describeError(err, 'Não foi possível limpar o histórico.').title} ${describeError(err).hint}`.trim(), 'error');
         }
       }
     );
@@ -151,7 +154,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           showToast(`Factura ${sale.invoiceNumber} paga! Recibo impresso e descarregado em A4.`, 'success');
         } catch (err) {
           console.error(err);
-          showToast('Erro ao liquidar factura.', 'error');
+          showToast(`${describeError(err, 'Não foi possível liquidar a factura.').title} ${describeError(err).hint}`.trim(), 'error');
         } finally {
           setIsProcessing(false);
         }
@@ -272,7 +275,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
         // Log Audit asynchronously
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -329,7 +332,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         }
 
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -462,14 +465,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     <div className="space-y-6" id="faturas_module_container">
       {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
-          toastType === 'success' ? 'bg-emerald-600 text-white border-emerald-700' : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast
+          message={toastMessage}
+          type={toastType === 'success' ? 'success' : 'error'}
+          duration={toastType === 'error' ? 9000 : 4000}
+          onClose={() => setToastMessage('')}
+        />
       )}
 
       {/* Module Title */}

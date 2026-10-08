@@ -4,6 +4,7 @@ import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter'
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import Toast from './Toast';
 import { dbService } from '../utils/firebaseDB';
 import { Employee, Attendance, ContractType, PayrollPayment, DisciplinaryAction, EmployeeDamage, SystemSettings } from '../types';
 import EmployeeDetailModal from './EmployeeDetailModal';
@@ -15,6 +16,8 @@ import {
   checkForeignerQuota, 
   calculateVacationDays 
 } from '../utils/hrCalculations';
+import { describeError } from '../utils/errorHelper';
+import { uid } from '../utils/idHelper';
 import {
   ResponsiveContainer,
   LineChart,
@@ -205,7 +208,7 @@ export default function HRModule() {
     const existing = attendance.find(a => a.employeeId === employeeId && a.date === dailyAttendanceDate);
 
     const payload: Attendance = {
-      id: existing ? existing.id : 'att-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+      id: existing ? existing.id : uid('att-') + '-' + Math.random().toString(36).substr(2, 4),
       employeeId: employeeId,
       employeeName: emp.name,
       date: dailyAttendanceDate,
@@ -335,7 +338,7 @@ export default function HRModule() {
       setSettings(config);
     } catch (error) {
       console.error('Erro ao carregar dados de Recursos Humanos:', error);
-      showToast('Erro ao carregar dados do sistema.');
+      showToast(`${describeError(error, 'Não foi possível carregar os dados do sistema.').title} ${describeError(error).hint}`.trim());
     } finally {
       setIsLoading(false);
     }
@@ -364,7 +367,7 @@ export default function HRModule() {
     setIsSubmitting(true);
 
     const payload: Employee = {
-      id: isEditing ? empId : 'emp-' + Date.now(),
+      id: isEditing ? empId : uid('emp-'),
       name: empName.trim(),
       contact: empContact.trim() || undefined,
       contractType: empContract,
@@ -389,7 +392,7 @@ export default function HRModule() {
       loadData();
     } catch (err) {
       console.error(err);
-      showToast('Erro ao gravar os dados.');
+      showToast(`${describeError(err, 'Não foi possível gravar os dados.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -460,7 +463,7 @@ export default function HRModule() {
     const existing = attendance.find(a => a.employeeId === pontoEmployeeId && a.date === pontoDate);
 
     const payload: Attendance = {
-      id: existing ? existing.id : 'att-' + Date.now(),
+      id: existing ? existing.id : uid('att-'),
       employeeId: pontoEmployeeId,
       employeeName: emp.name,
       date: pontoDate,
@@ -503,7 +506,7 @@ export default function HRModule() {
     if (!emp) return;
 
     const payload: DisciplinaryAction = {
-      id: 'disc-' + Date.now(),
+      id: uid('disc-'),
       employeeId: discEmployeeId,
       employeeName: emp.name,
       infractionDate: discInfractionDate,
@@ -533,7 +536,7 @@ export default function HRModule() {
     if (!emp) return;
 
     const payload = {
-      id: 'dmg-' + Date.now(),
+      id: uid('dmg-'),
       employeeId: dmgEmployeeId,
       employeeName: emp.name,
       damagedItem: dmgItem,
@@ -585,7 +588,7 @@ export default function HRModule() {
       loadData();
     } catch (err) {
       console.error(err);
-      showToast('Erro ao processar o pagamento.');
+      showToast(`${describeError(err, 'Não foi possível processar o pagamento.').title} ${describeError(err).hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -963,10 +966,7 @@ export default function HRModule() {
     <div className="space-y-6" id="hr_module_main">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700 animate-fade-in">
-          <span className="material-symbols-outlined text-emerald-400">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <Toast message={toastMessage} type="success" duration={4000} onClose={() => setToastMessage('')} />
       )}
 
       {/* Header and Brand */}
