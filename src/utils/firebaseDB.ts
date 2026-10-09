@@ -43,6 +43,7 @@ import {
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
+import { uid } from './idHelper';
 import {
   getArchiveCutoffTimestamp,
   getCursorPageMetadata,
@@ -102,6 +103,8 @@ export interface AuditArchiveResult {
   cutoffTimestamp: string;
 }
 
+import type { StockCorrectionSnapshot } from './inventoryCutoff';
+
 const app = initializeApp(firebaseConfig);
 
 let dbInstance;
@@ -148,6 +151,7 @@ export class FirebaseDBService {
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
   private attendanceCache: Attendance[] | null = null;
+  private lastWriteAckAt: number | null = null;
   private unsubscribers: (() => void)[] = [];
   private largeCollectionListenersStarted = false;
 
@@ -475,6 +479,7 @@ export class FirebaseDBService {
       const sanitized = this.sanitizeData(data);
       console.log(`[FirebaseDBService] upsert() to collection: ${colName}, ID: ${validId}`);
       await setDoc(doc(db, colName, validId), sanitized);
+      this.lastWriteAckAt = Date.now();
       console.log(`[FirebaseDBService] upsert() successful on ${colName}/${validId}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, id: validId } }));
     } catch (e) {
@@ -871,6 +876,70 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
   }
+
+  /**
+   * CORTE DE INVENTÁRIO — grava saldos absolutos de stock em lote.
+   *
+   * Usa valores absolutos (e não incrementos) porque a operação é sempre precedida de
+   * uma pré-visualização: o saldo que o gestor aprovou no ecrã é exactamente o saldo
+   * que fica gravado, sem surpresas de concorrência.
+   */
+  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
+    const list = (snapshots || []).filter(s => s && s.productId);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400; // limite seguro abaixo das 500 operações por batch do Firestore
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const snapshot of list.slice(i, i + CHUNK)) {
+        const payload: Record<string, number> = { stockQty: Math.max(0, Number(snapshot.stockQty) || 0) };
+        if (snapshot.stockQtyBulk !== undefined) payload.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+        if (snapshot.stockQtyRetail !== undefined) payload.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+        batch.set(doc(db, 'products', String(snapshot.productId)), payload, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-correction' } }));
+    return list.length;
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — anula várias vendas numa só operação.
+   *
+   * @param sales      documentos já marcados como 'Cancelada' (ver annotateCancelledSale).
+   * @param snapshots  saldos de stock a gravar em simultâneo. Deixar vazio quando a
+   *                   anulação NÃO deve mexer no stock (caso típico: a contagem física
+   *                   já lançada no sistema é anterior a estas vendas).
+   */
+  public async cancelSalesBulk(sales: Sale[], snapshots: StockCorrectionSnapshot[] = []): Promise<number> {
+    const list = (sales || []).filter(Boolean);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400;
+    const stockList = (snapshots || []).filter(s => s && s.productId);
+
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const sale of list.slice(i, i + CHUNK)) {
+        const saleId = String(sale.id || sale.invoiceNumber || uid('sale-'));
+        batch.set(doc(db, 'sales', saleId), this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' }), { merge: true });
+      }
+      await batch.commit();
+    }
+
+    if (stockList.length > 0) {
+      await this.applyStockCorrection(stockList);
+    }
+
+    this.salesCache = null;
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: list.length } }));
+    return list.length;
+  }
+
+
 
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
@@ -1277,7 +1346,14 @@ export class FirebaseDBService {
       }
     } catch(e) {}
     const def = this.getDefaultSettings();
-    await this.saveSettings(def);
+    // As configurações por omissão mantêm a aplicação utilizável mesmo quando
+    // a primeira escrita falha (offline / permission-denied). Persistir o valor
+    // é secundário e não pode transformar o arranque numa rejeição não tratada.
+    try {
+      await this.saveSettings(def);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Não foi possível persistir as configurações por omissão:', error);
+    }
     return def;
   }
 
@@ -1679,6 +1755,45 @@ export class FirebaseDBService {
   public getPendingCount(): number { return this.isOnline() ? 0 : 1; }
   public getLastSyncTime(): string { return new Date().toLocaleTimeString(); }
 
+  /** timestamp da última escrita confirmada pelo servidor (null se nenhuma). */
+  public getLastWriteAck(): number | null { return this.lastWriteAckAt; }
+
+  /**
+   * Sonda REAL de escrita/leitura no Firestore.
+   * Serve para o técnico perceber, a partir da própria aplicação, se a base de
+   * dados está a aceitar escritas (antes isto devolvia sempre "sucesso" falso,
+   * o que escondia problemas de regras de segurança e de ligação).
+   */
+  public async probeDatabaseHealth(): Promise<{ ok: boolean; message: string; latencyMs?: number; code?: string }> {
+    const started = Date.now();
+    const probeId = 'probe';
+    try {
+      await this.upsert('_health', probeId, { at: new Date().toISOString(), origin: 'agro-xicomo' });
+      const snap = await getDoc(doc(db, '_health', probeId));
+      const latencyMs = Date.now() - started;
+      if (!snap.exists()) {
+        return { ok: false, message: 'A escrita foi aceite mas a leitura de confirmação não devolveu dados.', latencyMs };
+      }
+      try { await deleteDoc(doc(db, '_health', probeId)); } catch (e) {}
+      return {
+        ok: true,
+        latencyMs,
+        message: `Ligação OK. Escrita e leitura confirmadas em ${latencyMs} ms.`
+      };
+    } catch (e: any) {
+      const code = String(e?.code || '').replace(/^firestore\//, '');
+      let message = 'Falha na ligação à base de dados.';
+      if (code === 'permission-denied') {
+        message = 'A base de dados recusa escritas (regras de segurança). É necessário publicar as regras do Firestore que permitem leitura e escrita.';
+      } else if (code === 'unavailable' || code === 'deadline-exceeded') {
+        message = 'Sem ligação ao servidor da base de dados. Verifique a internet.';
+      } else if (e && e.message) {
+        message = `Falha na ligação: ${e.message}`;
+      }
+      return { ok: false, message, latencyMs: Date.now() - started, code };
+    }
+  }
+
   // --- Active Cart ---
   public async saveActiveCart(cartData: any): Promise<void> {
     try {
@@ -1704,41 +1819,6 @@ export class FirebaseDBService {
   public getFirebaseConfig(): { url: string; key: string } { return { url: 'Firebase', key: 'Managed by AI Studio' }; }
   public setFirebaseConfig(url: string, key: string): void {}
   public clearFirebaseConfig(): void {}
-  /**
-   * Sonda REAL de escrita/leitura no Firestore.
-   * Antes devolvia sempre "sucesso" (resposta hardcoded), o que escondia problemas
-   * de ligação e de regras de segurança do técnico.
-   */
-  public async probeDatabaseHealth(): Promise<{ ok: boolean; message: string; latencyMs?: number; code?: string }> {
-    const started = Date.now();
-    const probeId = 'probe';
-    try {
-      await this.upsert('_health', probeId, { at: new Date().toISOString(), origin: 'agro-xicomo' });
-      const snap = await getDoc(doc(db, '_health', probeId));
-      const latencyMs = Date.now() - started;
-      if (!snap.exists()) {
-        return { ok: false, message: 'A escrita foi aceite mas a leitura de confirmação não devolveu dados.', latencyMs };
-      }
-      try { await deleteDoc(doc(db, '_health', probeId)); } catch (e) {}
-      return {
-        ok: true,
-        latencyMs,
-        message: `Ligação OK. Escrita e leitura confirmadas em ${latencyMs} ms.`
-      };
-    } catch (e: any) {
-      const code = String(e?.code || '').replace(/^firestore\//, '');
-      let message = 'Falha na ligação à base de dados.';
-      if (code === 'permission-denied') {
-        message = 'A base de dados recusou a escrita (permission-denied). As regras do Firestore estão a bloquear o acesso.';
-      } else if (code === 'unavailable') {
-        message = 'Sem ligação ao servidor Firestore (unavailable). Verifique a internet.';
-      } else if (e?.message) {
-        message = `Falha na ligação: ${e.message}`;
-      }
-      return { ok: false, message, code, latencyMs: Date.now() - started };
-    }
-  }
-
   public async testConnection(customUrl?: string, customKey?: string): Promise<{ success: boolean; message: string; latencyMs?: number }> {
     const probe = await this.probeDatabaseHealth();
     return { success: probe.ok, message: probe.message, latencyMs: probe.latencyMs };

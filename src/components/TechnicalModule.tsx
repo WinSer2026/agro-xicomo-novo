@@ -2162,7 +2162,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder={editingUser ? 'Deixe em branco para manter a palavra-passe atual' : '4 a 6 caracteres (letras ou números)'}
+                  placeholder={editingUser ? 'Deixe em branco para manter a actual' : '4 a 6 caracteres (letras ou números)'}
                   maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
@@ -2248,9 +2248,10 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               <div className="flex gap-2">
                 <button
                   type="submit"
-                  className="flex-1 py-2 bg-primary hover:opacity-95 text-white font-bold rounded uppercase text-[10px] transition-opacity"
+                  disabled={isSubmitting}
+                  className="flex-1 py-2 bg-primary hover:opacity-95 text-white font-bold rounded uppercase text-[10px] transition-opacity disabled:opacity-60 disabled:cursor-wait"
                 >
-                  {editingUser ? 'Guardar Alterações' : 'Admitir Utilizador'}
+                  {isSubmitting ? 'A gravar...' : editingUser ? 'Guardar Alterações' : 'Admitir Utilizador'}
                 </button>
                 {editingUser && (
                   <button

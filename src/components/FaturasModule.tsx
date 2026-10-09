@@ -7,6 +7,7 @@ import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { DateRangeFilter } from './DateRangeFilter';
+import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask } from '../utils/postCommit';
 import * as XLSX from 'xlsx';
@@ -53,6 +54,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  // Ferramenta de corte de inventário (anulação em massa / correcção de stock)
+  const [showCutoffTool, setShowCutoffTool] = useState(false);
 
   const [securityModal, setSecurityModal] = useState<{
     show: boolean;
@@ -568,7 +572,28 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <span className="material-symbols-outlined text-emerald-600">receipt_long</span>
           Gestão de Facturas
         </h2>
+
+        <button
+          type="button"
+          onClick={() => setShowCutoffTool(true)}
+          className="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-[11px] rounded-xl flex items-center gap-1.5 shadow-md cursor-pointer self-start md:self-auto"
+          title="Anular em bloco as vendas de um dia (contagem física lançada depois das vendas) ou corrigir o stock sem anular facturas"
+        >
+          <span className="material-symbols-outlined text-[16px]">content_cut</span>
+          Corte de Inventário
+        </button>
       </div>
+
+      {/* Ferramenta de anulação em massa / correcção de stock por corte de inventário */}
+      <InventoryCutoffTool
+        isOpen={showCutoffTool}
+        onClose={() => setShowCutoffTool(false)}
+        currentUser={currentUser ? { username: currentUser.username, role: currentUser.role } : null}
+        onCompleted={() => {
+          loadData();
+          showToast('Corte de inventário aplicado. Dados actualizados.', 'success');
+        }}
+      />
 
       {/* Date Range Filter */}
       <DateRangeFilter

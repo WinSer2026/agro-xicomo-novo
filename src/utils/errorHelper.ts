@@ -98,6 +98,12 @@ export function describeError(err: unknown, fallbackTitle = 'Ocorreu um erro ine
     };
   }
 
+  // Última rede de segurança: reconhecer códigos escritos por extenso nas mensagens.
+  const lower = raw.toLowerCase();
+  if (lower.includes('permission') || lower.includes('permission_denied')) {
+    return { ...MESSAGES['permission-denied'], offline: false, raw };
+  }
+
   return {
     title: fallbackTitle,
     hint: 'Verifique os dados introduzidos e tente novamente. Se persistir, contacte o técnico.',
@@ -110,4 +116,76 @@ export function describeError(err: unknown, fallbackTitle = 'Ocorreu um erro ine
 export function formatError(err: unknown, fallbackTitle?: string): string {
   const info = describeError(err, fallbackTitle);
   return `${info.title} ${info.hint}`.trim();
+}
+
+/** Mensagem curta pronta a meter num toast: "Título — dica" */
+export function friendlyMessage(err: unknown, fallbackTitle = 'Ocorreu um erro inesperado.'): string {
+  const d = describeError(err, fallbackTitle);
+  return d.hint && d.hint !== d.raw ? `${d.title} ${d.hint}` : d.title;
+}
+
+/**
+ * Corre uma promessa com um "watchdog".
+ * NÃO aborta a operação (o Firestore continua a tentar sincronizar offline),
+ * apenas avisa quem chamou que está a demorar mais do que `ms`.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<{ status: 'done'; value: T } | { status: 'slow' }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) resolve({ status: 'slow' });
+    }, ms);
+    promise.then(
+      (value) => {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ status: 'done', value });
+      },
+      () => {
+        settled = true;
+        clearTimeout(timer);
+        // o erro é tratado por quem chamou através do catch da promessa devolvida
+      }
+    );
+  });
+}
+
+/**
+ * Envolve uma promessa de escrita: devolve o resultado ou lança, mas garante
+ * que, passado `ms`, quem chamou recebe um aviso de "operação lenta".
+ *
+ * Uso típico:
+ *   const res = guardWrite(dbService.addSale(sale), 8000);
+ *   res.onSlow(() => setSlowWarning(true));   // mostra "a gravar, aguarde..."
+ *   await res.promise;                        // continua à espera (não aborta)
+ */
+export function guardWrite<T>(promise: Promise<T>, ms = 8000) {
+  let slow = false;
+  let slowCb: (() => void) | null = null;
+
+  const wrapped = promise.then(
+    (v) => v,
+    (e) => {
+      throw e;
+    }
+  );
+
+  const timer = setTimeout(() => {
+    slow = true;
+    slowCb && slowCb();
+  }, ms);
+
+  wrapped.finally(() => clearTimeout(timer));
+
+  return {
+    promise: wrapped,
+    onSlow(cb: () => void) { slowCb = cb; if (slow) cb(); },
+  };
+}
+
+/** Regista o erro na consola com um prefixo consistente (apoio técnico). */
+export function logError(context: string, err: unknown): FriendlyError {
+  const d = describeError(err);
+  console.error(`[${context}]`, d.raw);
+  return d;
 }

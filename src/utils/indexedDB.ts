@@ -2,6 +2,7 @@ import { safeStorage, safeSessionStorage } from "./safeStorage";
 import { uid } from './idHelper';
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
+import type { StockCorrectionSnapshot } from './inventoryCutoff';
 
 const DB_NAME = 'AgroGestaoZeroDB';
 const DB_VERSION = 5;
@@ -822,6 +823,51 @@ export class IndexedDBService {
     }
     const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || uid('sale-')), status: 'Cancelada' };
     await this.addSale(updatedSale);
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — grava saldos absolutos de stock em lote (modo local).
+   * Espelha a API do serviço Firebase para que os módulos funcionem em qualquer modo.
+   */
+  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
+    const list = (snapshots || []).filter(snapshot => snapshot?.productId);
+    if (list.length === 0) return 0;
+
+    const products = await this.getProducts();
+    const toUpdate: Product[] = [];
+
+    for (const snapshot of list) {
+      const product = products.find(item => String(item.id) === String(snapshot.productId));
+      if (!product) continue;
+      product.stockQty = Math.max(0, Number(snapshot.stockQty) || 0);
+      if (snapshot.stockQtyBulk !== undefined) product.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+      if (snapshot.stockQtyRetail !== undefined) product.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+      toUpdate.push(product);
+    }
+
+    if (toUpdate.length > 0) await this.saveProducts(toUpdate);
+    return toUpdate.length;
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — anula várias vendas de uma só vez (modo local).
+   * Sem `snapshots` o stock permanece intocado (anulação sem estorno).
+   */
+  public async cancelSalesBulk(sales: Sale[], snapshots: StockCorrectionSnapshot[] = []): Promise<number> {
+    const list = (sales || []).filter(Boolean);
+    if (list.length === 0) return 0;
+
+    for (const sale of list) {
+      const id = String(sale.id || sale.invoiceNumber || uid('sale-'));
+      await this.addSale({ ...sale, id, status: 'Cancelada' });
+    }
+
+    if (snapshots.length > 0) await this.applyStockCorrection(snapshots);
+
+    window.dispatchEvent(new CustomEvent('db-update', {
+      detail: { table: 'sales', action: 'bulk-cancel', count: list.length }
+    }));
+    return list.length;
   }
 
   // --- Losses Store ---

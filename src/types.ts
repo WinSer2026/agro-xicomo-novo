@@ -22,6 +22,8 @@ export interface Product {
   expiryDate?: string; // ISO date YYYY-MM-DD
   imageUrl?: string;
   isService?: boolean;
+  /** Data/hora ISO da última actualização do registo (ajustes, contagens, correcções). */
+  updatedAt?: string;
 }
 
 export interface SaleItem {

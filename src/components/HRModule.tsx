@@ -7,6 +7,7 @@ import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { dbService } from '../utils/firebaseDB';
 import Toast from './Toast';
+import { describeError } from '../utils/errorHelper';
 import { Employee, Attendance, ContractType, PayrollPayment, DisciplinaryAction, EmployeeDamage, SystemSettings } from '../types';
 import EmployeeDetailModal from './EmployeeDetailModal';
 import { 
@@ -338,7 +339,7 @@ export default function HRModule() {
     } catch (error) {
       console.error('Erro ao carregar dados de Recursos Humanos:', error);
       if (notifyOnError) {
-        showToast('Erro ao carregar dados do sistema.');
+        showToast(`${describeError(error, 'Não foi possível carregar os dados do sistema.').title} ${describeError(error).hint}`.trim());
       }
     } finally {
       setIsLoading(false);

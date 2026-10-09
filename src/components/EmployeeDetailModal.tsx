@@ -1,8 +1,9 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { uid } from '../utils/idHelper';
 import Toast from './Toast';
 import { Employee, PerformanceRecord, ContractType } from '../types';
+import { describeError } from '../utils/errorHelper';
 
 interface EmployeeDetailModalProps {
   employee: Employee;
@@ -214,7 +215,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
       }, 500);
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao guardar alterações no IndexedDB.');
+      triggerToast(`${describeError(err, 'Não foi possível guardar as alterações.').title} ${describeError(err).hint}`.trim());
     }
   };
 
