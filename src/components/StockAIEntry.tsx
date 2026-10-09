@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { uid } from '../utils/idHelper';
 import { dbService } from '../utils/firebaseDB';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import { Product } from '../types';
@@ -189,7 +190,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
       if (updatedCount > 0) {
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Gestor de Stock (IA)',
           ipAddress: '127.0.0.1',

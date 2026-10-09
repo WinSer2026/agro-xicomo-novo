@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
@@ -7,7 +8,10 @@ import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, formatDatePT } from '../utils/dateRangeHelper';
-import { hashPassword, validateAccessPassword } from '../utils/securityHelper';
+import { hashPassword, decidePasswordUpdate } from '../utils/securityHelper';
+import { describeError } from '../utils/errorHelper';
+import { useConfirmDialog } from './ConfirmDialog';
+import Toast from './Toast';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import * as XLSX from 'xlsx';
 import { 
@@ -257,7 +261,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleTerminateSession = async (sessionId: string, username: string) => {
     await dbService.removeActiveSession(sessionId);
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -269,20 +273,26 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     loadAllData();
   };
 
-  const handleClearAllSessions = async () => {
-    if (!window.confirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.')) return;
-    await dbService.clearActiveSessions();
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Limpeza Geral de Sessões',
-      status: 'Alerta',
-      details: 'Todas as sessões ativas foram limpas pelo técnico.'
-    });
-    showToast('Todas as sessões ativas foram limpas!');
-    loadAllData();
+  const handleClearAllSessions = () => {
+    askConfirm(
+      'Limpar todas as sessões',
+      'Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.',
+      async () => {
+        await dbService.clearActiveSessions();
+        void dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: 'Técnico',
+          ipAddress: '127.0.0.1',
+          action: 'Limpeza Geral de Sessões',
+          status: 'Alerta',
+          details: 'Todas as sessões ativas foram limpas pelo técnico.'
+        });
+        showToast('Todas as sessões ativas foram limpas!');
+        loadAllData();
+      },
+      { danger: true, confirmLabel: 'Limpar sessões' }
+    );
   };
 
   const showToast = (msg: string) => {
@@ -290,14 +300,22 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     setTimeout(() => setToastMessage(''), 3000);
   };
 
-  const handleArchiveAuditLogs = async () => {
-    if (isArchivingAuditLogs) return;
-    const confirmation = window.confirm(
-      `Arquivar registos de auditoria anteriores a ${formatDatePT(archiveBeforeDate)}? ` +
-      'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.'
-    );
-    if (!confirmation) return;
+  // Confirmações próprias: o window.confirm é bloqueado dentro de iframes em
+  // sandbox e devolvia sempre "cancelar" sem mostrar nada (botões "mortos").
+  const { askConfirm, dialog: confirmDialog } = useConfirmDialog();
 
+  const handleArchiveAuditLogs = () => {
+    if (isArchivingAuditLogs) return;
+    askConfirm(
+      'Arquivar registos de auditoria',
+      `Arquivar registos de auditoria anteriores a ${formatDatePT(archiveBeforeDate)}? ` +
+      'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.',
+      doArchiveAuditLogs,
+      { confirmLabel: 'Arquivar registos' }
+    );
+  };
+
+  const doArchiveAuditLogs = async () => {
     setIsArchivingAuditLogs(true);
     try {
       const result = await dbService.archiveAuditLogsBefore(archiveBeforeDate, 200);
@@ -307,7 +325,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       }
 
       void dbService.addAuditLog({
-        id: `log-archive-${Date.now()}`,
+        id: uid('log-archive-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -425,52 +443,78 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
-    if (!usrUsername || !usrPassword) {
+
+    const cleanUsername = usrUsername.trim();
+    if (!cleanUsername) {
+      showToast('O nome de utilizador não pode ficar vazio.');
+      return;
+    }
+
+    // Na EDIÇÃO a palavra-passe pode ficar vazia (mantém-se a actual).
+    if (!usrPassword.trim() && !editingUser) {
       showToast('Por favor, indique o utilizador e palavra-passe.');
+      return;
+    }
+
+    // O username é case-insensitive no login: duplicados colidem na autenticação.
+    const duplicate = users.find(
+      u => u.username.trim().toLowerCase() === cleanUsername.toLowerCase()
+        && (!editingUser || u.id !== editingUser.id)
+    );
+    if (duplicate) {
+      showToast(`Já existe o utilizador "${duplicate.username}". Escolha outro nome.`);
+      return;
+    }
+
+    // Decisão de palavra-passe:
+    //  - edição + campo vazio           → mantém a palavra-passe actual;
+    //  - edição + hash antigo no campo  → mantém (compatibilidade com sessões
+    //    abertas na versão anterior do formulário);
+    //  - palavra-passe nova             → validada pela política oficial.
+    // ANTES, o hash era carregado para o campo e tratado como palavra-passe nova,
+    // o que rejeitava a gravação das contas antigas com um erro de política.
+    const decision = decidePasswordUpdate(editingUser, usrPassword);
+    if (decision.action === 'invalid') {
+      showToast(decision.message);
       return;
     }
 
     const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
 
-    const isExistingHash = usrPassword.trim().startsWith('sha256:');
-    if (!isExistingHash) {
-      // Política oficial: 4 a 6 caracteres (apenas números, apenas letras ou mistos)
-      const policy = validateAccessPassword(usrPassword);
-      if (!policy.strong) {
-        showToast(policy.message || 'Palavra-passe inválida.');
-        return;
-      }
-    }
-    const finalPasswordHash = isExistingHash ? usrPassword.trim() : await hashPassword(usrPassword.trim());
-
-    const newUser: UserCredentials = {
-      id: editingUser ? editingUser.id : 'usr-' + Date.now(),
-      username: usrUsername.trim(),
-      passwordHash: finalPasswordHash,
-      roles: rolesToSave,
-      role: rolesToSave.join(', '),
-      mfaEnabled: usrMfa,
-      mustChangePassword: isExistingHash ? (editingUser?.mustChangePassword || false) : usrMustChange,
-      passwordResetVersion: editingUser?.passwordResetVersion
-    };
-
     setIsSubmitting(true);
     try {
+      const finalPasswordHash = decision.action === 'keep'
+        ? decision.hash
+        : await hashPassword(decision.password);
+
+      const newUser: UserCredentials = {
+        id: editingUser ? editingUser.id : uid('usr-'),
+        username: cleanUsername,
+        passwordHash: finalPasswordHash,
+        roles: rolesToSave,
+        role: rolesToSave.join(', '),
+        mfaEnabled: usrMfa,
+        mustChangePassword: decision.action === 'keep'
+          ? (editingUser?.mustChangePassword || false)
+          : usrMustChange,
+        passwordResetVersion: editingUser?.passwordResetVersion
+      };
+
       await dbService.saveCredential(newUser);
 
-      // Log to Audit logs
+      // Auditoria: nunca pode deitar abaixo a operação principal.
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
         action: editingUser ? 'Utilizador Editado' : 'Utilizador Criado',
         status: 'Sucesso',
-        details: `Utilizador ${usrUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
+        details: `Utilizador ${cleanUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
       });
 
       showToast(editingUser ? 'Utilizador atualizado!' : 'Novo utilizador registado!');
-      
+
       // Clear user form
       setEditingUser(null);
       setUsrUsername('');
@@ -479,10 +523,11 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUsrMfa(false);
       setUsrMustChange(false);
 
-      loadAllData();
+      await loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar utilizador.');
+      const info = describeError(err, 'Não foi possível gravar o utilizador.');
+      console.error('[Técnico] handleSaveUser:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -491,7 +536,10 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const startEditUser = (user: UserCredentials) => {
     setEditingUser(user);
     setUsrUsername(user.username);
-    setUsrPassword(user.passwordHash);
+    // O campo da palavra-passe fica VAZIO: o hash actual só é mantido se o técnico
+    // não escrever nada. Carregar o hash para o campo (como antes) fazia falhar a
+    // validação de 4-6 caracteres e bloqueava a gravação das contas antigas.
+    setUsrPassword('');
     const userRoles = getUserRoles(user);
     setUsrRoles(userRoles.length > 0 ? userRoles : ['Operador']);
     setUsrMfa(user.mfaEnabled || false);
@@ -522,7 +570,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.deleteCredential(id);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -535,8 +583,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUserToDelete(null);
       loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao eliminar utilizador.');
+      const info = describeError(err, 'Não foi possível eliminar o utilizador.');
+      console.error('[Técnico] confirmDeleteUser:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -587,7 +636,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.saveSettings(updated);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -602,8 +651,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
       });
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar configurações.');
+      const info = describeError(err, 'Não foi possível gravar as configurações.');
+      console.error('[Técnico] handleSaveSettings:', info.raw);
+      showToast(`${info.title} ${info.hint}`.trim());
     } finally {
       setIsSubmitting(false);
     }
@@ -669,7 +719,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1];
         const newFile = {
-          id: 'file-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          id: uid('file-') + '-' + Math.random().toString(36).substr(2, 4),
           base64,
           mime: file.type,
           name: file.name
@@ -699,7 +749,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         reader.onload = () => {
           const base64 = (reader.result as string).split(',')[1];
           const newFile = {
-            id: 'voice-' + Date.now(),
+            id: uid('voice-'),
             base64,
             mime: 'audio/webm',
             name: 'gravaçao_voz_tecnico.webm'
@@ -809,7 +859,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       if (changes.newUser) {
         const u = changes.newUser;
         const newUser: UserCredentials = {
-          id: 'usr-' + Date.now(),
+          id: uid('usr-'),
           username: u.username.trim(),
           passwordHash: u.password || u.passwordHash || '123456',
           role: u.role || 'Operador',
@@ -828,8 +878,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         const aiPriceError = validateStandardPrices(aiBuy, aiSell, false);
         if (!aiPriceError) {
           const newProd: Product = {
-            id: 'prod-' + Date.now(),
-            code: p.code || 'PRD-' + Date.now().toString().substring(8),
+            id: uid('prod-'),
+            code: p.code || 'PRD-' + uid(),
             name: p.name,
             category: p.category || 'Adubos',
             stockQty: Number(p.stockQty) || 0,
@@ -892,7 +942,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       if (appliedCount > 0) {
         // Log to Audit logs
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Técnico (Assistente IA)',
           ipAddress: '127.0.0.1',
@@ -919,19 +969,23 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   // --- MAINTENANCE & SYSTEM PROCESSORS ---
-  const handleEliminarHistoricoTeste = async () => {
+  const handleEliminarHistoricoTeste = () => {
     if (isSubmitting) return;
-    const conf = window.confirm(
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.'
+    askConfirm(
+      'Eliminar histórico de teste',
+      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
+      doEliminarHistoricoTeste,
+      { danger: true, confirmLabel: 'Eliminar histórico' }
     );
-    if (!conf) return;
+  };
 
+  const doEliminarHistoricoTeste = async () => {
     setIsSubmitting(true);
     try {
       await dbService.clearSystemData();
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -950,17 +1004,23 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     }
   };
 
-  const handleZerarSistema = async () => {
+  const handleZerarSistema = () => {
     if (isSubmitting) return;
-    const conf = window.confirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
-    if (!conf) return;
+    askConfirm(
+      'Zerar o sistema',
+      'TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.',
+      doZerarSistema,
+      { danger: true, confirmLabel: 'ZERAR SISTEMA', requireTypedText: 'ZERAR' }
+    );
+  };
 
+  const doZerarSistema = async () => {
     setIsSubmitting(true);
     try {
       await dbService.clearSystemData();
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -979,41 +1039,49 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     }
   };
 
-  const handleFecharAno = async () => {
-    const conf = window.confirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
-    if (!conf) return;
-
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+  const handleFecharAno = () => {
+    askConfirm(
+      'Fechar o Exercício Fiscal',
+      'Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.',
+      async () => {
+        void dbService.addAuditLog({
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
-      action: 'Fecho de Exercício Fiscal',
-      status: 'Sucesso',
-      details: 'Fecho de exercício executado regulamentarmente.'
-    });
+          action: 'Fecho de Exercício Fiscal',
+          status: 'Sucesso',
+          details: 'Fecho de exercício executado regulamentarmente.'
+        });
 
-    showToast('Ano Fiscal fechado e arquivado com sucesso!');
+        showToast('Ano Fiscal fechado e arquivado com sucesso!');
+      },
+      { confirmLabel: 'Fechar exercício' }
+    );
   };
 
-  const handleNovoAno = async () => {
-    const conf = window.confirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
-    if (!conf) return;
+  const handleNovoAno = () => {
+    askConfirm(
+      'Iniciar Novo Exercício Comercial',
+      'Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.',
+      async () => {
+        await dbService.clearSystemData();
 
-    await dbService.clearSystemData();
+        void dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: 'Técnico',
+          ipAddress: '127.0.0.1',
+          action: 'Abertura de Novo Exercício',
+          status: 'Sucesso',
+          details: 'Novo exercício comercial estabelecido com herança de tabelas cadastrais.'
+        });
 
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Abertura de Novo Exercício',
-      status: 'Sucesso',
-      details: 'Novo exercício comercial estabelecido com herança de tabelas cadastrais.'
-    });
-
-    showToast('Novo Exercício Fiscal Inicializado!');
-    loadAllData();
+        showToast('Novo Exercício Fiscal Inicializado!');
+        loadAllData();
+      },
+      { danger: true, confirmLabel: 'Iniciar novo exercício' }
+    );
   };
 
   const handleBackupTotal = async () => {
@@ -1052,7 +1120,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     document.body.removeChild(link);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -1067,13 +1135,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   return (
     <div className="space-y-6 animate-fade-in" id="tech_module">
-      {/* Toast banner */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">shield_person</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type="success" onDismiss={() => setToastMessage('')} />
 
       {/* Title */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
@@ -1819,21 +1882,26 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           </div>
                           <button
                             type="button"
-                            onClick={async () => {
-                              const conf = window.confirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
-                              if (!conf) return;
-                              try {
-                                const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
-                                if (backupData) {
-                                  await dbService.importAllData(backupData);
-                                  showToast('Banco de dados restaurado com sucesso!');
-                                  loadAllData();
-                                } else {
-                                  showToast('Erro: Dados de backup não encontrados.');
-                                }
-                              } catch (err) {
-                                showToast('Erro ao restaurar o backup.');
-                              }
+                            onClick={() => {
+                              askConfirm(
+                                'Restaurar backup automático',
+                                `Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`,
+                                async () => {
+                                  try {
+                                    const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
+                                    if (backupData) {
+                                      await dbService.importAllData(backupData);
+                                      showToast('Banco de dados restaurado com sucesso!');
+                                      loadAllData();
+                                    } else {
+                                      showToast('Erro: Dados de backup não encontrados.');
+                                    }
+                                  } catch (err) {
+                                    showToast('Erro ao restaurar o backup.');
+                                  }
+                                },
+                                { danger: true, confirmLabel: 'Restaurar backup' }
+                              );
                             }}
                             className="px-2.5 py-1 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-lg text-[10px] transition-colors cursor-pointer"
                           >
@@ -2094,12 +2162,14 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder="4 a 6 caracteres (letras ou números)"
+                  placeholder={editingUser ? 'Deixe em branco para manter a palavra-passe atual' : '4 a 6 caracteres (letras ou números)'}
                   maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
                 <p className="text-[10px] text-gray-500 mt-1">
-                  A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.
+                  {editingUser
+                    ? 'Para manter a palavra-passe atual, deixe o campo em branco. Para a alterar, escreva a nova palavra-passe (4 a 6 caracteres).'
+                    : 'A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.'}
                 </p>
               </div>
 
@@ -2647,6 +2717,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
           </div>
         </div>
       )}
+
+      {confirmDialog}
     </div>
   );
 }

@@ -10,6 +10,7 @@
  */
 
 import { dbService } from './firebaseDB';
+import { uid } from './idHelper';
 import { hashPassword } from './securityHelper';
 import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
 import { UserCredentials } from '../types';
@@ -72,7 +73,7 @@ export async function runCredentialsReset(): Promise<void> {
     // Auditoria é secundária ao reset concluído; a base guarda-a localmente e
     // tenta sincronizá-la depois caso a ligação esteja indisponível.
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Reset de Credenciais)',
       ipAddress: '127.0.0.1',
@@ -111,7 +112,7 @@ export async function applyNewPassword(
     await dbService.saveCredential(updated);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: current.username,
       ipAddress: '127.0.0.1',

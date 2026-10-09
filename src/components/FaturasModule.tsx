@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { uid } from '../utils/idHelper';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
+import Toast from './Toast';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
@@ -310,13 +312,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           }
           await dbService.cancelSaleWithStockRestoration(sale, restockItems);
         } else {
-          await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
+          await dbService.addSale({ ...sale, id: String(sale.id || uid('sale-')), status: 'Cancelada' });
         }
 
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -330,7 +332,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         });
         showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
       } else {
-        const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
+        const updatedSale: Sale = { ...sale, id: String(sale.id || uid('sale-')), status: 'Pendente' };
         if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
           const deductionItems: any[] = [];
@@ -364,7 +366,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'restore', sale: null, password: '', error: '' });
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -557,21 +559,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   return (
     <div className="space-y-6" id="faturas_module_container">
-      {/* Toast Notification Banner */}
-      {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
-          toastType === 'success'
-            ? 'bg-emerald-600 text-white border-emerald-700'
-            : toastType === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
-              : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
 
       {/* Module Title */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">

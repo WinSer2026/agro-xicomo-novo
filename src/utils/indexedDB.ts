@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
+import { uid } from './idHelper';
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 
@@ -734,7 +735,7 @@ export class IndexedDBService {
   public addSale(s: Sale): Promise<void> {
     const saleWithDefault: Sale = {
       ...s,
-      id: String(s.id || s.invoiceNumber || Date.now()),
+      id: String(s.id || s.invoiceNumber || uid('sale-')),
       status: s.status || 'Pendente'
     };
 
@@ -819,7 +820,7 @@ export class IndexedDBService {
     if (toUpdate.length > 0) {
       await this.saveProducts(toUpdate);
     }
-    const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || Date.now()), status: 'Cancelada' };
+    const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || uid('sale-')), status: 'Cancelada' };
     await this.addSale(updatedSale);
   }
 
@@ -1844,7 +1845,7 @@ export class IndexedDBService {
       } else {
         const newProd: Product = {
           id: item.productId,
-          code: item.code || ('TRF-' + Date.now()),
+          code: item.code || ('TRF-' + uid()),
           name: item.name,
           category: item.category || 'Transformados',
           stockQty: item.qtyToAdd,

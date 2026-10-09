@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { uid } from '../utils/idHelper';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
+import Toast from './Toast';
 import { Product, LossRecord, SystemSettings } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
@@ -176,7 +178,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setProducts(updated);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
         ipAddress: '197.218.10.1',
@@ -233,7 +235,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             lossCount++;
 
             await dbService.addLoss({
-              id: 'loss-phy-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+              id: uid('loss-phy-'),
               date: new Date().toISOString().split('T')[0],
               productId: prod.id,
               productName: prod.name,
@@ -260,7 +262,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Log to Audit Log
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
         ipAddress: '197.218.10.1',
@@ -357,9 +359,16 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     return `${abbreviation}-${lotNumber}`;
   };
 
-  const handleRegenerateReferencesAll = async () => {
+  const handleRegenerateReferencesAll = () => {
     if (isSubmitting) return;
-    if (!window.confirm("Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?")) return;
+    askConfirmation(
+      'Gerar referências de todos os produtos',
+      'Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?',
+      doRegenerateReferencesAll
+    );
+  };
+
+  const doRegenerateReferencesAll = async () => {
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -377,11 +386,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     }
   };
 
-  const handleRegenerateReferencesSelected = async () => {
+  const handleRegenerateReferencesSelected = () => {
     if (isSubmitting) return;
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`)) return;
+    askConfirmation(
+      'Gerar referências dos produtos selecionados',
+      `Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`,
+      doRegenerateReferencesSelected
+    );
+  };
+
+  const doRegenerateReferencesSelected = async () => {
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -499,7 +515,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         const lostCost = prod.stockQty * prod.buyingPrice;
         
         await dbService.addLoss({
-          id: 'loss-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          id: uid('loss-') + '-' + Math.random().toString(36).substr(2, 4),
           productId: prod.id,
           productName: prod.name + ' (VENCIDO - AUTO REMOVIDO)',
           quantity: prod.stockQty,
@@ -517,7 +533,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
         // Audit Log
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Sistema Automático',
           ipAddress: '127.0.0.1',
@@ -597,7 +613,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const bulkBuyPrice = Number(newProdBuyPriceBulk);
 
       const newProduct: Product = {
-        id: 'prod-' + Date.now(),
+        id: uid('prod-'),
         code: codeToUse,
         name: finalProdName,
         category: cat || 'Geral',
@@ -661,7 +677,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Log to Audit Trail
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
       ipAddress: '127.0.0.1',
@@ -1464,7 +1480,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Security Audit Log
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
       ipAddress: '127.0.0.1',
@@ -1509,7 +1525,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Audit Log
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
         ipAddress: '127.0.0.1',
@@ -1637,7 +1653,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       await dbService.saveProduct(selectedProduct);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Operador / Técnico',
         ipAddress: '127.0.0.1',
@@ -1695,7 +1711,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       // Register loss
       await dbService.addLoss({
-        id: 'loss-' + Date.now(),
+        id: uid('loss-'),
         productId: lossProduct.id,
         productName: lossProduct.name,
         quantity: Number(lossQty),
@@ -1708,7 +1724,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Security Audit Log
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador',
       ipAddress: '127.0.0.1',
@@ -1778,13 +1794,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   return (
     <div className="space-y-6" id="stock_module">
-      {/* Toast banner */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
 
       {/* RENDER IN PORTAL (TOP HEADER ACTIONS, SIDE OF DATE) */}
       {typeof document !== 'undefined' && document.getElementById('module-header-actions') && createPortal(

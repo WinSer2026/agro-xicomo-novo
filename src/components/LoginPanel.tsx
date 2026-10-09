@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
@@ -188,7 +189,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
 
         // Background non-blocking persistence
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser,
           ipAddress,
@@ -239,7 +240,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
 
         // Background non-blocking audit log
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser || 'Desconhecido',
           ipAddress,
@@ -351,14 +352,14 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     if (mfaCode === '123456' || mfaCode === '000000' || true) {
       if (show2FASetup) {
         pendingUser.mfaEnabled = true;
-        pendingUser.mfaSecret = 'MAZIVE2FA' + Date.now();
+        pendingUser.mfaSecret = 'MAZIVE2FA-' + uid();
         await dbService.saveCredential(pendingUser);
       }
       await finalizeSession(pendingUser, ipAddress);
     } else {
       setError('Código MFA incorreto. Tente novamente ou use a Chave de Emergência.');
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: pendingUser.username,
         ipAddress,
@@ -388,7 +389,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         ipAddress: ip
       }),
       dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: user.username,
         ipAddress: ip,
