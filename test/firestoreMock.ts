@@ -122,6 +122,27 @@ export const firestoreMock = {
 
   collection: (_db: any, name: string) => ({ type: 'collection', path: name }),
 
+  // Query helpers used by the paginated production service. The component
+  // regression tests only need the in-memory collection; constraints are kept
+  // as metadata so calls exercise the real service surface without failing.
+  query: (ref: any, ...constraints: any[]) => ({ ...ref, constraints }),
+  where: (...args: any[]) => ({ type: 'where', args }),
+  orderBy: (...args: any[]) => ({ type: 'orderBy', args }),
+  limit: (value: number) => ({ type: 'limit', value }),
+  startAfter: (cursor: any) => ({ type: 'startAfter', cursor }),
+  count: () => ({ type: 'count' }),
+  sum: (field: string) => ({ type: 'sum', field }),
+  async getAggregateFromServer(ref: any, aggregate: Record<string, any>) {
+    const docs = makeSnapshot(colNameOf(ref)).docs.map(d => d.data());
+    const data: Record<string, number> = {};
+    for (const [key, spec] of Object.entries(aggregate || {})) {
+      data[key] = (spec as any)?.type === 'sum'
+        ? docs.reduce((total, item) => total + (Number(item[(spec as any).field]) || 0), 0)
+        : docs.length;
+    }
+    return { data: () => data };
+  },
+
   doc: (_parent: any, ...segments: string[]) => ({ type: 'doc', path: segments }),
 
   async setDoc(ref: any, data: DocData, opts?: any) {

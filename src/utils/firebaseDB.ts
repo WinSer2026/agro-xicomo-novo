@@ -11,7 +11,18 @@ import {
   onSnapshot, 
   getDoc, 
   writeBatch, 
-  increment 
+  increment,
+  query,
+  where,
+  orderBy,
+  limit,
+  startAfter,
+  getAggregateFromServer,
+  count,
+  sum,
+  type QueryConstraint,
+  type QueryDocumentSnapshot,
+  type DocumentData
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { 
@@ -32,6 +43,66 @@ import {
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
+import { uid } from './idHelper';
+import {
+  getArchiveCutoffTimestamp,
+  getCursorPageMetadata,
+  getInclusiveDateBounds,
+  getSafeArchiveBatchSize
+} from './paginationHelper';
+
+/**
+ * Opaque Firestore cursor. It is deliberately kept in memory only: the
+ * snapshot contains the exact ordering information required by startAfter.
+ */
+export type FirestorePageCursor = QueryDocumentSnapshot<DocumentData>;
+
+export interface PaginatedResult<T> {
+  items: T[];
+  nextCursor: FirestorePageCursor | null;
+  hasMore: boolean;
+}
+
+export interface DateRangeQueryOptions {
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface SalesPageOptions extends DateRangeQueryOptions {
+  pageSize?: number;
+  cursor?: FirestorePageCursor | null;
+  status?: Sale['status'];
+}
+
+export interface ProductPageOptions {
+  pageSize?: number;
+  cursor?: FirestorePageCursor | null;
+  category?: string;
+}
+
+export interface AuditLogPageOptions extends DateRangeQueryOptions {
+  pageSize?: number;
+  cursor?: FirestorePageCursor | null;
+  source?: 'active' | 'archive';
+}
+
+export interface SalesSummary {
+  totalInvoiced: number;
+  paidInvoiced: number;
+  pendingInvoiced: number;
+  canceledInvoiced: number;
+  totalCount: number;
+  paidCount: number;
+  pendingCount: number;
+  canceledCount: number;
+}
+
+export interface AuditArchiveResult {
+  archivedCount: number;
+  hasMore: boolean;
+  cutoffTimestamp: string;
+}
+
 import type { StockCorrectionSnapshot } from './inventoryCutoff';
 
 const app = initializeApp(firebaseConfig);
@@ -51,8 +122,23 @@ try {
 
 const db = dbInstance;
 
+/** Comparações de ordenação tolerantes a campos em falta em registos legados. */
+function safeStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+/**
+ * Audit records are valuable, but they must not turn a completed sale or stock
+ * movement into an apparent failure. When Firestore is temporarily unavailable,
+ * keep the record locally and retry it on the next initialization or successful
+ * audit write.
+ */
+const PENDING_AUDIT_LOGS_KEY = 'agro_pending_audit_logs';
+const MAX_PENDING_AUDIT_LOGS = 100;
+
 export class FirebaseDBService {
   private initPromise: Promise<void> | null = null;
+  private pendingAuditFlush: Promise<void> | null = null;
   private productsCache: Product[] | null = null;
   private salesCache: Sale[] | null = null;
   private customersCache: Customer[] | null = null;
@@ -67,6 +153,7 @@ export class FirebaseDBService {
   private attendanceCache: Attendance[] | null = null;
   private lastWriteAckAt: number | null = null;
   private unsubscribers: (() => void)[] = [];
+  private largeCollectionListenersStarted = false;
 
   public async init(): Promise<void> {
     if (this.initPromise) {
@@ -79,30 +166,9 @@ export class FirebaseDBService {
     this.unsubscribers.forEach(unsub => unsub());
     this.unsubscribers = [];
 
-    // Realtime products listener
-    this.unsubscribers.push(onSnapshot(collection(db, 'products'), (snapshot) => {
-      const products: Product[] = [];
-      snapshot.forEach(doc => {
-        products.push(this.sanitizeProduct(doc.data() as Product));
-      });
-      this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
-      safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
-      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', count: products.length } }));
-    }, (error) => {
-      console.error('[FirebaseDBService] onSnapshot error (products):', error);
-    }));
-
-    // Realtime sales listener
-    this.unsubscribers.push(onSnapshot(collection(db, 'sales'), (snapshot) => {
-      const sales: Sale[] = [];
-      snapshot.forEach(doc => {
-        sales.push(doc.data() as Sale);
-      });
-      this.salesCache = sales.sort((a, b) => b.date.localeCompare(a.date));
-      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: sales.length } }));
-    }, (error) => {
-      console.error('[FirebaseDBService] onSnapshot error (sales):', error);
-    }));
+    // Products and sales can become very large. Their full real-time listeners
+    // are deliberately opt-in through enableLiveCatalogAndSalesSync(), so
+    // opening an invoice/audit history does not download both collections.
 
     // Realtime customers listener
     this.unsubscribers.push(onSnapshot(collection(db, 'customers'), (snapshot) => {
@@ -110,7 +176,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         customers.push(doc.data() as Customer);
       });
-      this.customersCache = customers.sort((a, b) => a.name.localeCompare(b.name));
+      this.customersCache = customers.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'customers', count: customers.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (customers):', error);
@@ -122,7 +188,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         transformations.push(doc.data() as ProductTransformation);
       });
-      this.transformationsCache = transformations.sort((a, b) => b.date.localeCompare(a.date));
+      this.transformationsCache = transformations.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations', count: transformations.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (transformations):', error);
@@ -135,7 +201,7 @@ export class FirebaseDBService {
         creds.push(doc.data() as UserCredentials);
       });
       if (creds.length > 0) {
-        this.credentialsCache = creds.sort((a, b) => a.username.localeCompare(b.username));
+        this.credentialsCache = creds.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
         safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
         window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'credentials', count: creds.length } }));
       }
@@ -149,7 +215,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         sessions.push(doc.data() as ActiveSession);
       });
-      this.activeSessionsCache = sessions.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+      this.activeSessionsCache = sessions.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
       safeStorage.setItem('agro_active_sessions_cache', JSON.stringify(this.activeSessionsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'active_sessions', count: sessions.length } }));
     }, (error) => {
@@ -172,7 +238,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'losses'), (snapshot) => {
       const losses: LossRecord[] = [];
       snapshot.forEach(d => losses.push(d.data() as LossRecord));
-      this.lossesCache = losses.sort((a, b) => b.date.localeCompare(a.date));
+      this.lossesCache = losses.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', count: losses.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (losses):', error);
@@ -182,7 +248,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'payroll_payments'), (snapshot) => {
       const payroll: PayrollPayment[] = [];
       snapshot.forEach(d => payroll.push(d.data() as PayrollPayment));
-      this.payrollCache = payroll.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+      this.payrollCache = payroll.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'payroll_payments', count: payroll.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (payroll_payments):', error);
@@ -192,7 +258,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'employees'), (snapshot) => {
       const employees: Employee[] = [];
       snapshot.forEach(d => employees.push(d.data() as Employee));
-      this.employeesCache = employees.sort((a, b) => a.name.localeCompare(b.name));
+      this.employeesCache = employees.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'employees', count: employees.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (employees):', error);
@@ -202,7 +268,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'attendance'), (snapshot) => {
       const attendance: Attendance[] = [];
       snapshot.forEach(d => attendance.push(d.data() as Attendance));
-      this.attendanceCache = attendance.sort((a, b) => b.date.localeCompare(a.date));
+      this.attendanceCache = attendance.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'attendance', count: attendance.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (attendance):', error);
@@ -212,13 +278,119 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'paused_sales'), (snapshot) => {
       const paused: PausedSale[] = [];
       snapshot.forEach(d => paused.push(d.data() as PausedSale));
-      this.pausedSalesCache = paused.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      this.pausedSalesCache = paused.sort((a, b) => safeStr(b.createdAt || b.date).localeCompare(safeStr(a.createdAt || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'paused_sales', count: paused.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (paused_sales):', error);
     }));
 
+    // Do not block the application startup if an old audit record cannot be
+    // resent yet. The business data listeners are already ready at this point.
+    void this.flushPendingAuditLogs();
+
     return this.initPromise;
+  }
+
+  /**
+   * Starts full realtime catalogue/sales subscriptions only for modules that
+   * genuinely operate on whole datasets (PDV, inventory and finance). History
+   * screens use paged queries and must not call this method.
+   */
+  public async enableLiveCatalogAndSalesSync(): Promise<void> {
+    await this.init();
+    if (this.largeCollectionListenersStarted) return;
+    this.largeCollectionListenersStarted = true;
+
+    this.unsubscribers.push(onSnapshot(collection(db, 'products'), (snapshot) => {
+      const products: Product[] = [];
+      snapshot.forEach(documentSnapshot => {
+        products.push(this.sanitizeProduct(this.recordFromSnapshot<Product>(documentSnapshot)));
+      });
+      this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
+      safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', count: products.length } }));
+    }, (error) => {
+      console.error('[FirebaseDBService] onSnapshot error (products):', error);
+    }));
+
+    this.unsubscribers.push(onSnapshot(collection(db, 'sales'), (snapshot) => {
+      const sales: Sale[] = [];
+      snapshot.forEach(documentSnapshot => {
+        sales.push(this.recordFromSnapshot<Sale>(documentSnapshot));
+      });
+      this.salesCache = sales.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: sales.length } }));
+    }, (error) => {
+      console.error('[FirebaseDBService] onSnapshot error (sales):', error);
+    }));
+  }
+
+  /** Read deferred audit records defensively so a corrupt browser cache never blocks the ERP. */
+  private getPendingAuditLogs(): AuditLog[] {
+    try {
+      const raw = safeStorage.getItem(PENDING_AUDIT_LOGS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((item): item is AuditLog => Boolean(item && typeof item.id === 'string' && item.id))
+        .slice(-MAX_PENDING_AUDIT_LOGS);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Could not read deferred audit logs:', error);
+      return [];
+    }
+  }
+
+  private savePendingAuditLogs(logs: AuditLog[]): void {
+    try {
+      if (logs.length === 0) {
+        safeStorage.removeItem(PENDING_AUDIT_LOGS_KEY);
+        return;
+      }
+      safeStorage.setItem(PENDING_AUDIT_LOGS_KEY, JSON.stringify(logs.slice(-MAX_PENDING_AUDIT_LOGS)));
+    } catch (error) {
+      console.warn('[FirebaseDBService] Could not persist deferred audit logs:', error);
+    }
+  }
+
+  private queueAuditLog(log: AuditLog): void {
+    const queued = this.getPendingAuditLogs();
+    if (!queued.some(item => item.id === log.id)) {
+      queued.push(log);
+      this.savePendingAuditLogs(queued);
+    }
+  }
+
+  private removePendingAuditLog(id: string): void {
+    this.savePendingAuditLogs(this.getPendingAuditLogs().filter(log => log.id !== id));
+  }
+
+  private flushPendingAuditLogs(): Promise<void> {
+    if (this.pendingAuditFlush) return this.pendingAuditFlush;
+
+    this.pendingAuditFlush = this.doFlushPendingAuditLogs().finally(() => {
+      this.pendingAuditFlush = null;
+    });
+    return this.pendingAuditFlush;
+  }
+
+  private async doFlushPendingAuditLogs(): Promise<void> {
+    const queued = this.getPendingAuditLogs();
+    if (queued.length === 0) return;
+
+    const deliveredIds = new Set<string>();
+    for (const log of queued) {
+      try {
+        await this.upsert('audit_logs', log.id, log);
+        deliveredIds.add(log.id);
+      } catch (error) {
+        console.warn(`[FirebaseDBService] Deferred audit log ${log.id} is still pending:`, error);
+      }
+    }
+
+    // Preserve entries added while the asynchronous flush was running. Removing
+    // only IDs known to have reached Firestore avoids losing a newer audit log.
+    const currentQueue = this.getPendingAuditLogs();
+    this.savePendingAuditLogs(currentQueue.filter(log => !deliveredIds.has(log.id)));
   }
 
   // Generic DB methods
@@ -233,6 +405,56 @@ export class FirebaseDBService {
       console.error(`[FirebaseDBService] Error getting ${colName}:`, e);
       return [];
     }
+  }
+
+  /** Convert a Firestore document to an app record while preserving its document ID. */
+  private recordFromSnapshot<T>(snapshot: QueryDocumentSnapshot<DocumentData>): T {
+    const data = snapshot.data() as T & { id?: string };
+    return {
+      ...data,
+      id: data.id || snapshot.id
+    } as T;
+  }
+
+  private getDateRangeConstraints(field: string, range: DateRangeQueryOptions): QueryConstraint[] {
+    const bounds = getInclusiveDateBounds(range.startDate, range.endDate);
+    const constraints: QueryConstraint[] = [];
+    if (bounds.start) constraints.push(where(field, '>=', bounds.start));
+    if (bounds.end) constraints.push(where(field, '<=', bounds.end));
+    return constraints;
+  }
+
+  /**
+   * Fetch one deterministic page plus one sentinel document. The extra document
+   * tells the UI whether "Carregar mais" is useful without a separate count
+   * query. Cursors intentionally stay opaque and in-memory.
+   */
+  private async getOrderedPage<T>(
+    collectionName: string,
+    sortField: string,
+    direction: 'asc' | 'desc',
+    requestedPageSize: number | undefined,
+    cursor: FirestorePageCursor | null | undefined,
+    constraints: QueryConstraint[] = []
+  ): Promise<PaginatedResult<T>> {
+    const { pageSize } = getCursorPageMetadata(0, requestedPageSize);
+    const queryConstraints: QueryConstraint[] = [
+      ...constraints,
+      orderBy(sortField, direction)
+    ];
+
+    if (cursor) queryConstraints.push(startAfter(cursor));
+    queryConstraints.push(limit(pageSize + 1));
+
+    const snapshot = await getDocs(query(collection(db, collectionName), ...queryConstraints));
+    const { hasMore } = getCursorPageMetadata(snapshot.docs.length, pageSize);
+    const pageDocuments = snapshot.docs.slice(0, pageSize);
+
+    return {
+      items: pageDocuments.map(documentSnapshot => this.recordFromSnapshot<T>(documentSnapshot)),
+      nextCursor: hasMore && pageDocuments.length > 0 ? pageDocuments[pageDocuments.length - 1] : null,
+      hasMore
+    };
   }
 
   private sanitizeData(obj: any): any {
@@ -268,15 +490,20 @@ export class FirebaseDBService {
 
   private async upsertBatch(colName: string, items: { id: string }[]): Promise<void> {
     if (items.length === 0) return;
+    // Stay below Firestore's 500-write limit. Imports and backups can now
+    // legitimately contain much more than one archive/page worth of records.
+    const writesPerCommit = 450;
     try {
       console.log(`[FirebaseDBService] upsertBatch() to collection: ${colName}, count: ${items.length}`);
-      const batch = writeBatch(db);
-      items.forEach(item => {
-        const validId = String(item.id || Date.now());
-        const sanitized = this.sanitizeData(item);
-        batch.set(doc(db, colName, validId), sanitized);
-      });
-      await batch.commit();
+      for (let offset = 0; offset < items.length; offset += writesPerCommit) {
+        const batch = writeBatch(db);
+        items.slice(offset, offset + writesPerCommit).forEach(item => {
+          const validId = String(item.id || Date.now());
+          const sanitized = this.sanitizeData(item);
+          batch.set(doc(db, colName, validId), sanitized);
+        });
+        await batch.commit();
+      }
       console.log(`[FirebaseDBService] upsertBatch() successful on ${colName}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, count: items.length } }));
     } catch (e) {
@@ -294,6 +521,10 @@ export class FirebaseDBService {
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, deletedId: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error deleting from ${colName}/${id}:`, e);
+      // A delete is a business mutation. Unlike telemetry, callers must be able
+      // to show a real failure instead of confirming an operation that did not
+      // reach the database.
+      throw e;
     }
   }
 
@@ -341,9 +572,51 @@ export class FirebaseDBService {
       return seeded.map(p => ({ ...p }));
     }
     const products = rawProducts.map(p => this.sanitizeProduct(p));
-    this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+    this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
     return this.productsCache.map(p => ({ ...p }));
+  }
+
+  /**
+   * Read only the items below the configured stock threshold for the shell
+   * alert badge. This prevents every module change from loading the catalogue.
+   */
+  public async getLowStockProducts(criticalLevel: number): Promise<Product[]> {
+    const level = Math.max(0, Number(criticalLevel) || 0);
+    const snapshot = await getDocs(query(
+      collection(db, 'products'),
+      where('stockQty', '<=', level),
+      orderBy('stockQty', 'asc')
+    ));
+    return snapshot.docs
+      .map(documentSnapshot => this.sanitizeProduct(this.recordFromSnapshot<Product>(documentSnapshot)))
+      .filter(product => !product.isService);
+  }
+
+  /**
+   * Lightweight catalogue page for list views. Full product reads remain
+   * available for PDV, stock reconciliation and batch operations that truly
+   * need the complete catalogue.
+   */
+  public async getProductsPage(options: ProductPageOptions = {}): Promise<PaginatedResult<Product>> {
+    const constraints: QueryConstraint[] = [];
+    if (options.category?.trim()) {
+      constraints.push(where('category', '==', options.category.trim()));
+    }
+
+    const result = await this.getOrderedPage<Product>(
+      'products',
+      'name',
+      'asc',
+      options.pageSize,
+      options.cursor,
+      constraints
+    );
+
+    return {
+      ...result,
+      items: result.items.map(product => this.sanitizeProduct(product))
+    };
   }
 
   public async saveProduct(p: Product): Promise<void> {
@@ -376,6 +649,8 @@ export class FirebaseDBService {
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
     } catch (e) {
       console.error("[FirebaseDBService] Error deducting stock:", e);
+      // Stock movements are critical and must not be silently acknowledged.
+      throw e;
     }
   }
 
@@ -397,16 +672,95 @@ export class FirebaseDBService {
       console.log(`[FirebaseDBService] getSales() returning cached/realtime sales (${this.salesCache.length})`);
       this.getAll<Sale>('sales').then(fresh => {
         if (fresh && fresh.length !== this.salesCache?.length) {
-          this.salesCache = fresh.sort((a, b) => b.date.localeCompare(a.date));
+          this.salesCache = fresh.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
           window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: fresh.length } }));
         }
       }).catch(() => {});
       return this.salesCache;
     }
     const list = await this.getAll<Sale>('sales');
-    this.salesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.salesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     console.log(`[FirebaseDBService] getSales() fetched ${this.salesCache.length} sales from Firestore.`);
     return this.salesCache;
+  }
+
+  /**
+   * Fetch a date/status-filtered invoice page directly from Firestore. This
+   * deliberately bypasses salesCache so a partial list can never be mistaken
+   * for the complete sales history by PDV or accounting routines.
+   */
+  public async getSalesPage(options: SalesPageOptions = {}): Promise<PaginatedResult<Sale>> {
+    const constraints = this.getDateRangeConstraints('date', options);
+    if (options.status) constraints.unshift(where('status', '==', options.status));
+
+    return this.getOrderedPage<Sale>(
+      'sales',
+      'date',
+      'desc',
+      options.pageSize,
+      options.cursor,
+      constraints
+    );
+  }
+
+  /**
+   * Paginated full-period fetch for an explicit export/report only. Screens
+   * should use getSalesPage instead so opening a history list does not download
+   * every invoice ever issued.
+   */
+  public async getSalesForPeriod(options: Omit<SalesPageOptions, 'cursor' | 'pageSize'> = {}): Promise<Sale[]> {
+    const allSales: Sale[] = [];
+    let cursor: FirestorePageCursor | null = null;
+
+    do {
+      const page = await this.getSalesPage({ ...options, cursor, pageSize: 250 });
+      allSales.push(...page.items);
+      cursor = page.nextCursor;
+      if (!page.hasMore) break;
+    } while (cursor);
+
+    return allSales;
+  }
+
+  /** Server-side aggregation keeps invoice dashboard totals accurate without reading every sale. */
+  public async getSalesSummary(range: DateRangeQueryOptions = {}): Promise<SalesSummary> {
+    const statusAggregate = async (status: Sale['status']) => {
+      const aggregateQuery = query(
+        collection(db, 'sales'),
+        where('status', '==', status),
+        ...this.getDateRangeConstraints('date', range)
+      );
+      const snapshot = await getAggregateFromServer(aggregateQuery, {
+        recordCount: count(),
+        totalValue: sum('total')
+      });
+      const data = snapshot.data();
+      return {
+        count: Number(data.recordCount || 0),
+        total: Number(data.totalValue || 0)
+      };
+    };
+
+    const [paid, pending, credit, canceled] = await Promise.all([
+      statusAggregate('Paga'),
+      statusAggregate('Pendente'),
+      statusAggregate('Crédito'),
+      statusAggregate('Cancelada')
+    ]);
+
+    return {
+      totalInvoiced: paid.total + pending.total + credit.total,
+      paidInvoiced: paid.total,
+      // The existing invoice tabs expose Pendente separately from Crédito.
+      // Keep those labels truthful while still including credit invoices in the
+      // overall issued-total/count.
+      pendingInvoiced: pending.total,
+      canceledInvoiced: canceled.total,
+      totalCount: paid.count + pending.count + credit.count + canceled.count,
+      paidCount: paid.count,
+      pendingCount: pending.count,
+      canceledCount: canceled.count
+    };
   }
 
   public async addSale(s: Sale): Promise<void> {
@@ -569,7 +923,7 @@ export class FirebaseDBService {
     for (let i = 0; i < list.length; i += CHUNK) {
       const batch = writeBatch(db);
       for (const sale of list.slice(i, i + CHUNK)) {
-        const saleId = String(sale.id || sale.invoiceNumber || Date.now());
+        const saleId = String(sale.id || sale.invoiceNumber || uid('sale-'));
         batch.set(doc(db, 'sales', saleId), this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' }), { merge: true });
       }
       await batch.commit();
@@ -585,13 +939,15 @@ export class FirebaseDBService {
     return list.length;
   }
 
+
+
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
     if (this.lossesCache && this.lossesCache.length > 0) {
       return this.lossesCache;
     }
     const list = await this.getAll<LossRecord>('losses');
-    this.lossesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.lossesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.lossesCache;
   }
 
@@ -603,11 +959,11 @@ export class FirebaseDBService {
 
   // --- Product Transformations (Parte 4) ---
   public async getTransformations(): Promise<ProductTransformation[]> {
-    if (this.transformationsCache && this.transformationsCache.length >= 0) {
+    if (this.transformationsCache && this.transformationsCache.length > 0) {
       return this.transformationsCache;
     }
     const list = await this.getAll<ProductTransformation>('transformations');
-    this.transformationsCache = list.sort((a, b) => (b.date || b.createdAt).localeCompare(a.date || a.createdAt));
+    this.transformationsCache = list.sort((a, b) => safeStr(b.date || b.createdAt).localeCompare(safeStr(a.date || a.createdAt)));
     return this.transformationsCache;
   }
 
@@ -775,11 +1131,11 @@ export class FirebaseDBService {
 
   // --- Employees ---
   public async getEmployees(): Promise<Employee[]> {
-    if (this.employeesCache && this.employeesCache.length >= 0) {
+    if (this.employeesCache && this.employeesCache.length > 0) {
       return this.employeesCache;
     }
     const list = await this.getAll<Employee>('employees');
-    this.employeesCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.employeesCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.employeesCache;
   }
   public async saveEmployee(e: Employee): Promise<void> { 
@@ -793,11 +1149,11 @@ export class FirebaseDBService {
 
   // --- Attendance ---
   public async getAttendance(): Promise<Attendance[]> { 
-    if (this.attendanceCache && this.attendanceCache.length >= 0) {
+    if (this.attendanceCache && this.attendanceCache.length > 0) {
       return this.attendanceCache;
     }
     const list = await this.getAll<Attendance>('attendance');
-    this.attendanceCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.attendanceCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.attendanceCache;
   }
   public async saveAttendance(a: Attendance): Promise<void> { 
@@ -808,28 +1164,128 @@ export class FirebaseDBService {
   // --- Audit Logs ---
   public async getAuditLogs(): Promise<AuditLog[]> {
     const list = await this.getAll<AuditLog>('audit_logs');
-    return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return list.sort((a, b) => safeStr(b.timestamp).localeCompare(safeStr(a.timestamp)));
   }
+
+  /** Query active or archived audit history by period, one bounded page at a time. */
+  public async getAuditLogsPage(options: AuditLogPageOptions = {}): Promise<PaginatedResult<AuditLog>> {
+    const collectionName = options.source === 'archive' ? 'audit_logs_archive' : 'audit_logs';
+    return this.getOrderedPage<AuditLog>(
+      collectionName,
+      'timestamp',
+      'desc',
+      options.pageSize,
+      options.cursor,
+      this.getDateRangeConstraints('timestamp', options)
+    );
+  }
+
   /**
-   * O registo de auditoria é importante, mas NUNCA pode deitar abaixo a operação
-   * principal (venda, gravação de utilizador, etc.). Por isso o erro é engolido
-   * e apenas assinalado na consola.
+   * Fetch a complete selected period only when explicitly exporting it. The
+   * default audit screen must use getAuditLogsPage instead.
    */
-  public async addAuditLog(l: AuditLog): Promise<void> {
+  public async getAuditLogsForPeriod(
+    options: Omit<AuditLogPageOptions, 'cursor' | 'pageSize'> = {}
+  ): Promise<AuditLog[]> {
+    const allLogs: AuditLog[] = [];
+    let cursor: FirestorePageCursor | null = null;
+
+    do {
+      const page = await this.getAuditLogsPage({ ...options, cursor, pageSize: 250 });
+      allLogs.push(...page.items);
+      cursor = page.nextCursor;
+      if (!page.hasMore) break;
+    } while (cursor);
+
+    return allLogs;
+  }
+
+  /**
+   * Moves one safe batch of old logs to a separate collection. Every source
+   * record is copied and deleted in the same atomic Firestore batch, so a failed
+   * commit leaves the live log untouched. No audit record is silently discarded.
+   */
+  public async archiveAuditLogsBefore(
+    cutoffDate: string,
+    requestedBatchSize?: number
+  ): Promise<AuditArchiveResult> {
+    const cutoffTimestamp = getArchiveCutoffTimestamp(cutoffDate);
+    const batchSize = getSafeArchiveBatchSize(requestedBatchSize);
+    const sourceQuery = query(
+      collection(db, 'audit_logs'),
+      where('timestamp', '<', cutoffTimestamp),
+      orderBy('timestamp', 'asc'),
+      // One sentinel document lets the UI say truthfully whether another safe
+      // archive click is needed, without exceeding the write-batch limit.
+      limit(batchSize + 1)
+    );
+    const snapshot = await getDocs(sourceQuery);
+    const documentsToArchive = snapshot.docs.slice(0, batchSize);
+
+    if (documentsToArchive.length === 0) {
+      return { archivedCount: 0, hasMore: false, cutoffTimestamp };
+    }
+
+    const archivedAt = new Date().toISOString();
+    const batch = writeBatch(db);
+    documentsToArchive.forEach(sourceDocument => {
+      const sourceLog = this.recordFromSnapshot<AuditLog>(sourceDocument);
+      const archivedRecord = this.sanitizeData({
+        ...sourceLog,
+        id: sourceLog.id || sourceDocument.id,
+        archivedAt,
+        archivedFrom: 'audit_logs'
+      });
+      batch.set(doc(db, 'audit_logs_archive', sourceDocument.id), archivedRecord);
+      batch.delete(sourceDocument.ref);
+    });
+
+    await batch.commit();
+    window.dispatchEvent(new CustomEvent('db-update', {
+      detail: { table: 'audit_logs', action: 'archived', count: documentsToArchive.length }
+    }));
+    window.dispatchEvent(new CustomEvent('db-update', {
+      detail: { table: 'audit_logs_archive', action: 'archived', count: documentsToArchive.length }
+    }));
+
+    return {
+      archivedCount: documentsToArchive.length,
+      hasMore: snapshot.docs.length > batchSize,
+      cutoffTimestamp
+    };
+  }
+
+  /**
+   * Records an audit event without invalidating an already completed business
+   * action. If the audit collection is temporarily unavailable, the record is
+   * retained locally and sent again later.
+   *
+   * Returns true when Firestore accepted the record immediately and false when
+   * it was safely deferred.
+   */
+  public async addAuditLog(l: AuditLog): Promise<boolean> {
+    // Persist first so auditability is retained even when Firestore keeps an
+    // offline write pending for a long time.
+    this.queueAuditLog(l);
     try {
       await this.upsert('audit_logs', l.id, l);
-    } catch (e) {
-      console.warn('[FirebaseDBService] Falha ao registar log de auditoria:', e);
+      this.removePendingAuditLog(l.id);
+      // A working write is a good opportunity to retry earlier deferred logs.
+      void this.flushPendingAuditLogs();
+      return true;
+    } catch (error) {
+      console.warn('[FirebaseDBService] Audit log deferred; the original operation remains successful:', error);
+      return false;
     }
   }
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
-    if (this.activeSessionsCache && this.activeSessionsCache.length >= 0) {
+    if (this.activeSessionsCache && this.activeSessionsCache.length > 0) {
       return this.activeSessionsCache;
     }
     const list = await this.getAll<ActiveSession>('active_sessions');
-    this.activeSessionsCache = list.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+    this.activeSessionsCache = list.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
     return this.activeSessionsCache;
   }
   public async saveActiveSession(s: ActiveSession): Promise<void> { 
@@ -890,7 +1346,14 @@ export class FirebaseDBService {
       }
     } catch(e) {}
     const def = this.getDefaultSettings();
-    await this.saveSettings(def);
+    // As configurações por omissão mantêm a aplicação utilizável mesmo quando
+    // a primeira escrita falha (offline / permission-denied). Persistir o valor
+    // é secundário e não pode transformar o arranque numa rejeição não tratada.
+    try {
+      await this.saveSettings(def);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Não foi possível persistir as configurações por omissão:', error);
+    }
     return def;
   }
 
@@ -918,7 +1381,7 @@ export class FirebaseDBService {
 
     const list = await this.getAll<UserCredentials>('credentials');
     if (list && list.length > 0) {
-      this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
+      this.credentialsCache = list.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
       safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
       return this.credentialsCache;
     }
@@ -953,7 +1416,7 @@ export class FirebaseDBService {
     } else {
       this.credentialsCache.push(c);
     }
-    this.credentialsCache.sort((a, b) => a.username.localeCompare(b.username));
+    this.credentialsCache.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
     safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
   }
 
@@ -971,7 +1434,7 @@ export class FirebaseDBService {
       return this.payrollCache;
     }
     const list = await this.getAll<PayrollPayment>('payroll_payments');
-    this.payrollCache = list.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+    this.payrollCache = list.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
     return this.payrollCache;
   }
   public async savePayrollPayment(p: PayrollPayment): Promise<void> { 
@@ -983,7 +1446,7 @@ export class FirebaseDBService {
   public async getCustomers(): Promise<Customer[]> {
     if (this.customersCache) return this.customersCache;
     const list = await this.getAll<Customer>('customers');
-    this.customersCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.customersCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.customersCache;
   }
   public async saveCustomer(c: Customer): Promise<void> { await this.upsert('customers', c.id, c); this.customersCache = null; }
@@ -995,7 +1458,7 @@ export class FirebaseDBService {
       return this.pausedSalesCache;
     }
     const list = await this.getAll<PausedSale>('paused_sales');
-    this.pausedSalesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.pausedSalesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.pausedSalesCache;
   }
   public async savePausedSale(ps: PausedSale): Promise<void> { 
@@ -1017,6 +1480,7 @@ export class FirebaseDBService {
       employees,
       attendance,
       audit_logs,
+      audit_logs_archive,
       settings,
       credentials,
       payroll_payments,
@@ -1030,6 +1494,7 @@ export class FirebaseDBService {
       this.getEmployees(),
       this.getAttendance(),
       this.getAuditLogs(),
+      this.getAuditLogsForPeriod({ source: 'archive' }),
       this.getSettings(),
       this.getCredentials(),
       this.getPayrollPayments(),
@@ -1049,6 +1514,7 @@ export class FirebaseDBService {
         employees: employees.length,
         attendance: attendance.length,
         audit_logs: audit_logs.length,
+        audit_logs_archive: audit_logs_archive.length,
         payroll_payments: payroll_payments.length,
         customers: customers.length,
         paused_sales: paused_sales.length
@@ -1061,6 +1527,7 @@ export class FirebaseDBService {
         employees,
         attendance,
         audit_logs,
+        audit_logs_archive,
         settings: settings ? [settings] : [],
         credentials,
         payroll_payments,
@@ -1099,6 +1566,9 @@ export class FirebaseDBService {
     }
     if (Array.isArray(data.audit_logs) && data.audit_logs.length > 0) {
       await this.upsertBatch('audit_logs', data.audit_logs);
+    }
+    if (Array.isArray(data.audit_logs_archive) && data.audit_logs_archive.length > 0) {
+      await this.upsertBatch('audit_logs_archive', data.audit_logs_archive);
     }
     if (Array.isArray(data.credentials) && data.credentials.length > 0) {
       await this.upsertBatch('credentials', data.credentials);

@@ -1,8 +1,9 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import { uid } from '../utils/idHelper';
+import Toast from './Toast';
 import { Employee, PerformanceRecord, ContractType } from '../types';
 import { describeError } from '../utils/errorHelper';
-import { uid } from '../utils/idHelper';
 
 interface EmployeeDetailModalProps {
   employee: Employee;
@@ -232,13 +233,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
 
   return (
     <div className="fixed inset-0 bg-slate-900/70 z-50 flex items-center justify-center p-4 backdrop-blur-sm transition-all animate-fade-in" id="employee_detail_modal">
-      {/* Dynamic Toast inside Modal */}
-      {toastMsg && (
-        <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 bg-emerald-800 text-white font-bold text-xs px-4 py-2.5 rounded-full shadow-2xl flex items-center gap-2 border border-emerald-600">
-          <span className="material-symbols-outlined text-sm">check_circle</span>
-          {toastMsg}
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]) */}
+      <Toast message={toastMsg} type="success" onDismiss={() => setToastMsg('')} />
 
       {/* Expandable/Collapsible Content Panel */}
       <div className={`bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200 transition-all duration-300 flex flex-col ${

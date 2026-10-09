@@ -110,7 +110,52 @@ export function validateAccessPassword(password: string): { strong: boolean; mes
     return { strong: false, message: 'A palavra-passe não pode conter espaços.' };
   }
   if (!/^[A-Za-zÀ-ÿ0-9@#$%&*!?._-]+$/.test(value)) {
-    return { strong: false, message: 'A palavra-passe só pode conter letras e números.' };
+    return { strong: false, message: 'A palavra-passe só pode conter letras, números e os símbolos @#$%&*!?._- .' };
   }
   return { strong: true };
+}
+
+/**
+ * Decisão de palavra-passe no formulário de utilizadores.
+ *
+ * MOTIVO: na edição, o campo era preenchido com o hash guardado e, ao gravar, o
+ * hash/senha antiga era tratado como palavra-passe NOVA e rejeitado pela política
+ * de 4 a 6 caracteres — bloqueando a gravação de contas antigas.
+ *
+ * Regras:
+ *  - edição + campo vazio                 → MANTER a palavra-passe actual;
+ *  - edição + campo igual ao hash guardado → MANTER (o hash foi carregado pelo UI);
+ *  - criação (ou alteração real)           → validar pela política oficial e HASHEAR.
+ */
+export type PasswordDecision =
+  | { action: 'keep'; hash: string }
+  | { action: 'set'; password: string }
+  | { action: 'invalid'; message: string };
+
+export function decidePasswordUpdate(
+  editing: { passwordHash: string } | null | undefined,
+  typedRaw: string
+): PasswordDecision {
+  const typed = (typedRaw || '').trim();
+
+  if (editing) {
+    if (!typed || typed === editing.passwordHash) {
+      return { action: 'keep', hash: editing.passwordHash };
+    }
+    if (typed.startsWith('sha256:')) {
+      // O operador não escreve hashes à mão: é o valor antigo carregado pelo UI.
+      return { action: 'keep', hash: editing.passwordHash };
+    }
+    const policy = validateAccessPassword(typed);
+    if (!policy.strong) {
+      return { action: 'invalid', message: policy.message || 'Palavra-passe inválida.' };
+    }
+    return { action: 'set', password: typed };
+  }
+
+  const policy = validateAccessPassword(typed);
+  if (!policy.strong) {
+    return { action: 'invalid', message: policy.message || 'Palavra-passe inválida.' };
+  }
+  return { action: 'set', password: typed };
 }

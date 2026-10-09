@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { uid } from '../utils/idHelper';
 import { Product, ProductTransformation, TransformationItem, SystemSettings } from '../types';
 import { dbService } from '../utils/firebaseDB';
 import { getSingularUnit } from '../utils/unitHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { uid } from '../utils/idHelper';
 
 interface TransformationModalProps {
   isOpen: boolean;
@@ -319,7 +319,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
       await dbService.addTransformationWithStockUpdate(transformationRecord, itemsToCredit, originalDeduction);
 
       // Log audit
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,

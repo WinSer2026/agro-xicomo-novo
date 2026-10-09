@@ -1,182 +1,110 @@
-# Plano de Correcção — AGRO • XICOMO & SERVIÇOS, LDA
+# Plano de Correcção — Falhas Silênciosas no AGRO XICOMO
 
 **Data:** 2026-10-08
-**Ramo:** `arena/0b139fa1-agro-xicomo-novo`
-**Estado:** correcções implementadas, testadas (`npm run test`) e compiladas (`npm run build` / `tsc --noEmit` sem erros).
+**Problemas reportados:**
+1. **Vendas antigas / lançamento retroactivo** — clicar em «Finalizar Registo Retroativo» não dá qualquer feedback visível.
+2. **Painel de Técnico → Definições → Utilizadores** — clicar em «Gravar» após alterar um utilizador mostra mensagem de erro.
+
+**Pedido adicional:** procurar problemas idênticos em todo o sistema e apresentar o plano de correcção de tudo.
 
 ---
 
-## 1. Os dois problemas relatados
+## 1. Diagnóstico — Causa Raiz Comum
 
-### 1.1. "Vendas antigas": clicar em **Finalizar Registo Retroativo** não faz nada
+Os dois sintomas aparentam ser bugs diferentes, mas resultam da mesma família de defeitos:
+**«falhas silênciosas»** — a aplicação até tenta fazer a coisa certa, mas o resultado (sucesso ou
+erro) nunca chega aos olhos do operador, ou a operação é bloqueada por uma validação inesperada.
 
-**Causa raiz (3 defeitos somados):**
+### 1.1 Porque «nada acontece» na venda retroativa
 
-| # | Defeito | Onde |
-|---|---------|------|
-| A | **O aviso de erro ficava escondido debaixo do modal.** O toast era desenhado com `z-50` na linha 1693 do `PDVModule`, e o modal de ecrã inteiro também é `z-50` mas aparece *depois* no DOM — com `z-index` igual ganha o elemento que vem atrás. O modal é opaco (`bg-slate-900/95`) e cobre o ecrã todo, por isso a mensagem de erro (e a de sucesso) nunca era vista. | `src/components/PDVModule.tsx` |
-| B | **A mensagem era genérica** — `"Erro ao registar a venda antiga."` — sem dizer o motivo nem o que fazer. | `handleFinalizeRetroactiveSale` |
-| C | **Nada impedia cliques repetidos** e **não havia qualquer indicador de progresso**. Se a ligação estiver lenta ou sem rede, a promessa do Firestore fica pendente e o botão parecia "morto". | `handleFinalizeRetroactiveSale` |
+| # | Causa | Efeito |
+|---|-------|--------|
+| A | O toast é renderizado dentro da página (`z-50`), **antes** no DOM dos modais de ecrã inteiro (`z-50` / `z-[100]`). Com z-index igual, o modal (mais tardio no DOM) cobre o toast. | Qualquer erro/sucesso na venda retroativa acontece, mas a notificação fica **escondida atrás do modal opaco**. Para o operador, «não aconteceu nada». |
+| B | O botão não tem estado de carregamento nem proteção contra duplo clique. | Um clique que dispare uma escrita lenta parece um clique morto; cliques repetidos podem criar escritas concorrentes. |
+| C | O Firestore, quando está sem ligação (loja «sem energia»/rede instável — exatamente o cenário do registo retroativo), deixa as escritas `setDoc`/`batch.commit()` **penduradas para sempre** (a promise só resolve com confirmação do servidor). Sem watchdog, o sistema fica mudo. |
+| D | `new Date(retroactiveDateTime).toISOString()` lança `RangeError` com data inválida e não há validação de data futura. | Erro capturado mas invisível (ver A). |
+| E | IDs gerados com `'sale-retro-' + Date.now()` / `'log-' + Date.now()`. | Registos criados no mesmo milissegundo colidem no Firestore e **sobrescrevem-se silenciosamente** (venda/log perdido). |
 
-**Correcção aplicada:**
+### 1.2 Porque a gravação de utilizadores dá erro
 
-- O erro passa a ser mostrado **dentro do modal** (faixa vermelha por cima do botão) e o toast passou a ser desenhado num portal no `<body>` com `z-[9999]`, ficando **sempre acima de qualquer modal**.
-- Mensagens accionáveis traduzidas do código de erro do Firestore (`permission-denied`, `unavailable`, …) — criado `src/utils/errorHelper.ts`.
-- Botão desactivado durante a gravação, com texto **"A gravar…"** e spinner.
-- **Watchdog de 8 s:** se a gravação não terminar, aparece o aviso *"A gravação está a demorar — a ligação pode estar lenta ou sem internet. NÃO feche esta janela…"*.
-- **O stock deixou de ser descontado produto a produto.** Antes, se a gravação da venda falhasse a meio, o stock já tinha saído e ficava divergente da facturação. Agora a venda e a saída de stock são escritas **no mesmo lote atómico** (`addSaleWithStockDeduction`).
-- O registo de auditoria deixou de poder deitar a operação abaixo.
-- Validação da data (rejeita datas inválidas e datas futuras).
-- O modal só fecha em caso de sucesso.
+| # | Causa | Efeito |
+|---|-------|--------|
+| F | `startEditUser` carrega o `passwordHash` guardado (ex.: `sha256:salt:hash` ou senha antiga em texto simples como `gestor123`) **para dentro do campo da palavra-passe**. | Ao clicar em «Gravar», o sistema trata o hash/senha antiga como se fosse uma **palavra-passe nova** e submete-a à política oficial (4–6 caracteres). Contas antigas (senhas com mais de 6 caracteres ou qualquer hash que não comece por `sha256:`) são rejeitadas → mensagem de erro. |
+| G | Não existe validação de username duplicado. | É possível criar dois «admin»/«Vanda» que depois colidem no login (case-insensitive). |
+| H | `hashPassword()` é chamado **fora** do `try/catch` e os erros do Firestore são mostrados como «Erro ao gravar utilizador.» sem causa. | Erros reais (permissão, rede, quota) ficam sem tradução — o técnico não sabe o que fazer. |
 
-### 1.2. Painel do Técnico → Definições → Utilizadores → **Gravar** dá erro
+### 1.3 Problemas idênticos encontrados em todo o sistema
 
-**Causa raiz (2 defeitos principais + 1 secundário):**
-
-| # | Defeito | Consequência |
-|---|---------|--------------|
-| A | Ao carregar em EDITAR, **o hash da palavra-passe era colocado dentro do campo** (`setUsrPassword(user.passwordHash)`). O campo tem `maxLength={6}` e a validação exige 4 a 6 caracteres: qualquer conta cujo hash não começe por `sha256:` (contas antigas em texto simples, ou contas criadas pelo assistente de IA) **falhava sempre a validação** e o técnico via "Erro" sem perceber porquê. | Gravação bloqueada |
-| B | **Mensagem genérica** `'Erro ao gravar utilizador.'` — escondia o motivo real (regras do Firestore, sem rede, etc.). | Diagnóstico impossível |
-| C | **Não havia validação de utilizador duplicado** — gravar `maria` quando já existe `Maria` criava dois registos diferentes (o login é *case-insensitive*). | Contas duplicadas |
-
-**Correcção aplicada:**
-
-- O campo da palavra-passe passa a ficar **vazio em modo de edição** (`"Deixe em branco para manter a actual"`). Se não escrever nada, a palavra-passe actual é preservada — incluindo as contas antigas em texto simples.
-- Ao criar, a palavra-passe continua a ser obrigatória e validada pela política oficial (4 a 6 caracteres).
-- **Utilizador duplicado recusado** com mensagem clara (`case-insensitive`).
-- Ao editar, o `id` do registo existente é reaproveitado — nunca se cria um registo paralelo.
-- Mensagens de erro accionáveis (regras de segurança, sem ligação, quota, …).
-- O log de auditoria deixou de poder bloquear a gravação.
-- Botão desactivado durante a gravação ("A gravar…"), impedindo duplo clique.
+| # | Problema | Onde |
+|---|----------|------|
+| I | **Toast sempre atrás dos modais** (mesmo defeito de A) | `PDVModule`, `StockModule`, `TechnicalModule`, `FaturasModule`, `FinanceModule`, `HRModule`, `TransformationView` — 7 módulos com toast `z-50` inline. No PDV o toast nem sequer é renderizado na tab «Relatórios». |
+| J | **`window.confirm` / `window.prompt` bloqueados em iframes sandbox** (o próprio código do PDV já tem um comentário a admitir isto) → botões que «não fazem nada» | `TechnicalModule` (7 usos: limpar sessões, backup, zerar sistema, fechar exercício, novo exercício, restaurar backup…), `StockModule` (2 usos: gerar referências), `TransformationView` (1 uso: anular transformação). O PDV/Faturas já usam diálogos próprios — os restantes não. |
+| K | **IDs por `Date.now()`** (62 ocorrências) — colisões silenciosas de vendas, logs de auditoria, utilizadores, clientes, sessões | Todos os módulos + utilitários. |
+| L | **Ordenações com `campo.localeCompare()` sem proteção** — um único registo legado sem `date`/`createdAt` rebenta `getSales()`/`getLosses()`/etc. e todas as operações dependentes falham com erro invisível | `firebaseDB.ts` (24 sorts). Ex.: `getPausedSales` ordena por `b.date` enquanto o listener usa `createdAt \|\| date`. |
+| M | **Caches com `length >= 0`** — devolvem arrays vazios congelados para sempre (dados novos nunca aparecem sem reiniciar) | `getSales`, `getLosses`, `getTransformations`, `getPayrollPayments`, `getPausedSales`. |
+| N | **`testConnection()` devolve sempre sucesso falso** (`{ success: true, latencyMs: 38 }` hardcoded) | Painel de Técnico → Nuvem: o técnico acredita que a ligação está boa quando não está. |
+| O | **`getProducts()` devolve referências partilhadas da cache** — módulos que fazem `prod.stockQty = …` sujam a cache mesmo quando a gravação falha | `firebaseDB.ts`. |
+| P | **Auditoria pode deitar abaixo a operação principal** e mensagens de erro genéricas («Erro ao gravar.») sem causa nem acção | Vários módulos. |
+| Q | Sem indicador global de **«Sem ligação à internet»** — o operador não sabe que as escritas estão a acumular pendências | `App.tsx`. |
 
 ---
 
-## 2. Problemas idênticos encontrados em todo o sistema
+## 2. Plano de Correcção (executado nesta sessão)
 
-Foram identificados **8 padrões de defeito** que se repetiam em todos os módulos. Todos foram corrigidos.
+### Fase 1 — Infraestrutura de feedback (novos ficheiros)
+- [x] `src/utils/idHelper.ts` — `uid(prefix)` com timestamp + sequência + aleatório (fim das colisões **K**).
+- [x] `src/utils/errorHelper.ts` — `describeError()` traduz códigos do Firestore (`permission-denied`, `unavailable`, …) para mensagens accionáveis em PT (**H/P**).
+- [x] `src/components/Toast.tsx` — toast global via `createPortal` para `document.body` com `z-[9999]` (fica **sempre por cima** dos modais) (**A/I**).
+- [x] `src/components/ConfirmDialog.tsx` — diálogo de confirmação próprio (substitui `window.confirm` bloqueado em iframes) (**J**).
 
-### P1 — Toasts escondidos atrás dos modais (idêntico ao problema 1.1-A) — **7 módulos**
+### Fase 2 — Bug 1: venda retroativa
+- [x] Estado de gravação no botão («A gravar…», duplo-clique bloqueado) (**B**).
+- [x] **Erro visível dentro do modal** (nunca depende só do toast) (**A**).
+- [x] Validação da data/hora (inválida ou futura) antes de gravar (**D**).
+- [x] Watchdog de 8 s: se o Firestore não responder, o operador é avisado («a ligação está lenta…») em vez de ver um botão morto (**C**).
+- [x] IDs únicos via `uid()` (**E**) + `createdAt` separado da data real da venda.
+- [x] Escrita atómica venda+stock mantida (já existente), auditoria não bloqueante.
 
-`PDVModule`, `FaturasModule`, `FinanceModule`, `HRModule`, `StockModule`, `TechnicalModule`, `TransformationView`.
-Todos desenhavam `fixed bottom-6 right-6 z-50` e todos tinham modais `z-50` declarados depois no DOM.
-**Efeito em produção:** qualquer gravação que falhasse dentro de um modal (criar produto, gravar funcionário, processar salário, registar quebra, aplicar alterações de IA…) dava exactamente a mesma sensação de **"carreguei e não aconteceu nada"**.
-**Correcção:** componente único `src/components/Toast.tsx` (portal para `<body>`, `z-[9999]`, botão de fechar, duração maior para erros).
+### Fase 3 — Bug 2: utilizadores
+- [x] Na edição, o campo da palavra-passe **fica vazio** — vazio = manter a palavra-passe atual (**F**).
+- [x] A política oficial (4–6 caracteres) só é aplicada a uma palavra-passe **nova**; hashes/senhas legadas deixam de bloquear a gravação (**F**).
+- [x] Validação de username duplicado (case-insensitive) (**G**).
+- [x] `hashPassword` dentro do `try`; erros traduzidos e accionáveis (**H**).
 
-### P2 — `window.confirm()` / `prompt()` / `alert()` bloqueados em iframes — **17 ocorrências**
+### Fase 4 — Problemas idênticos no resto do sistema
+- [x] `Toast` portal em todos os módulos com notificações (PDV, Stock, Technical, Faturas, Finance, HR, TransformationView) — o toast do PDV passa a ser global (visível em qualquer tab e sobre qualquer modal) (**I**).
+- [x] `ConfirmDialog` + `askConfirm` em todos os `window.confirm` restantes (Technical ×7, Stock ×2, TransformationView ×1) (**J**).
+- [x] Substituição sistemática de IDs `Date.now()` por `uid()` em todo o código (62 pontos) (**K**).
+- [x] `firebaseDB.ts`: ordenações defensivas (1 registo inválido já não rebenta listas), caches `length > 0`, `getProducts()` com cópias, `addAuditLog` nunca lança, `testConnection`/`probeDatabaseHealth` com sonda real de escrita+leitura, `isOnline()` (**L/M/N/O/P**).
+- [x] `App.tsx`: banda global «Sem ligação à internet» quando `navigator.onLine` é falso (**Q**).
 
-O navegador bloqueia estas funções quando a aplicação corre dentro de um iframe com `sandbox` (pré-visualizações, AI Studio, incorporações). `window.confirm()` devolve sempre `false` e `alert()` não mostra nada → **o clique parece não fazer nada**.
-Encontrados em: `TechnicalModule` (6), `StockModule` (2 + 1 `prompt` de autorização de stock), `TransformationView` (1), `StockAIEntry` (7 `alert`).
-**Correcção:** novo componente `src/components/ConfirmDialog.tsx` (com confirmação escrita — "ELIMINAR" / "ZERAR" — nas operações destrutivas) e janela própria de palavra-passe no ajuste directo de stock.
-
-### P3 — Mensagens de erro genéricas — **~25 ocorrências**
-
-`'Erro ao gravar.'` / `'Erro ao cadastrar produto.'` / `'Erro ao processar o pagamento.'` etc., sem motivo nem acção seguinte.
-**Correcção:** `describeError()` converte códigos do Firestore em português corrente, com dica concreta (ex.: *"A base de dados recusa escritas (regras de segurança). É necessário publicar as regras do Firestore..."*). Aplicado em todos os módulos.
-
-### P4 — Ids duplicados que se sobrepunham em silêncio — **61 pontos**
-
-Ids gerados com `'log-' + Date.now()`, `'sale-' + Date.now()`, etc. Vários registos no mesmo milissegundo recebiam o **mesmo id** e, como o Firestore grava por id, sobrescreviam-se sem aviso — vendas perdidas e rasto de auditoria incompleto (havia 36 pontos só de logs de auditoria).
-**Correcção:** `src/utils/idHelper.ts` (`uid('log-')` = timestamp + sequência + aleatório), aplicado nos 61 pontos.
-
-### P5 — Escritas não atómicas (stock descontado antes de gravar a venda)
-
-`PDVModule` (venda antiga). A venda e o movimento de stock devem ser atómicos.
-**Correcção:** lote único (`addSaleWithStockDeduction`), com fallback.
-
-### P6 — Cache que nunca era revalidada — **4 métodos**
-
-`getSales()`, `getLosses()`, `getPayrollPayments()` e `getPausedSales()` usavam `if (cache && cache.length >= 0)`. Como `length` nunca é negativo, a condição era **sempre verdadeira** — se a cache chegasse vazia, o sistema devolvia zero registos para sempre (vendas "desapareciam" e a numeração das facturas voltava ao 0001).
-**Correcção:** `> 0`.
-
-### P7 — Cache partilhada corrompida por alterações no próprio objecto
-
-`getProducts()` devolvia os objectos da cache por referência; vários módulos fazem `prod.stockQty = …` antes de gravar. Se a gravação falhasse, a alteração ficava "suja" na cache.
-**Correcção:** `getProducts()` devolve cópias superficiais.
-
-### P8 — Falta de feedback de ligação
-
-O painel dizia sempre "sincronizado" (`isSSEActive()` devolvia `true` fixo) e o teste de ligação ao Firebase devolvia sempre sucesso falso com latência inventada (38 ms).
-**Correcção:**
-- `probeDatabaseHealth()` faz uma sonda real (escreve, lê e apaga um documento de saúde) e devolve o erro verdadeiro; `testConnection()` passou a usá-la.
-- Banda amarela global **"Sem ligação à internet"** em `App.tsx` quando `navigator.onLine` é falso.
-- `isSSEActive()` / `getPendingCount()` passaram a reflectir o estado real do navegador.
-
-### Extra — Correcções de modelo de dados (erros de compilação latentes)
-
-`tsc --noEmit` falhava em 8 pontos (campos usados em runtime mas ausentes dos tipos). Corrigido:
-- `SaleItem.category` (usado pelo PDV e pelos relatórios);
-- `LossRecord.reason` — acrescentado `'Deterioração'` (já era usado no Stock);
-- `PayrollPayment.date` e `PausedSale.createdAt` — campos legados usados nas ordenações.
+### Fase 5 — Verificação
+- [x] `npx tsc --noEmit` sem erros.
+- [x] `npm test` (suite master + novos testes das helpers de id/erro/decisão de palavra-passe).
 
 ---
 
-## 3. Ficheiros criados
+## 3. Riscos e decisões técnicas
 
-| Ficheiro | Função |
-|----------|--------|
-| `src/utils/errorHelper.ts` | Tradução de erros do Firestore para linguagem corrente + `describeError()` |
-| `src/utils/idHelper.ts` | `uid()` — ids únicos (fim das sobreposições silenciosas) |
-| `src/components/Toast.tsx` | Toast global num portal (`z-[9999]`) — nunca fica atrás de modais |
-| `src/components/ConfirmDialog.tsx` | Caixa de confirmação própria (substitui `window.confirm`), com confirmação escrita nas operações destrutivas |
-| `test/firestoreMock.ts` | Firestore em memória para os testes |
-| `test/setup.ts`, `vitest.config.ts` | Infra-estrutura de testes |
-| `test/pdv.retroactive.test.tsx` | Venda antiga: gravação correcta |
-| `test/technical.users.test.tsx` | Utilizadores: criar e editar sem alterar a senha |
-| `test/failuremodes.test.tsx` | Regressões: escrita rejeitada, sem rede, senha legada, duplicados |
-
----
-
-## 4. Como verificar (2 minutos)
-
-```bash
-npm install
-npm run test     # 8 testes de regressão — todos a passar
-npm run lint     # tsc --noEmit — 0 erros
-npm run build    # compila sem erros
-npm run dev      # http://localhost:3000
-```
-
-Na aplicação:
-1. **PDV → "Venda Antiga"** → adicionar artigo → **Finalizar Registo Retroativo**: o botão passa a "A gravar…", e em caso de falha o motivo aparece **dentro do modal**.
-2. **Painel do Técnico → Definições → Utilizadores** → EDITAR → **Guardar Alterações** (sem tocar na senha): grava e mantém a senha actual.
-3. **Painel do Técnico → Nuvem/Firebase → Testar ligação**: passou a fazer uma sonda real e a mostrar o erro verdadeiro.
+1. **Não abortamos escritas do Firestore por timeout** — um watchdog que cancelasse a
+   escrita poderia duplicar vendas (o operador repetia). O watchdog apenas **informa**;
+   a escrita continua em segundo plano e o fluxo trata do resultado quando ele chegar.
+2. **Palavra-passe vazia na edição = manter atual** — comportamento padrão de painéis de
+   administração; evita rejeitar contas antigas e evita reescrever hashes sem necessidade.
+3. **IDs únicos com `uid()`** são retro-compatíveis (`prefixo + base36 + sequência + aleatório`)
+   e não alteram a semântica de IDs existentes — apenas impedem colisões futuras.
+4. **`window.confirm` substituído** por diálogo React próprio: em iframes sandbox (e em
+   navegadores com políticas restritivas) o `confirm()` nativo é bloqueado ou suprimido,
+   o que se traduz em botões que «não fazem nada».
 
 ---
 
-## 5. O que falta fazer (recomendações por prioridade)
+## 4. Recomendações futuras (fora do âmbito desta correcção)
 
-### 🔴 Prioridade Alta — resolver na infra-estrutura
-
-1. **Publicar as regras do Firestore.** O ficheiro `firestore.rules` deste repositório permite leitura e escrita, mas se essas regras não estiverem publicadas na base de dados `ai-studio-remixagroxicomoe-…` do projecto `gen-lang-client-0896153566`, **todas as gravações falham com `permission-denied`** — o que explica o erro no painel do técnico.
-   Acção: `firebase deploy --only firestore:rules` (ou publicar no console) e depois confirmar em
-   *Painel do Técnico → Nuvem/Firebase → Testar ligação*.
-   Com as correcções feitas, se o problema for este, a aplicação passa a dizê-lo por extenso.
-
-2. **Confirmar que o projeto Firebase aceita o domínio de produção.** Se a app corre num domínio Vercel, verificar as restrições de `Referer`/`API key` na consola Google Cloud.
-
-### 🟠 Prioridade Média
-
-3. **Numeração sequencial de facturas em concorrência.** `generateNextInvoiceNumber()` calcula o próximo número a partir da lista de vendas em cache; dois terminais a facturar ao mesmo tempo podem gerar o mesmo número. Recomenda-se passar a um contador no Firestore dentro de uma transacção (`runTransaction`).
-
-4. **Fila de sincronização explícita.** Hoje o Firestore guarda as escritas pendentes localmente, mas a aplicação não mostra quantas ficaram por sincronizar. Vale a pena mostrar o contador real (`waitForPendingWrites`) na barra de estado.
-
-5. **Substituir os modais `securityModal` do módulo de Facturas** pelo `ConfirmDialog` (já existe essa intenção no código) para uniformizar o comportamento.
-
-### 🟡 Prioridade Baixa / Manutenção
-
-6. **`src/utils/indexedDB.ts` (1993 linhas) não é usado** — era a camada antiga. Pode ser removido depois de confirmar que nenhum ambiente de produção depende dele.
-7. **Os scripts `fix_pdv.cjs`, `fix_pdv_more.cjs`, `fix_stock_loss.cjs`, `replace_double_a5.cjs`, `pdv.patch`, `update_stock.patch`** na raiz já foram aplicados; podem ser arquivados.
-8. **O `fetch('/api/gemini/technician-ai')`** usado pelo assistente de IA e pela entrada de stock por IA devolve 404 quando o servidor não expõe esse endpoint. Vale a pena devolver uma mensagem apresentável quando o backend não está disponível.
-
----
-
-## 6. Nota sobre a metodologia
-
-Os dois problemas relatados não eram "um botão que não funciona": eram **falhas silenciosas** — a operação corria, falhava (ou ficava pendente), e o resultado nunca chegava ao ecrã. Por isso a correcção não foi só "arranjar o botão", mas sim:
-
-1. **Nunca esconder um erro** (portal com `z-index` superior a todos os modais);
-2. **Nunca mostrar um erro sem solução** (mensagens accionáveis traduzidas do Firestore);
-3. **Nunca deixar o utilizador sem saber que o sistema está a trabalhar** (estado "A gravar…" + watchdog de 8 s + banda de "Sem ligação");
-4. **Nunca deixar dados a meio** (escritas atómicas de venda + stock, ids únicos, auditoria não bloqueante).
-
-Estes quatro princípios foram aplicados a todo o sistema, não apenas aos dois ecrãs relatados.
+- Migrar o estado global de toasts para um único `ToastProvider` (React Context) e
+  simplificar o estado duplicado em cada módulo.
+- Adicionar testes E2E (Playwright) sobre os fluxos críticos: venda PDV, venda retroativa,
+  gravação de utilizador, cancelamento/liquidação de fatura.
+- Revisar as regras do Firestore (`firestore.rules` está `allow read, write: if true`) —
+  em produção deve existir autenticação e regras por coleção.
+- Introduzir fila offline persistente com reenvio automático para operações críticas.

@@ -2,10 +2,10 @@
  * Gerador de identificadores únicos.
  *
  * MOTIVO: o sistema gerava ids com `'log-' + Date.now()`, `'sale-' + Date.now()`, etc.
- * Vários registos criados no mesmo milissegundo (ex.: vários logs de auditoria na
- * mesma operação, ou duas vendas em terminais diferentes) recebiam EXACTAMENTE o
- * mesmo id e, como o Firestore grava por id, uns sobrescreviam os outros de forma
- * silenciosa — perda de vendas e de rasto de auditoria.
+ * Vários registos criados no mesmo milissegundo (vários logs de auditoria na mesma
+ * operação, duas vendas em terminais diferentes, cliques rápidos) recebiam EXACTAMENTE
+ * o mesmo id e, como o Firestore grava por id, uns sobrescreviam os outros em silêncio —
+ * perda de vendas e de rasto de auditoria.
  */
 
 let sequence = 0;

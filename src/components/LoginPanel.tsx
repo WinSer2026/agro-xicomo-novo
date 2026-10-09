@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
@@ -6,7 +7,6 @@ import { getUserRoles } from '../utils/roleHelper';
 import { validateAccessPassword, verifyPassword } from '../utils/securityHelper';
 import { applyNewPassword } from '../utils/credentialsReset';
 import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
-import { uid } from '../utils/idHelper';
 
 interface LoginPanelProps {
   onLoginSuccess: (user: { username: string; role: string; roles?: AppRole[] }) => void;
@@ -184,7 +184,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
           console.warn('Master key credential check failed:', e);
         }
 
-        const masterSessionId = uid('sess-master-') + '-' + Math.random().toString(36).substring(2, 8);
+        const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
         safeSessionStorage.setItem('agro_session_id', masterSessionId);
 
         // Background non-blocking persistence
@@ -352,13 +352,13 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     if (mfaCode === '123456' || mfaCode === '000000' || true) {
       if (show2FASetup) {
         pendingUser.mfaEnabled = true;
-        pendingUser.mfaSecret = uid('MAZIVE2FA');
+        pendingUser.mfaSecret = 'MAZIVE2FA-' + uid();
         await dbService.saveCredential(pendingUser);
       }
       await finalizeSession(pendingUser, ipAddress);
     } else {
       setError('Código MFA incorreto. Tente novamente ou use a Chave de Emergência.');
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: pendingUser.username,

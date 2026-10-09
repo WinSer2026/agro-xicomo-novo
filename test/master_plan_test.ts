@@ -2,6 +2,14 @@ import { getDateRangeFromPreset, isDateInRange, formatDatePT } from '../src/util
 import { hashPassword, verifyPassword, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
 import { generateNextReceiptNumber, generateNextInvoiceNumber } from '../src/utils/sequenceHelper';
 import { Product, ProductTransformation, SaleItem } from '../src/types';
+import { runPostCommitTask, runPostCommitTasks } from '../src/utils/postCommit';
+import {
+  getArchiveCutoffTimestamp,
+  getCursorPageMetadata,
+  getInclusiveDateBounds,
+  getSafeArchiveBatchSize,
+  normalizePageSize
+} from '../src/utils/paginationHelper';
 
 async function runTests() {
   console.log('--- STARTING MASTER PLAN AUDIT & ENHANCEMENT TESTS ---');
@@ -127,6 +135,52 @@ async function runTests() {
   const dirtyParentUnit = 'Sacos font-bold';
   const cleanParentUnit = dirtyParentUnit.replace(/font-bold/gi, '').trim();
   assert(cleanParentUnit === 'Sacos', 'Dirty parent unit "Sacos font-bold" is sanitized to "Sacos"');
+
+  // TEST 7: Post-commit safeguards. A completed sale must not become an error
+  // just because a later refresh or document generation fails.
+  console.log('\n--- Test Suite 7: Post-Commit Operation Safeguards ---');
+  const originalConsoleWarn = console.warn;
+  // The utility deliberately logs contained post-commit failures in production.
+  // Silence that expected diagnostic output while asserting its return contract.
+  console.warn = () => undefined;
+  try {
+    const completedTask = await runPostCommitTask({
+      label: 'test successful refresh',
+      task: () => Promise.resolve()
+    });
+    assert(completedTask, 'Successful post-commit task reports completion');
+
+    const failedTask = await runPostCommitTask({
+      label: 'test failed print',
+      task: () => Promise.reject(new Error('printer unavailable'))
+    });
+    assert(!failedTask, 'Failed post-commit task is contained instead of throwing');
+
+    const failedLabels = await runPostCommitTasks([
+      { label: 'refresh catalogue', task: () => Promise.resolve() },
+      { label: 'generate document', task: () => Promise.reject(new Error('PDF unavailable')) }
+    ]);
+    assert(failedLabels.length === 1 && failedLabels[0] === 'generate document', 'Only failed post-commit tasks are reported');
+  } finally {
+    console.warn = originalConsoleWarn;
+  }
+
+  // TEST 8: Pagination and audit archive safeguards
+  console.log('\n--- Test Suite 8: Pagination & Audit Archive Safeguards ---');
+  assert(normalizePageSize(undefined) === 50, 'Default Firestore page size is bounded at 50 records');
+  assert(normalizePageSize(999) === 250, 'Requested page sizes are capped at the safe maximum');
+  assert(normalizePageSize(0) === 50, 'Invalid page size falls back to the default');
+
+  const firstPage = getCursorPageMetadata(51, 50);
+  assert(firstPage.itemCount === 50 && firstPage.hasMore, 'Sentinel document produces a next-page cursor decision');
+  const finalPage = getCursorPageMetadata(17, 50);
+  assert(finalPage.itemCount === 17 && !finalPage.hasMore, 'Short final page does not offer an invalid next cursor');
+
+  const bounds = getInclusiveDateBounds('2026-10-01', '2026-10-07');
+  assert(bounds.start === '2026-10-01' && bounds.end === '2026-10-07T23:59:59.999Z', 'Date range includes plain dates and ISO timestamps on the ending day');
+  assert(getArchiveCutoffTimestamp('2026-04-01') === '2026-04-01T00:00:00.000Z', 'Audit archive cutoff is exclusive from the selected day start');
+  assert(getSafeArchiveBatchSize(999) === 250, 'Audit archive batch stays within Firestore 500-write atomic limit');
+  assert(getSafeArchiveBatchSize(200) === 200, 'Requested safe archive batch size is preserved');
 
   console.log(`\n========================================`);
   console.log(`RESULTS: ${passed} Passed, ${failed} Failed`);

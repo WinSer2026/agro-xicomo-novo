@@ -29,7 +29,7 @@ export interface Product {
 export interface SaleItem {
   productId: string;
   name: string;
-  /** Categoria do artigo no momento da venda (usada nos relatórios por categoria). */
+  /** Categoria preservada no documento para relatórios históricos. */
   category?: string;
   quantity: number;
   unit: string;
@@ -41,8 +41,6 @@ export interface SaleItem {
   discountType?: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total';
   discountValue?: number;
   sellingUnit?: 'Bulk' | 'Retail'; // 'Bulk' for wholesale/sacks, 'Retail' for kilograms/units
-  /** Categoria do artigo no momento da venda (usada em relatórios por categoria). */
-  category?: string;
 }
 
 export interface PaymentBreakdown {
@@ -87,8 +85,7 @@ export interface Customer {
 export interface PausedSale {
   id: string;
   date: string;
-  /** Carimbo de criação (usado na ordenação das vendas pausadas). */
-  /** Momento em que a venda foi colocada em pausa (ISO). */
+  /** Timestamp de criação; ausente nos rascunhos legados. */
   createdAt?: string;
   customerName: string;
   customerNuit?: string;
@@ -258,8 +255,7 @@ export interface PayrollPayment {
   absencesDiscount: number;
   finalNetWage: number;
   paymentDate: string;
-  /** Campo legado (alguns registos antigos gravaram a data em `date`). */
-  /** Data alternativa do pagamento (registos antigos), usada como recurso na ordenação. */
+  /** Data legada usada por alguns registos importados antes de paymentDate. */
   date?: string;
 }
 

@@ -1,117 +1,113 @@
-import React from 'react';
-import { createPortal } from 'react-dom';
+import React, { useState } from 'react';
 
-interface ConfirmDialogProps {
-  open: boolean;
+export interface ConfirmRequest {
   title: string;
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
-  busy?: boolean;
-  /** texto a digitar para confirmar (operações destrutivas) */
+  /** Se indicado, o utilizador tem de escrever este texto para ativar a confirmação. */
   requireTypedText?: string;
-  onConfirm: () => void;
-  onCancel: () => void;
+  onConfirm: () => void | Promise<void>;
+}
+
+interface ConfirmDialogProps {
+  request: ConfirmRequest;
+  onClose: () => void;
 }
 
 /**
- * Caixa de confirmação própria da aplicação.
+ * Diálogo de confirmação próprio, em substituição do `window.confirm`.
  *
- * Substitui `window.confirm`, que é BLOQUEADO pelo navegador quando a app
- * corre dentro de um iframe em sandbox (pré-visualizações, AI Studio, etc.).
- * Nesses ambientes o `window.confirm` devolve sempre `false` e o utilizador
- * tem a sensação de que "carregou e não aconteceu nada".
+ * MOTIVO: dentro de iframes em sandbox (e em contextos com políticas restritivas)
+ * o `confirm()` nativo é bloqueado ou devolve `false` sem mostrar nada — os botões
+ * destrutivos passavam a ser "mortos" (clicar e não acontecer nada).
  */
-export default function ConfirmDialog({
-  open,
-  title,
-  message,
-  confirmLabel = 'Confirmar',
-  cancelLabel = 'Cancelar',
-  danger = false,
-  busy = false,
-  requireTypedText,
-  onConfirm,
-  onCancel,
-}: ConfirmDialogProps) {
-  const [typed, setTyped] = React.useState('');
+export default function ConfirmDialog({ request, onClose }: ConfirmDialogProps) {
+  const [busy, setBusy] = useState(false);
+  const [typed, setTyped] = useState('');
 
-  React.useEffect(() => {
-    if (open) setTyped('');
-  }, [open]);
+  const needsTyping = Boolean(request.requireTypedText);
+  const typingOk = !needsTyping || typed.trim() === request.requireTypedText;
 
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onCancel();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, busy, onCancel]);
+  const handleConfirm = async () => {
+    if (busy || !typingOk) return;
+    setBusy(true);
+    try {
+      await request.onConfirm();
+    } finally {
+      setBusy(false);
+      onClose();
+    }
+  };
 
-  if (!open || typeof document === 'undefined') return null;
-
-  const canConfirm = !busy && (!requireTypedText || typed.trim().toUpperCase() === requireTypedText.trim().toUpperCase());
-
-  return createPortal(
-    <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[9998] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden">
-        <div className="p-5 sm:p-6">
-          <div className="flex items-start gap-3">
-            <div
-              className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
-                danger ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'
-              }`}
-            >
-              <span className="material-symbols-outlined">{danger ? 'warning' : 'help'}</span>
-            </div>
-            <div className="min-w-0">
-              <h3 className="text-base font-black text-slate-900">{title}</h3>
-              <p className="text-sm text-slate-600 mt-1 leading-relaxed whitespace-pre-line">{message}</p>
-            </div>
+  return (
+    <div className="fixed inset-0 z-[1000] bg-black/70 flex items-center justify-center p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-slate-200">
+        <div className="flex items-start gap-3">
+          <div className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 ${request.danger ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+            <span className="material-symbols-outlined">{request.danger ? 'warning' : 'help'}</span>
           </div>
-
-          {requireTypedText && (
-            <div className="mt-4">
-              <label className="block text-[10px] font-black uppercase text-slate-500 tracking-wider mb-1">
-                Escreva <span className="text-red-600">{requireTypedText}</span> para confirmar
-              </label>
-              <input
-                type="text"
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-indigo-600"
-                placeholder={requireTypedText}
-                autoComplete="off"
-              />
-            </div>
-          )}
+          <div>
+            <h3 className="font-black text-slate-900 text-base">{request.title}</h3>
+            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{request.message}</p>
+          </div>
         </div>
 
-        <div className="px-5 sm:px-6 py-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row gap-2 sm:justify-end">
+        {needsTyping && (
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-600">
+              Escreva <span className="font-mono bg-slate-100 px-1 rounded">{request.requireTypedText}</span> para confirmar:
+            </label>
+            <input
+              type="text"
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400"
+              autoFocus
+            />
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            onClick={onCancel}
+            onClick={onClose}
             disabled={busy}
-            className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs uppercase tracking-wider hover:bg-white transition-colors cursor-pointer disabled:opacity-50"
+            className="px-4 py-2 border border-slate-300 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
           >
-            {cancelLabel}
+            {request.cancelLabel || 'Cancelar'}
           </button>
           <button
             type="button"
-            onClick={onConfirm}
-            disabled={!canConfirm}
-            className={`px-5 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider text-white transition-colors flex items-center justify-center gap-2 ${
-              danger ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'
-            } ${canConfirm ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}
+            onClick={handleConfirm}
+            disabled={busy || !typingOk}
+            className={`px-5 py-2 text-sm font-black rounded-lg text-white transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+              request.danger ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-700 hover:bg-emerald-800'
+            }`}
           >
-            {busy && <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>}
-            {busy ? 'A processar...' : confirmLabel}
+            {busy ? 'A processar…' : (request.confirmLabel || 'Confirmar')}
           </button>
         </div>
       </div>
-    </div>,
-    document.body
+    </div>
   );
+}
+
+/** Hook auxiliar para pedir confirmações a partir de qualquer módulo. */
+export function useConfirmDialog() {
+  const [request, setRequest] = useState<ConfirmRequest | null>(null);
+
+  const askConfirm = (
+    title: string,
+    message: string,
+    onConfirm: () => void | Promise<void>,
+    opts?: Omit<ConfirmRequest, 'title' | 'message' | 'onConfirm'>
+  ) => setRequest({ title, message, onConfirm, ...(opts || {}) });
+
+  const dialog = request ? (
+    <ConfirmDialog request={request} onClose={() => setRequest(null)} />
+  ) : null;
+
+  return { askConfirm, dialog };
 }

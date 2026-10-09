@@ -1,7 +1,7 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
+import { uid } from './idHelper';
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
-import { uid } from './idHelper';
 import type { StockCorrectionSnapshot } from './inventoryCutoff';
 
 const DB_NAME = 'AgroGestaoZeroDB';
@@ -736,7 +736,7 @@ export class IndexedDBService {
   public addSale(s: Sale): Promise<void> {
     const saleWithDefault: Sale = {
       ...s,
-      id: String(s.id || s.invoiceNumber || Date.now()),
+      id: String(s.id || s.invoiceNumber || uid('sale-')),
       status: s.status || 'Pendente'
     };
 
@@ -821,7 +821,7 @@ export class IndexedDBService {
     if (toUpdate.length > 0) {
       await this.saveProducts(toUpdate);
     }
-    const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || Date.now()), status: 'Cancelada' };
+    const updatedSale: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || uid('sale-')), status: 'Cancelada' };
     await this.addSale(updatedSale);
   }
 
@@ -830,24 +830,22 @@ export class IndexedDBService {
    * Espelha a API do serviço Firebase para que os módulos funcionem em qualquer modo.
    */
   public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
-    const list = (snapshots || []).filter(s => s && s.productId);
+    const list = (snapshots || []).filter(snapshot => snapshot?.productId);
     if (list.length === 0) return 0;
 
     const products = await this.getProducts();
     const toUpdate: Product[] = [];
 
     for (const snapshot of list) {
-      const prod = products.find(p => String(p.id) === String(snapshot.productId));
-      if (!prod) continue;
-      prod.stockQty = Math.max(0, Number(snapshot.stockQty) || 0);
-      if (snapshot.stockQtyBulk !== undefined) prod.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
-      if (snapshot.stockQtyRetail !== undefined) prod.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
-      toUpdate.push(prod);
+      const product = products.find(item => String(item.id) === String(snapshot.productId));
+      if (!product) continue;
+      product.stockQty = Math.max(0, Number(snapshot.stockQty) || 0);
+      if (snapshot.stockQtyBulk !== undefined) product.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+      if (snapshot.stockQtyRetail !== undefined) product.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+      toUpdate.push(product);
     }
 
-    if (toUpdate.length > 0) {
-      await this.saveProducts(toUpdate);
-    }
+    if (toUpdate.length > 0) await this.saveProducts(toUpdate);
     return toUpdate.length;
   }
 
@@ -860,15 +858,15 @@ export class IndexedDBService {
     if (list.length === 0) return 0;
 
     for (const sale of list) {
-      const updated: Sale = { ...sale, id: String(sale.id || sale.invoiceNumber || Date.now()), status: 'Cancelada' };
-      await this.addSale(updated);
+      const id = String(sale.id || sale.invoiceNumber || uid('sale-'));
+      await this.addSale({ ...sale, id, status: 'Cancelada' });
     }
 
-    if ((snapshots || []).length > 0) {
-      await this.applyStockCorrection(snapshots);
-    }
+    if (snapshots.length > 0) await this.applyStockCorrection(snapshots);
 
-    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: list.length } }));
+    window.dispatchEvent(new CustomEvent('db-update', {
+      detail: { table: 'sales', action: 'bulk-cancel', count: list.length }
+    }));
     return list.length;
   }
 
@@ -1893,7 +1891,7 @@ export class IndexedDBService {
       } else {
         const newProd: Product = {
           id: item.productId,
-          code: item.code || (uid('TRF-')),
+          code: item.code || ('TRF-' + uid()),
           name: item.name,
           category: item.category || 'Transformados',
           stockQty: item.qtyToAdd,

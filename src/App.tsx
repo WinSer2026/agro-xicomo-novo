@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "./utils/safeStorage";
+import { uid } from './utils/idHelper';
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { dbService } from './utils/firebaseDB';
@@ -17,7 +18,6 @@ const FinanceModule = lazy(() => import('./components/FinanceModule'));
 const TechnicalModule = lazy(() => import('./components/TechnicalModule'));
 import { SystemSettings, AppRole } from './types';
 import { getUserRoles } from './utils/roleHelper';
-import { uid } from './utils/idHelper';
 
 type ERPModule = 'vendas' | 'faturas' | 'stock' | 'rh' | 'financas' | 'tecnico';
 
@@ -83,37 +83,26 @@ export default function App() {
   const [pendingCount, setPendingCount] = useState(0);
   const [lastSyncTime, setLastSyncTime] = useState('');
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => dbService.isOnline());
 
   useEffect(() => {
     const updateSyncStatus = () => {
       setSseConnected(dbService.isSSEActive());
-      setIsOnline(dbService.isOnline());
       setPendingCount(dbService.getPendingCount());
       setLastSyncTime(dbService.getLastSyncTime());
+      setIsOnline(dbService.isOnline());
     };
 
     updateSyncStatus();
     const interval = setInterval(updateSyncStatus, 2000);
     window.addEventListener('db-update', updateSyncStatus);
+    window.addEventListener('online', updateSyncStatus);
+    window.addEventListener('offline', updateSyncStatus);
     return () => {
       clearInterval(interval);
       window.removeEventListener('db-update', updateSyncStatus);
-    };
-  }, []);
-
-  // Estado de ligação à internet (antes o sistema dizia sempre "sincronizado")
-  const [isOnline, setIsOnline] = useState<boolean>(
-    typeof navigator === 'undefined' ? true : navigator.onLine !== false
-  );
-
-  useEffect(() => {
-    const goOnline = () => setIsOnline(true);
-    const goOffline = () => setIsOnline(false);
-    window.addEventListener('online', goOnline);
-    window.addEventListener('offline', goOffline);
-    return () => {
-      window.removeEventListener('online', goOnline);
-      window.removeEventListener('offline', goOffline);
+      window.removeEventListener('online', updateSyncStatus);
+      window.removeEventListener('offline', updateSyncStatus);
     };
   }, []);
 
@@ -176,9 +165,8 @@ export default function App() {
   const loadCriticalProducts = async () => {
     try {
       await dbService.init();
-      const prodList = await dbService.getProducts();
       const critLevel = settings?.criticalStockLevel || 10;
-      const filtered = prodList.filter(p => !p.isService && p.stockQty <= critLevel);
+      const filtered = await dbService.getLowStockProducts(critLevel);
       setCriticalProducts(filtered);
     } catch (e) {
       console.log('Error loading critical products:', e);
@@ -288,7 +276,7 @@ export default function App() {
     } else {
       setGateError('Senha incorreta.');
       // Audit log failed attempt
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
@@ -337,18 +325,23 @@ export default function App() {
     safeSessionStorage.removeItem('agro_session_id');
     safeSessionStorage.clear();
     if (currentUser) {
-      // Remove specific device session without terminating other sessions
-      if (activeSessionId) {
-        await dbService.removeActiveSession(activeSessionId);
-      } else {
-        const sessions = await dbService.getActiveSessions();
-        const userSess = sessions.find(s => s.username === currentUser.username);
-        if (userSess) {
-          await dbService.removeActiveSession(userSess.id);
+      // Remove specific device session without terminating other sessions. The
+      // local session must still close when the network is temporarily down.
+      try {
+        if (activeSessionId) {
+          await dbService.removeActiveSession(activeSessionId);
+        } else {
+          const sessions = await dbService.getActiveSessions();
+          const userSess = sessions.find(s => s.username === currentUser.username);
+          if (userSess) {
+            await dbService.removeActiveSession(userSess.id);
+          }
         }
+      } catch (error) {
+        console.warn('Não foi possível remover a sessão remota durante o logout:', error);
       }
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
@@ -378,7 +371,16 @@ export default function App() {
 
   return (
     <div className={`flex h-screen bg-background overflow-hidden font-sans text-slate-900 ${theme === 'dark' ? 'dark-mode' : ''}`}>
-      
+
+      {/* Banda global de ligação: sem internet as escritas ficam penduradas no
+          Firestore e o operador tem de saber porquê. */}
+      {!isOnline && (
+        <div className="fixed top-0 inset-x-0 z-[9998] bg-amber-500 text-slate-950 px-4 py-2 text-center text-xs font-black uppercase tracking-wider shadow-lg flex items-center justify-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">wifi_off</span>
+          Sem ligação à internet — as operações ficam em espera e serão sincronizadas quando a rede voltar.
+        </div>
+      )}
+
       {/* 5-Minute Inactivity Auto-Lock Screen Overlay */}
       {isSessionLocked && (
         <div className="fixed inset-0 bg-slate-950/90 z-[9999] flex items-center justify-center backdrop-blur-md">
@@ -473,14 +475,6 @@ export default function App() {
         </div>
       )}
       
-      {/* Aviso global de ausência de ligação (explica por que as gravações "não acontecem") */}
-      {!isOnline && (
-        <div className="fixed top-0 left-0 right-0 z-[9999] bg-amber-500 text-amber-950 px-4 py-2 flex items-center justify-center gap-2 text-[11px] sm:text-xs font-black uppercase tracking-wide shadow-lg">
-          <span className="material-symbols-outlined text-[18px]">wifi_off</span>
-          Sem ligação à internet — as gravações ficam em fila e serão enviadas quando a rede voltar.
-        </div>
-      )}
-
       {/* Mobile Sidebar Overlay */}
       {isMobileSidebarOpen && (
         <div 

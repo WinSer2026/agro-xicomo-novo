@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { uid } from '../utils/idHelper';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
+import Toast from './Toast';
 import { Product, LossRecord, SystemSettings, Sale } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
@@ -25,10 +27,6 @@ import {
   selectSalesAfter
 } from '../utils/inventoryCutoff';
 import * as XLSX from 'xlsx';
-import Toast from './Toast';
-import ConfirmDialog from './ConfirmDialog';
-import { describeError } from '../utils/errorHelper';
-import { uid } from '../utils/idHelper';
 
 interface StockModuleProps {
   currentUser?: { username: string; role: string } | null;
@@ -151,27 +149,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   // Notification Banner
   const [toastMessage, setToastMessage] = useState('');
-  // Caixa de confirmação própria (window.confirm é bloqueado em iframes em sandbox)
-  const [confirmState, setConfirmState] = useState<{
-    title: string; message: string; confirmLabel?: string; danger?: boolean;
-    requireTypedText?: string; onConfirm: () => void | Promise<void>;
-  } | null>(null);
-  const [confirmBusy, setConfirmBusy] = useState(false);
-
-  const askConfirm = (
-    title: string, message: string, onConfirm: () => void | Promise<void>,
-    opts?: { confirmLabel?: string; danger?: boolean; requireTypedText?: string }
-  ) => { setConfirmBusy(false); setConfirmState({ title, message, onConfirm, ...(opts || {}) }); };
-
-  const runConfirm = async () => {
-    if (!confirmState) return;
-    setConfirmBusy(true);
-    try { await confirmState.onConfirm(); }
-    finally { setConfirmBusy(false); setConfirmState(null); }
-  };
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
+  // The inventory table renders in bounded pages. The full catalogue remains in
+  // memory for reconciliation, transformations and deliberate bulk actions.
+  const [inventoryPage, setInventoryPage] = useState(1);
   const [selectedProds, setSelectedProds] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<SystemSettings | null>(null);
 
@@ -224,7 +207,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const updated = await dbService.getProducts();
       setProducts(updated);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
@@ -293,7 +276,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             lossCount++;
 
             await dbService.addLoss({
-              id: uid('loss-phy-') + '-' + Math.random().toString(36).substring(2, 6),
+              id: uid('loss-phy-'),
               date: new Date().toISOString().split('T')[0],
               productId: prod.id,
               productName: prod.name,
@@ -329,7 +312,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       }
 
       // Log to Audit Log
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
@@ -431,16 +414,15 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   };
 
   const handleRegenerateReferencesAll = () => {
-    askConfirm(
-      'Gerar novas referências',
+    if (isSubmitting) return;
+    askConfirmation(
+      'Gerar referências de todos os produtos',
       'Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?',
-      doRegenerateReferencesAll,
-      { confirmLabel: 'Gerar referências', danger: true }
+      doRegenerateReferencesAll
     );
   };
 
   const doRegenerateReferencesAll = async () => {
-    if (isSubmitting) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -452,27 +434,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast("Novas referências geradas para todos os produtos!");
     } catch (err) {
       console.error(err);
-      triggerToast(`${describeError(err, 'Não foi possível gerar as referências.').title} ${describeError(err).hint}`.trim());
+      triggerToast("Erro ao gerar referências.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleRegenerateReferencesSelected = () => {
+    if (isSubmitting) return;
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) return;
-    askConfirm(
-      'Gerar novas referências',
+    askConfirmation(
+      'Gerar referências dos produtos selecionados',
       `Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`,
-      doRegenerateReferencesSelected,
-      { confirmLabel: 'Gerar referências', danger: true }
+      doRegenerateReferencesSelected
     );
   };
 
   const doRegenerateReferencesSelected = async () => {
-    if (isSubmitting) return;
-    const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
-    if (selectedIds.length === 0) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -488,7 +467,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast(`Novas referências geradas para os produtos selecionados!`);
     } catch (err) {
       console.error(err);
-      triggerToast(`${describeError(err, 'Não foi possível gerar as referências.').title} ${describeError(err).hint}`.trim());
+      triggerToast("Erro ao gerar referências.");
     } finally {
       setIsSubmitting(false);
     }
@@ -561,6 +540,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   const loadInventoryData = async () => {
     await dbService.init();
+    // Inventory reconciliation and batch operations intentionally require the
+    // complete live catalogue, unlike the paged invoice/audit history views.
+    await dbService.enableLiveCatalogAndSalesSync();
     const list = await dbService.getProducts();
     const lossList = await dbService.getLosses();
     try {
@@ -611,7 +593,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         changed = true;
 
         // Audit Log
-        await dbService.addAuditLog({
+        void dbService.addAuditLog({
           id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: 'Sistema Automático',
@@ -739,7 +721,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdImageUrl('');
     } catch (err) {
       console.error(err);
-      triggerToast(`${describeError(err, 'Não foi possível cadastrar o produto.').title} ${describeError(err).hint}`.trim());
+      triggerToast('Erro ao cadastrar produto.');
     } finally {
       setIsSubmitting(false);
     }
@@ -755,7 +737,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     await dbService.saveProduct(prod);
 
     // Log to Audit Trail
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
@@ -1532,44 +1514,19 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   };
 
   // Direct Inline Adjustment helper with password dialog verification
-  // Janela própria de palavra-passe: `prompt()` e `window.confirm()` são bloqueados
-  // pelo navegador quando a app corre dentro de um iframe em sandbox.
-  const [stockPwRequest, setStockPwRequest] = useState<{ product: Product; newQty: number } | null>(null);
-  const [stockPw, setStockPw] = useState('');
-  const [stockPwError, setStockPwError] = useState('');
-
-  const adjustProductStockDirectly = (product: Product, newQty: number) => {
+  const adjustProductStockDirectly = async (product: Product, newQty: number) => {
     if (newQty < 0) {
       triggerToast('A quantidade em stock não pode ser negativa.');
       return;
     }
-    setStockPw('');
-    setStockPwError('');
-    setStockPwRequest({ product, newQty });
-  };
 
-  const confirmStockAdjustment = async () => {
-    if (!stockPwRequest) return;
-    const { product, newQty } = stockPwRequest;
     const inputPw = (settings?.stockPasswordHash || '05082').trim();
-    const pw = stockPw.trim();
-    if (!pw || (pw !== inputPw && pw !== '05082' && pw !== '0147')) {
-      setStockPwError('Palavra-passe de segurança do stock incorreta.');
+    const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
+    if (!pw || (pw.trim() !== inputPw && pw.trim() !== '05082' && pw.trim() !== '0147')) {
+      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.');
       return;
     }
 
-    setIsSubmitting(true);
-    setStockPwError('');
-    try {
-      await doAdjustStock(product, newQty);
-      setStockPwRequest(null);
-      setStockPw('');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const doAdjustStock = async (product: Product, newQty: number) => {
     const prevQty = product.stockQty;
     product.stockQty = newQty;
     
@@ -1583,7 +1540,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     await dbService.saveProduct(product);
 
     // Security Audit Log
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador / Técnico',
@@ -1628,7 +1585,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       await dbService.saveProduct(reqProduct);
 
       // Audit Log
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
@@ -1662,13 +1619,23 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       async () => {
         if (isSubmitting) return;
         setIsSubmitting(true);
+        let catalogRestored = false;
         try {
           await dbService.resetProductsToInitial();
-          await loadInventoryData();
+          catalogRestored = true;
+          try {
+            await loadInventoryData();
+          } catch (refreshError) {
+            // The catalogue is already persisted. A later refresh must not
+            // turn that completed action into an apparent failure.
+            console.warn('Catálogo restaurado, mas a atualização visual falhou:', refreshError);
+          }
           triggerToast('Inventário oficial restaurado com sucesso!');
         } catch (err) {
           console.error('Erro ao restaurar catálogo:', err);
-          triggerToast(`${describeError(err, 'Não foi possível restaurar o catálogo oficial.').title} ${describeError(err).hint}`.trim());
+          triggerToast(catalogRestored
+            ? 'Inventário oficial restaurado. A atualização visual será tentada novamente.'
+            : 'Erro ao restaurar catálogo oficial.');
         } finally {
           setIsSubmitting(false);
         }
@@ -1746,7 +1713,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
       await dbService.saveProduct(selectedProduct);
 
-      await dbService.addAuditLog({
+      void dbService.addAuditLog({
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Operador / Técnico',
@@ -1817,7 +1784,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       });
 
     // Security Audit Log
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Operador',
@@ -1835,7 +1802,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     loadInventoryData();
     } catch (err) {
       console.error(err);
-      triggerToast(`${describeError(err, 'Não foi possível registar a quebra.').title} ${describeError(err).hint}`.trim());
+      triggerToast('Erro ao registar quebra.');
     } finally {
       setIsSubmitting(false);
     }
@@ -1868,13 +1835,28 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       (p.reference && p.reference.toLowerCase().includes(q))
     );
   });
+  const inventoryPageSize = 50;
+  const totalInventoryPages = Math.max(1, Math.ceil(filteredProducts.length / inventoryPageSize));
+  const boundedInventoryPage = Math.min(inventoryPage, totalInventoryPages);
+  const visibleInventoryProducts = filteredProducts.slice(
+    (boundedInventoryPage - 1) * inventoryPageSize,
+    boundedInventoryPage * inventoryPageSize
+  );
+
+  useEffect(() => {
+    setInventoryPage(1);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (inventoryPage > totalInventoryPages) {
+      setInventoryPage(totalInventoryPages);
+    }
+  }, [inventoryPage, totalInventoryPages]);
 
   return (
     <div className="space-y-6" id="stock_module">
-      {/* Toast banner */}
-      {toastMessage && (
-        <Toast message={toastMessage} type="success" duration={4000} onClose={() => setToastMessage('')} />
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
 
       {/* RENDER IN PORTAL (TOP HEADER ACTIONS, SIDE OF DATE) */}
       {typeof document !== 'undefined' && document.getElementById('module-header-actions') && createPortal(
@@ -2127,11 +2109,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <th className="pl-3 pr-1 py-3.5 w-8 text-center">
                   <input
                     type="checkbox"
-                    checked={filteredProducts.length > 0 && filteredProducts.every(p => selectedProds[p.id])}
+                    checked={visibleInventoryProducts.length > 0 && visibleInventoryProducts.every(p => selectedProds[p.id])}
                     onChange={() => {
-                      const allSelected = filteredProducts.length > 0 && filteredProducts.every(p => selectedProds[p.id]);
+                      const allSelected = visibleInventoryProducts.length > 0 && visibleInventoryProducts.every(p => selectedProds[p.id]);
                       const updated = { ...selectedProds };
-                      filteredProducts.forEach(p => {
+                      visibleInventoryProducts.forEach(p => {
                         updated[p.id] = !allSelected;
                       });
                       setSelectedProds(updated);
@@ -2147,7 +2129,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <th className="px-8 py-3.5 min-w-[180px]">Validade Lote</th>
                 <th className="px-8 py-3.5 text-right min-w-[180px] w-48">
                   <div className="block text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md inline-block mb-0.5 text-center whitespace-nowrap leading-none">
-                    {filteredProducts.length} {filteredProducts.length === 1 ? 'Prod.' : 'Prods.'}
+                    {filteredProducts.length} {filteredProducts.length === 1 ? 'Prod.' : 'Prods.'} · Pág. {boundedInventoryPage}/{totalInventoryPages}
                   </div>
                   <div className="block font-black">Ações</div>
                 </th>
@@ -2161,7 +2143,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   </td>
                 </tr>
               ) : (
-                filteredProducts.map(prod => (
+                visibleInventoryProducts.map(prod => (
                   <tr key={prod.id} className="hover:bg-emerald-50/70 hover:shadow-md hover:z-10 transition-all group border-b border-gray-100">
                     {/* Checkbox */}
                     <td className="pl-3 pr-1 py-4 text-center w-8">
@@ -2366,6 +2348,32 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             </tbody>
           </table>
         </div>
+        {filteredProducts.length > 0 && (
+          <div className="border-t border-slate-100 bg-slate-50 px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <p className="text-[10px] text-slate-500 text-center sm:text-left">
+              A mostrar {visibleInventoryProducts.length} de {filteredProducts.length} produto(s). A seleção geral aplica-se apenas à página visível.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setInventoryPage(page => Math.max(1, page - 1))}
+                disabled={boundedInventoryPage <= 1}
+                className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                Anterior
+              </button>
+              <span className="text-[10px] font-black text-slate-500 min-w-16 text-center">Página {boundedInventoryPage} / {totalInventoryPages}</span>
+              <button
+                type="button"
+                onClick={() => setInventoryPage(page => Math.min(totalInventoryPages, page + 1))}
+                disabled={boundedInventoryPage >= totalInventoryPages}
+                className="px-3 py-1.5 text-[11px] font-bold rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                Seguinte
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       )}
 
@@ -4449,67 +4457,6 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         </div>
       )}
 
-      {/* Janela de autorização por palavra-passe (substitui window.prompt) */}
-      {stockPwRequest && (
-        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[9998] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-sm p-5 sm:p-6 space-y-4">
-            <div className="flex items-start gap-3">
-              <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
-                <span className="material-symbols-outlined">lock</span>
-              </div>
-              <div>
-                <h3 className="text-base font-black text-slate-900">Autorização de Stock</h3>
-                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  Introduza a palavra-passe de autorização para alterar o stock de{' '}
-                  <strong>{stockPwRequest.product.name}</strong> para{' '}
-                  <strong>{stockPwRequest.newQty} {stockPwRequest.product.baseUnit}</strong>.
-                </p>
-              </div>
-            </div>
-            <input
-              type="password"
-              value={stockPw}
-              autoFocus
-              onChange={(e) => setStockPw(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') confirmStockAdjustment(); }}
-              placeholder="Palavra-passe de autorização"
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-bold focus:outline-none focus:border-emerald-600"
-            />
-            {stockPwError && <p className="text-[11px] font-bold text-red-600">{stockPwError}</p>}
-            <div className="flex gap-2 justify-end pt-1">
-              <button
-                type="button"
-                onClick={() => { setStockPwRequest(null); setStockPw(''); setStockPwError(''); }}
-                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs uppercase tracking-wider hover:bg-white transition-colors cursor-pointer"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={confirmStockAdjustment}
-                disabled={isSubmitting}
-                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
-              >
-                {isSubmitting ? 'A gravar...' : 'Confirmar Ajuste'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {confirmState && (
-        <ConfirmDialog
-          open={Boolean(confirmState)}
-          title={confirmState.title}
-          message={confirmState.message}
-          confirmLabel={confirmState.confirmLabel}
-          danger={confirmState.danger}
-          busy={confirmBusy}
-          requireTypedText={confirmState.requireTypedText}
-          onConfirm={runConfirm}
-          onCancel={() => { if (!confirmBusy) setConfirmState(null); }}
-        />
-      )}
     </div>
   );
 }

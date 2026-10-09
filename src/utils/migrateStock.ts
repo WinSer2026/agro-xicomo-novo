@@ -1,9 +1,9 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
+import { uid } from './idHelper';
 import { dbService } from './firebaseDB';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { STOCK_LIST_QUANTITIES, STOCK_LIST_VERSION } from '../data/stockListUpdate';
 import { Product, SystemSettings } from '../types';
-import { uid } from './idHelper';
 
 export const runStockMigration = async () => {
   if (safeStorage.getItem('agro_stock_migrated_v1') === 'true') {
@@ -116,7 +116,7 @@ export const runStockListUpdate = async () => {
 
     await dbService.saveSettings({ ...settings, stockListVersion: STOCK_LIST_VERSION } as SystemSettings);
 
-    await dbService.addAuditLog({
+    void dbService.addAuditLog({
       id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Contagem Física)',
