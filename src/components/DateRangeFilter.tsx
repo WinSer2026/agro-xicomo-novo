@@ -13,6 +13,7 @@ interface DateRangeFilterProps {
   title?: string;
   className?: string;
   showExportButtons?: boolean;
+  showAllHistory?: boolean;
 }
 
 export const DateRangeFilter: React.FC<DateRangeFilterProps> = ({
@@ -25,9 +26,11 @@ export const DateRangeFilter: React.FC<DateRangeFilterProps> = ({
   onExportPDF,
   onExportExcel,
   className = '',
-  showExportButtons = true
+  showExportButtons = true,
+  showAllHistory = false
 }) => {
   const presets: { id: DateRangePreset; label: string }[] = [
+    ...(showAllHistory ? [{ id: 'Todo o Histórico' as const, label: 'Todo o Histórico' }] : []),
     { id: 'Hoje', label: 'Hoje' },
     { id: 'Esta Semana', label: 'Esta Semana' },
     { id: 'Este Mês', label: 'Este Mês' },
@@ -45,20 +48,12 @@ export const DateRangeFilter: React.FC<DateRangeFilterProps> = ({
   };
 
   const handleStartDateChange = (val: string) => {
-    if (!val) return;
-    let end = endDate;
-    if (val > endDate) {
-      end = val;
-    }
+    const end = val && endDate && val > endDate ? val : endDate;
     onRangeChange(val, end, 'Personalizado');
   };
 
   const handleEndDateChange = (val: string) => {
-    if (!val) return;
-    let start = startDate;
-    if (val < startDate) {
-      start = val;
-    }
+    const start = val && startDate && val < startDate ? val : startDate;
     onRangeChange(start, val, 'Personalizado');
   };
 
@@ -85,7 +80,7 @@ export const DateRangeFilter: React.FC<DateRangeFilterProps> = ({
       </div>
 
       {/* Center: Clean Preset Buttons */}
-      <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200 shrink-0">
+      <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
         {presets.map((p) => {
           const isActive = preset === p.id;
           return (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
@@ -10,6 +10,12 @@ import * as XLSX from 'xlsx';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { REPORT_CATEGORIES, matchCategory } from '../utils/categoryHelper';
+import { filterSalesForReport, loadFinanceData, FinanceData, FinanceReportPeriod } from '../utils/financeData';
+
+const FINANCE_SECTION_LABELS: Record<keyof FinanceData, string> = {
+  sales: 'vendas', losses: 'perdas', products: 'produtos', auditLogs: 'auditoria',
+  settings: 'definições', transformations: 'transformações', payrollPayments: 'salários'
+};
 
 export default function FinanceModule() {
   const [sales, setSales] = useState<Sale[]>([]);
@@ -20,25 +26,28 @@ export default function FinanceModule() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [toastMessage, setToastMessage] = useState('');
-  const [selectedRange, setSelectedRange] = useState<'Day' | 'Week' | 'Month' | 'Year' | '3Y' | '5Y' | '10Y'>('Month');
+  const [isLoadingSales, setIsLoadingSales] = useState(true);
+  const [hasLoadedSales, setHasLoadedSales] = useState(false);
+  const [loadFailures, setLoadFailures] = useState<(keyof FinanceData)[]>([]);
+  const loadRequestRef = useRef(0);
 
-  // Universal Date Range States (Parte 5)
-  const defaultRange = getDateRangeFromPreset('Este Mês');
+  // Start with the full ledger: retroactive/historic sales may not fall in the current month.
+  const defaultRange = getDateRangeFromPreset('Todo o Histórico');
   const [startDate, setStartDate] = useState(defaultRange.startDate);
   const [endDate, setEndDate] = useState(defaultRange.endDate);
-  const [datePreset, setDatePreset] = useState<DateRangePreset>('Este Mês');
+  const [datePreset, setDatePreset] = useState<DateRangePreset>('Todo o Histórico');
   
   // Sub-tabs in Accounting & Finance
   const [activeSubTab, setActiveSubTab] = useState<'dashboard' | 'reports' | 'ledger' | 'transformacoes' | 'alerts' | 'auditoria'>('dashboard');
   
   // POS Reports Compilation States
-  const [reportPeriod, setReportPeriod] = useState<'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual'>('Mensal');
-  const [compiledPeriod, setCompiledPeriod] = useState<'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual'>('Mensal');
+  const [reportPeriod, setReportPeriod] = useState<FinanceReportPeriod>('Todo o Histórico');
+  const [compiledPeriod, setCompiledPeriod] = useState<FinanceReportPeriod>('Todo o Histórico');
 
   useEffect(() => {
-    loadFinancials();
+    void loadFinancials();
 
-    let debounceTimer: any = null;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const handleDbUpdate = (e: any) => {
       const updatedTable = e.detail?.table;
       if (
@@ -54,7 +63,7 @@ export default function FinanceModule() {
       ) {
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-          loadFinancials();
+          void loadFinancials();
         }, 150);
       }
     };
@@ -62,32 +71,46 @@ export default function FinanceModule() {
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       window.removeEventListener('db-update', handleDbUpdate);
+      loadRequestRef.current++; // ignore reads that finish after unmount
     };
   }, []);
 
   const loadFinancials = async () => {
-    await dbService.init();
-    // Finance computes complete-period reports, so it explicitly opts into
-    // full live sales/catalogue data rather than relying on history pages.
-    await dbService.enableLiveCatalogAndSalesSync();
-    const [salesList, lossesList, prodsList, auditPage, config, trfList, payrollList] = await Promise.all([
-      dbService.getSales(),
-      dbService.getLosses(),
-      dbService.getProducts(),
-      // The Finance audit preview is bounded; complete history is fetched only
-      // if its dedicated PDF export is requested.
-      dbService.getAuditLogsPage({ pageSize: 100 }),
-      dbService.getSettings(),
-      dbService.getTransformations(),
-      dbService.getPayrollPayments()
-    ]);
-    setSales(salesList);
-    setLosses(lossesList);
-    setProducts(prodsList);
-    setAuditLogs(auditPage.items);
-    setSettings(config);
-    setTransformations(trfList);
-    setPayrollPayments(payrollList);
+    const request = ++loadRequestRef.current;
+    setIsLoadingSales(true);
+    setLoadFailures([]);
+    try {
+      // Paginated direct read surfaces Firestore errors (the generic getSales
+      // cache returns [] on failure). Each section updates as soon as it arrives.
+      const failures = await loadFinanceData(dbService, part => {
+        if (request !== loadRequestRef.current) return;
+        if (part.sales) {
+          setSales(part.sales);
+          setHasLoadedSales(true);
+          setIsLoadingSales(false);
+        }
+        if (part.losses) setLosses(part.losses);
+        if (part.products) setProducts(part.products);
+        if (part.auditLogs) setAuditLogs(part.auditLogs);
+        if (part.settings) setSettings(part.settings);
+        if (part.transformations) setTransformations(part.transformations);
+        if (part.payrollPayments) setPayrollPayments(part.payrollPayments);
+      }, failedSection => {
+        if (request !== loadRequestRef.current) return;
+        setLoadFailures(previous => previous.includes(failedSection) ? previous : [...previous, failedSection]);
+        if (failedSection === 'sales') setIsLoadingSales(false);
+      });
+      if (request === loadRequestRef.current) {
+        setLoadFailures(failures);
+        setIsLoadingSales(false);
+      }
+    } catch (error) {
+      console.error('[Finance] Erro ao iniciar a leitura:', error);
+      if (request === loadRequestRef.current) {
+        setLoadFailures(['sales']);
+        setIsLoadingSales(false);
+      }
+    }
   };
 
   const showToast = (msg: string) => {
@@ -122,45 +145,35 @@ export default function FinanceModule() {
 
   // Transformation Accounting Totals (Parte 4 - 4.4)
   const trfOriginalCost = filteredTransformations.reduce((sum, t) => sum + t.originalTotalCost, 0);
-  const trfResultingCost = filteredTransformations.reduce((sum, t) => sum + t.items.reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0), 0);
+  const trfResultingCost = filteredTransformations.reduce((sum, t) => sum + (t.items || []).reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0), 0);
   const trfLossesVal = filteredTransformations.reduce((sum, t) => sum + t.lossValue, 0);
 
-  // Monthly Sales Chart Data (Mocking current and last 5 months)
-  const monthlySales = [
-    { month: 'Jan', amount: totalGrossSales * 0.15 },
-    { month: 'Fev', amount: totalGrossSales * 0.18 },
-    { month: 'Mar', amount: totalGrossSales * 0.22 },
-    { month: 'Abr', amount: totalGrossSales * 0.12 },
-    { month: 'Mai', amount: totalGrossSales * 0.25 },
-    { month: 'Jun', amount: totalGrossSales * 0.08 + 1000 }
-  ];
+  // Actual sales for the latest six months with transactions (never fabricated values).
+  const latestSaleTime = filteredSales.reduce((latest, sale) => {
+    const time = new Date(sale.date).getTime();
+    return Number.isFinite(time) ? Math.max(latest, time) : latest;
+  }, 0);
+  const chartEnd = latestSaleTime ? new Date(latestSaleTime) : new Date();
+  const monthlySales = Array.from({ length: 6 }, (_, index) => {
+    const date = new Date(chartEnd.getFullYear(), chartEnd.getMonth() - 5 + index, 1);
+    const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    return {
+      key: monthKey,
+      month: date.toLocaleDateString('pt-MZ', { month: 'short', year: '2-digit' }),
+      amount: filteredSales.filter(s => s.date?.startsWith(monthKey)).reduce((sum, s) => sum + s.total, 0)
+    };
+  });
 
-  // Helper to filter sales for POS Periodic Reports
-  const getFilteredSalesForReport = (period: 'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual') => {
-    const now = new Date();
-    return sales.filter(s => {
-      const sDate = new Date(s.date);
-      const diffTime = Math.abs(now.getTime() - sDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
-      if (period === 'Diário') return diffDays <= 1;
-      if (period === 'Semanal') return diffDays <= 7;
-      if (period === 'Mensal') return diffDays <= 30;
-      if (period === 'Trimestral') return diffDays <= 90;
-      if (period === 'Semestral') return diffDays <= 180;
-      if (period === 'Anual') return diffDays <= 365;
-      return true;
-    });
-  };
+  const maxMonthlyAmount = Math.max(1, ...monthlySales.map(month => month.amount));
+  const getFilteredSalesForReport = (period: FinanceReportPeriod) => filterSalesForReport(filteredSales, period);
 
   const reportSales = getFilteredSalesForReport(compiledPeriod);
   const reportGrossSales = reportSales.reduce((acc, s) => acc + s.total, 0);
   const reportCost = reportSales.reduce((acc, sale) => {
-    return acc + sale.items.reduce((sum, item) => {
+    return acc + (sale.items || []).reduce((sum, item) => {
       const prod = products.find(p => p.id === item.productId);
-      const buyPrice = prod ? getUnitCost(prod, item.sellingUnit) : (item.unitPrice * 0.6);
-      const baseQty = getBaseUnitQuantity(prod, item.quantity, item.sellingUnit);
-      return sum + (buyPrice * baseQty);
+      const buyPrice = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
+      return sum + (buyPrice * item.quantity);
     }, 0);
   }, 0);
   const reportProfit = Math.max(0, reportGrossSales - reportCost);
@@ -190,7 +203,7 @@ export default function FinanceModule() {
     // Sheet 2: Product Performance
     const productData = products.map(p => {
       const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
+        const item = (sale.items || []).find(it => it.productId === p.id);
         return sum + (item ? getBaseUnitQuantity(p, item.quantity, item.sellingUnit) : 0);
       }, 0);
       return {
@@ -250,7 +263,7 @@ export default function FinanceModule() {
     csv += `PRODUTO/SERVICO,STOCK ANTERIOR,PRECO COMPRA,PRECO VENDA,VENDIDO,FATURADO,LUCRO EST.\n`;
     products.forEach(p => {
       const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
+        const item = (sale.items || []).find(it => it.productId === p.id);
         return sum + (item ? item.quantity : 0);
       }, 0);
       const stockAnterior = p.stockQty + soldQty;
@@ -354,7 +367,7 @@ export default function FinanceModule() {
 
     products.forEach((p, idx) => {
       const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
+        const item = (sale.items || []).find(it => it.productId === p.id);
         return sum + (item ? item.quantity : 0);
       }, 0);
       const stockAnterior = p.stockQty + soldQty;
@@ -840,57 +853,12 @@ export default function FinanceModule() {
     showToast('Alertas de Stock Críticos PDF Descarregado!');
   };
 
-  // 2. Generate Chart Data depending on Selected Time Range
-  const generateChartData = () => {
-    switch (selectedRange) {
-      case 'Day':
-        return [
-          { name: '08h00', Vendas: totalGrossSales * 0.1, Perdas: totalLossesVal * 0.05 },
-          { name: '10h00', Vendas: totalGrossSales * 0.25, Perdas: 0 },
-          { name: '12h00', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
-          { name: '14h00', Vendas: totalGrossSales * 0.15, Perdas: 0 },
-          { name: '16h00', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.1 }
-        ];
-      case 'Week':
-        return [
-          { name: 'Seg', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.1 },
-          { name: 'Ter', Vendas: totalGrossSales * 0.18, Perdas: 0 },
-          { name: 'Qua', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.3 },
-          { name: 'Qui', Vendas: totalGrossSales * 0.12, Perdas: 0 },
-          { name: 'Sex', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.2 },
-          { name: 'Sáb', Vendas: totalGrossSales * 0.13, Perdas: totalLossesVal * 0.4 }
-        ];
-      case 'Month':
-        return [
-          { name: 'Semana 1', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.15 },
-          { name: 'Semana 2', Vendas: totalGrossSales * 0.28, Perdas: totalLossesVal * 0.2 },
-          { name: 'Semana 3', Vendas: totalGrossSales * 0.32, Perdas: totalLossesVal * 0.35 },
-          { name: 'Semana 4', Vendas: totalGrossSales * 0.18, Perdas: totalLossesVal * 0.3 }
-        ];
-      case 'Year':
-        return [
-          { name: 'Trimestre 1', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.25 },
-          { name: 'Trimestre 2', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
-          { name: 'Trimestre 3', Vendas: totalGrossSales * 0.35, Perdas: totalLossesVal * 0.35 },
-          { name: 'Trimestre 4', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.2 }
-        ];
-      case '3Y':
-        return [
-          { name: 'Ano Ant.', Vendas: totalGrossSales * 0.85, Perdas: totalLossesVal * 0.9 },
-          { name: 'Ano Corrente', Vendas: totalGrossSales, Perdas: totalLossesVal },
-          { name: 'Ano Seg. (Proj.)', Vendas: totalGrossSales * 1.25, Perdas: totalLossesVal * 0.75 }
-        ];
-      default:
-        // 5Y and 10Y long horizons
-        return [
-          { name: 'Histórico', Vendas: totalGrossSales * 0.5, Perdas: totalLossesVal * 1.5 },
-          { name: 'Atual', Vendas: totalGrossSales, Perdas: totalLossesVal },
-          { name: 'Projetado', Vendas: totalGrossSales * 1.8, Perdas: totalLossesVal * 0.5 }
-        ];
-    }
-  };
-
-  const chartData = generateChartData();
+  // The ledger charts use actual transactions in the selected date range.
+  const chartData = monthlySales.map(month => ({
+    name: month.month,
+    Vendas: month.amount,
+    Perdas: filteredLosses.filter(loss => loss.date?.startsWith(month.key)).reduce((sum, loss) => sum + loss.costValue, 0)
+  }));
 
   // Export Sales Ledger Ledger to CSV file format
   const handleExportSalesLedger = () => {
@@ -1077,6 +1045,21 @@ export default function FinanceModule() {
         </h3>
       </div>
 
+      {isLoadingSales && !hasLoadedSales && (
+        <p role="status" className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-600">
+          A carregar os resultados financeiros...
+        </p>
+      )}
+      {loadFailures.length > 0 && (
+        <div role="alert" className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-900 flex flex-wrap items-center justify-between gap-3">
+          <span>
+            Não foi possível carregar {loadFailures.map(key => FINANCE_SECTION_LABELS[key]).join(', ')}.
+            {loadFailures.includes('sales') ? ' Os valores de vendas podem estar desatualizados.' : ' As outras secções continuam disponíveis.'}
+          </span>
+          <button type="button" onClick={() => { void loadFinancials(); }} className="font-bold underline hover:text-amber-700">Tentar novamente</button>
+        </div>
+      )}
+
       {/* Modern Compact Sub-Tab Segmented Blocks */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <button
@@ -1168,6 +1151,7 @@ export default function FinanceModule() {
       {/* Date Range Filter for Financial Analysis */}
       <DateRangeFilter
         title="Período de Análise Financeira & Contabilística"
+        showAllHistory
         startDate={startDate}
         endDate={endDate}
         preset={datePreset}
@@ -1179,9 +1163,22 @@ export default function FinanceModule() {
         onExportPDF={handleExportFinancePDF}
         onExportExcel={handleExportFinanceDashboardExcel}
       />
+      {!isLoadingSales && hasLoadedSales && !loadFailures.includes('sales') && sales.length === 0 && (
+        <p className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-900">
+          Ainda não há vendas registadas. Os resultados financeiros serão apresentados quando houver transações.
+        </p>
+      )}
+      {!isLoadingSales && hasLoadedSales && !loadFailures.includes('sales') && sales.length > 0 && filteredSales.length === 0 && activeSubTab === 'dashboard' && (
+        <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-900 flex flex-wrap justify-between gap-2">
+          <span>Não há vendas no período selecionado.</span>
+          <button type="button" onClick={() => {
+            setStartDate(''); setEndDate(''); setDatePreset('Todo o Histórico');
+          }} className="font-bold underline hover:text-blue-700">Ver todo o histórico</button>
+        </div>
+      )}
 
       {/* --- SUB-TAB 1: PAINEL DE DESEMPENHO (DASHBOARD - IMAGE 2) --- */}
-      {activeSubTab === 'dashboard' && (
+      {activeSubTab === 'dashboard' && hasLoadedSales && (
         <div className="space-y-6">
           {/* Top Row: 4 KPI Bento Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1195,7 +1192,7 @@ export default function FinanceModule() {
                 <p className="text-2xl font-black text-slate-800 font-mono">{(totalGrossSales || 0).toLocaleString('pt-MZ')} MT</p>
                 <div className="text-[10px] text-emerald-600 font-bold flex items-center gap-0.5">
                   <span className="material-symbols-outlined text-[12px] font-black">trending_up</span>
-                  +12.4% vs mês ant.
+                  {filteredSales.length} vendas no período
                 </div>
               </div>
             </div>
@@ -1208,7 +1205,7 @@ export default function FinanceModule() {
               <div className="space-y-1">
                 <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Margem Lucro Est.</span>
                 <p className="text-2xl font-black text-slate-800 font-mono">{(totalProfit || 0).toLocaleString('pt-MZ')} MT</p>
-                <div className="text-[10px] text-gray-400 font-medium">Margem operacional aprox. 35%</div>
+                <div className="text-[10px] text-gray-400 font-medium">Após custo dos produtos vendidos</div>
               </div>
             </div>
 
@@ -1232,7 +1229,7 @@ export default function FinanceModule() {
               <div className="space-y-1">
                 <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Faturas Pendentes</span>
                 <p className="text-2xl font-black text-slate-800 font-mono">
-                  {sales.filter(s => s.paymentMethod?.toLowerCase().includes('crédit') || s.paymentMethod?.toLowerCase().includes('credit')).length} Clientes
+                  {filteredSales.filter(s => s.status === 'Pendente' || s.status === 'Crédito').length} Faturas
                 </p>
                 <div className="text-[10px] text-gray-400 font-medium">Faturas à espera de liquidação.</div>
               </div>
@@ -1276,7 +1273,7 @@ export default function FinanceModule() {
                       d.setDate(d.getDate() - i);
                       const dayName = days[d.getDay()];
                       
-                      const daySales = sales.filter(s => {
+                      const daySales = filteredSales.filter(s => {
                         const saleDate = new Date(s.date);
                         return saleDate.getDate() === d.getDate() &&
                                saleDate.getMonth() === d.getMonth() &&
@@ -1294,18 +1291,14 @@ export default function FinanceModule() {
 
                   const actualValues = getDailySales();
                   const maxAmt = Math.max(...actualValues.map(v => v.amount), 1);
-                  const hasSalesData = sales.length > 0;
-                  
-                  // Default visual Heights matching the screenshot when no sales data exists
-                  const visualHeights = [25, 55, 35, 75, 100, 60, 30];
 
-                  return actualValues.map((val, idx) => {
-                    const heightPct = hasSalesData ? Math.max(8, (val.amount / maxAmt) * 100) : visualHeights[idx];
+                  return actualValues.map(val => {
+                    const heightPct = (val.amount / maxAmt) * 100;
                     return (
                       <div key={val.name} className="flex flex-col items-center group relative w-12 h-full justify-end">
                         {/* Hover Tooltip */}
                         <div className="absolute -top-8 bg-slate-800 text-white text-[9px] px-2 py-1 rounded shadow opacity-0 group-hover:opacity-100 transition-opacity z-10 font-mono">
-                          {hasSalesData ? `${val.amount.toLocaleString('pt-MZ')} MT` : 'Sem Vendas'}
+                          {`${val.amount.toLocaleString('pt-MZ')} MT`}
                         </div>
                         
                         {/* Filled Capsule */}
@@ -1341,11 +1334,11 @@ export default function FinanceModule() {
               {(() => {
                 const getCategoryBreakdown = () => {
                   const breakdown: Record<string, number> = {};
-                  sales.forEach(sale => {
+                  filteredSales.forEach(sale => {
                     (sale.items || []).forEach(item => {
                       const prod = products.find(p => p.id === item.productId);
                       const cat = item.category || prod?.category || 'Outro';
-                      const amount = item.unitPrice * item.quantity;
+                      const amount = item.totalPrice ?? (item.unitPrice * item.quantity);
                       
                       const matchedCat = REPORT_CATEGORIES.find(c => matchCategory(cat, c.key)) || REPORT_CATEGORIES[REPORT_CATEGORIES.length - 1];
                       breakdown[matchedCat.key] = (breakdown[matchedCat.key] || 0) + amount;
@@ -1356,17 +1349,14 @@ export default function FinanceModule() {
 
                 const catData = getCategoryBreakdown();
                 const totalCatAmt = Object.values(catData).reduce((a, b) => a + b, 0);
-                const hasSalesData = sales.length > 0 && totalCatAmt > 0;
+                const getCatPercent = (key: string) => totalCatAmt > 0
+                  ? Math.round(((catData[key] || 0) / totalCatAmt) * 100)
+                  : 0;
 
-                const getCatPercent = (key: string, defaultVal: number) => {
-                  if (!hasSalesData) return defaultVal;
-                  return Math.round(((catData[key] || 0) / totalCatAmt) * 100);
-                };
-
-                const quimicosPct = getCatPercent('quimicos', 35);
-                const sementesPct = getCatPercent('sementes', 30);
-                const adubosPct = getCatPercent('adubos', 20);
-                const ferramentasPct = getCatPercent('ferramentas', 10);
+                const quimicosPct = getCatPercent('quimicos');
+                const sementesPct = getCatPercent('sementes');
+                const adubosPct = getCatPercent('adubos');
+                const ferramentasPct = getCatPercent('ferramentas');
                 const outrosPct = Math.max(0, 100 - (quimicosPct + sementesPct + adubosPct + ferramentasPct));
 
                 const radius = 35;
@@ -1470,8 +1460,8 @@ export default function FinanceModule() {
 
                       {/* Inside label */}
                       <div className="absolute flex flex-col items-center justify-center text-center">
-                        <span className="text-[9px] uppercase font-bold text-gray-400 tracking-widest">Catálogo</span>
-                        <span className="text-xs font-black text-slate-800">Mix Agrícola</span>
+                        <span className="text-[9px] uppercase font-bold text-gray-400 tracking-widest">{totalCatAmt > 0 ? 'Catálogo' : 'Sem vendas'}</span>
+                        <span className="text-xs font-black text-slate-800">{totalCatAmt > 0 ? 'Mix Agrícola' : 'no período'}</span>
                       </div>
                     </div>
 
@@ -1532,8 +1522,8 @@ export default function FinanceModule() {
               {(() => {
                 const getTopProducts = () => {
                   const prodSales: { [key: string]: { qty: number, total: number, name: string, unit: string } } = {};
-                  sales.forEach(sale => {
-                    sale.items.forEach(item => {
+                  filteredSales.forEach(sale => {
+                    (sale.items || []).forEach(item => {
                       if (!prodSales[item.productId]) {
                         const prod = products.find(p => p.id === item.productId);
                         prodSales[item.productId] = {
@@ -1544,7 +1534,7 @@ export default function FinanceModule() {
                         };
                       }
                       prodSales[item.productId].qty += item.quantity;
-                      prodSales[item.productId].total += item.unitPrice * item.quantity;
+                      prodSales[item.productId].total += item.totalPrice ?? (item.unitPrice * item.quantity);
                     });
                   });
                   
@@ -1552,24 +1542,11 @@ export default function FinanceModule() {
                 };
 
                 const topProds = getTopProducts();
-                const hasSalesData = topProds.length > 0;
-                
-                // Fallback products matching screenshot if no sales recorded
-                const fallbackProducts = [
-                  { name: 'Semente de Milho Híbrido PAN 53', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Semente de Feijão Nhemba IT82D', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Semente de Tomate Cal J Graúdo', total: 0, qty: 0, unit: 'Lata' },
-                  { name: 'Adubo NPK 12-24-12 Basal', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Ureia 46% Cobertura Especial', total: 0, qty: 0, unit: 'Saco' }
-                ];
+                if (topProds.length === 0) return <p className="text-xs text-slate-500">Sem vendas de produtos neste período.</p>;
+                const maxVal = Math.max(...topProds.map(p => p.total), 1);
 
-                const finalProds = hasSalesData ? topProds : fallbackProducts;
-                const maxVal = Math.max(...finalProds.map(p => p.total), 1);
-                // Fake proportional heights for preview when no sales
-                const fakeShares = [85, 65, 45, 30, 15];
-
-                return finalProds.map((prod, idx) => {
-                  const widthPct = hasSalesData ? Math.max(5, (prod.total / maxVal) * 100) : fakeShares[idx];
+                return topProds.map(prod => {
+                  const widthPct = (prod.total / maxVal) * 100;
                   return (
                     <div key={prod.name} className="space-y-1.5">
                       <div className="flex justify-between text-xs">
@@ -1594,7 +1571,7 @@ export default function FinanceModule() {
       )}
 
       {/* --- SUB-TAB 2: GERAÇÃO DE RELATÓRIOS PERIÓDICOS DO POS (IMAGE 1) --- */}
-      {activeSubTab === 'reports' && (
+      {activeSubTab === 'reports' && hasLoadedSales && (
         <div className="space-y-6">
           {/* Main compilation panel */}
           <div className="bg-white border border-slate-150 rounded-2xl p-6 shadow-sm space-y-6">
@@ -1602,7 +1579,7 @@ export default function FinanceModule() {
               <div>
                 <h4 className="text-base font-bold text-slate-800 tracking-tight">Geração de Relatórios Periódicos do POS</h4>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Selecione o intervalo de auditoria e compile dados fiscais completos para prestação de contas.
+                  Consulte todo o histórico ou selecione um período recente para compilar as vendas e prestar contas.
                 </p>
               </div>
 
@@ -1610,9 +1587,10 @@ export default function FinanceModule() {
               <div className="flex items-center gap-2 self-start md:self-auto">
                 <select
                   value={reportPeriod}
-                  onChange={(e) => setReportPeriod(e.target.value as any)}
+                  onChange={(e) => setReportPeriod(e.target.value as FinanceReportPeriod)}
                   className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs font-bold text-slate-700 focus:outline-none"
                 >
+                  <option value="Todo o Histórico">Todo o Histórico</option>
                   <option value="Diário">Relatório Diário</option>
                   <option value="Semanal">Relatório Semanal</option>
                   <option value="Mensal">Relatório Mensal</option>
@@ -1696,6 +1674,12 @@ export default function FinanceModule() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-medium">
+                    <tr className="bg-emerald-50/60">
+                      <td className="p-2.5 font-extrabold text-emerald-800">Período selecionado (filtro acima)</td>
+                      <td className="p-2.5 text-right font-mono font-black text-emerald-800">
+                        {getFilteredSalesForReport('Todo o Histórico').reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                      </td>
+                    </tr>
                     <tr>
                       <td className="p-2.5 font-bold text-slate-700">Diário (24 Horas)</td>
                       <td className="p-2.5 text-right font-mono text-slate-900">
@@ -1794,7 +1778,7 @@ export default function FinanceModule() {
                     ) : (
                       products.map(p => {
                         const soldQty = reportSales.reduce((sum, sale) => {
-                          const item = sale.items.find(it => it.productId === p.id);
+                          const item = (sale.items || []).find(it => it.productId === p.id);
                           return sum + (item ? getBaseUnitQuantity(p, item.quantity, item.sellingUnit) : 0);
                         }, 0);
                         // Produtos vendidos em saco e em quilo: relatório sempre na unidade base (kg)
@@ -2006,7 +1990,7 @@ export default function FinanceModule() {
                     </tr>
                   ) : (
                     filteredTransformations.map(t => {
-                      const createdVal = t.items.reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0);
+                      const createdVal = (t.items || []).reduce((s, it) => s + (it.quantity * it.calculatedUnitCost), 0);
                       const isCancelled = t.status === 'Cancelada';
                       return (
                         <tr key={t.id} className="hover:bg-emerald-50/50">
@@ -2018,7 +2002,7 @@ export default function FinanceModule() {
                             {t.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
                           </td>
                           <td className="p-3 text-center font-bold text-emerald-800">
-                            {t.items.reduce((s, it) => s + it.quantity, 0)} unidades
+                            {(t.items || []).reduce((s, it) => s + it.quantity, 0)} unidades
                           </td>
                           <td className="p-3 text-right font-mono font-black text-emerald-900">
                             {createdVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
@@ -2045,7 +2029,7 @@ export default function FinanceModule() {
       )}
 
       {/* --- SUB-TAB 3: LIVRO DE VENDAS & GRÁFICOS (LEDGER) --- */}
-      {activeSubTab === 'ledger' && (
+      {activeSubTab === 'ledger' && hasLoadedSales && (
         <div className="space-y-6">
           {/* Financial Bento Cards Summary */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -2083,7 +2067,7 @@ export default function FinanceModule() {
           {/* Visual Analytics Graphs */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-white border border-gray-200 p-6 rounded-xl shadow-sm space-y-4">
-              <p className="font-bold text-gray-800 text-sm">Faturação Comercial ({selectedRange})</p>
+              <p className="font-bold text-gray-800 text-sm">Faturação Comercial (últimos 6 meses com atividade)</p>
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
@@ -2098,7 +2082,7 @@ export default function FinanceModule() {
             </div>
 
             <div className="bg-white border border-gray-200 p-6 rounded-xl shadow-sm space-y-4">
-              <p className="font-bold text-gray-800 text-sm">Relação Comercial: Faturação vs Perdas ({selectedRange})</p>
+              <p className="font-bold text-gray-800 text-sm">Relação Comercial: Faturação vs Perdas (últimos 6 meses)</p>
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData}>
@@ -2135,11 +2119,11 @@ export default function FinanceModule() {
             {/* Bar charts built in tailwind */}
             <div className="h-64 flex items-end justify-between pt-6 border-b border-gray-100 gap-2">
               {monthlySales.map(m => {
-                const percent = Math.min(100, (m.amount / (totalGrossSales || 1)) * 300);
+                const height = m.amount > 0 ? Math.max(4, (m.amount / maxMonthlyAmount) * 160) : 0;
                 return (
                   <div key={m.month} className="flex-1 flex flex-col items-center gap-2">
                     <div className="text-[10px] font-mono font-bold text-gray-400">{Math.round(m.amount).toLocaleString()} MT</div>
-                    <div className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700" style={{ height: `${Math.max(10, percent)}px` }}></div>
+                    <div className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700" style={{ height: `${height}px` }}></div>
                     <div className="text-xs font-black text-gray-600 border-t border-gray-100 pt-2 w-full text-center bg-gray-50">{m.month}</div>
                   </div>
                 );
