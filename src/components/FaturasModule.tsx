@@ -178,25 +178,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  const handleClearAllHistory = () => {
-    askConfirmation(
-      'Eliminar Histórico de Teste (Vendas, Facturas e Recibos)',
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
-      async () => {
-        try {
-          await dbService.clearSystemData();
-          await runPostCommitTask({
-            label: 'atualizar a lista após limpar o histórico',
-            task: () => loadData(false)
-          });
-          showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
-        } catch (err) {
-          console.error(err);
-          showToast('Erro ao limpar histórico.', 'error');
-        }
-      }
-    );
-  };
+  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
+  // A função "Eliminar Histórico de Teste" foi removida. Qualquer operação que
+  // apague vendas viola a regra inviolável do negócio ("não perder nenhuma venda
+  // já efetuada") e não tem lugar na interface de produção.
 
   const handlePayInvoice = (sale: Sale) => {
     if (isProcessing) return;

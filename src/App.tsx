@@ -134,11 +134,16 @@ export default function App() {
   useEffect(() => {
     if (!currentUser || isSessionLocked) return;
 
+    // Bloqueio por inactividade configurável (predefinição: 15 minutos).
+    // A sessão NÃO é terminada — apenas bloqueada até reintroduzir a palavra-passe,
+    // e o carrinho em curso fica recuperável (Auditoria FASE 1, A-04).
+    const lockMinutes = Math.max(1, settings?.sessionLockMinutes || 15);
+    const lockMs = lockMinutes * 60 * 1000;
+
     const interval = setInterval(() => {
       const now = Date.now();
       const diff = now - lastActivity;
-      // 5 minutes in milliseconds is 300,000
-      if (diff >= 300000) {
+      if (diff >= lockMs) {
         setIsSessionLocked(true);
         dbService.addAuditLog({
           id: 'log-' + Date.now(),
@@ -147,13 +152,13 @@ export default function App() {
           ipAddress: '127.0.0.1',
           action: 'Sessão Auto-Bloqueada',
           status: 'Alerta',
-          details: 'A sessão de balcão foi bloqueada devido a 5 minutos de inatividade.'
+          details: `A sessão de balcão foi bloqueada devido a ${lockMinutes} minutos de inatividade.`
         }).catch(err => console.log('Audit log lock error:', err));
       }
     }, 10000); // Check every 10 seconds
 
     return () => clearInterval(interval);
-  }, [currentUser, lastActivity, isSessionLocked]);
+  }, [currentUser, lastActivity, isSessionLocked, settings]);
 
   const loadCriticalProducts = async () => {
     try {

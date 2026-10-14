@@ -1,12 +1,13 @@
 /**
- * Reset de credenciais (executado automaticamente uma única vez por conta).
+ * Verificação/seed de credenciais (executado no arranque).
  * AGRO - XICOMO & SERVIÇOS, LDA
  *
- * Garantias:
- *  - Idempotente: cada conta guarda a versão de reset aplicada. Correr o reset em vários
- *    dispositivos NÃO repõe a palavra-passe que o operador já alterou.
- *  - Todos os operadores da lista oficial entram com uma palavra-passe temporária e são
- *    obrigados a definir uma nova palavra-passe no primeiro login.
+ * Garantias (revistas na Auditoria FASE 1):
+ *  - Nunca reescreve a palavra-passe, o perfil/MFA de uma conta existente;
+ *  - Nunca recria contas que foram eliminadas;
+ *  - Em falha de rede, aborta sem qualquer escrita;
+ *  - Só cria as contas oficiais iniciais em instalação nova (coleção vazia);
+ *  - O carimbo `passwordResetVersion` é preenchido preservando todos os campos.
  */
 
 import { dbService } from './firebaseDB';
@@ -14,6 +15,22 @@ import { hashPassword } from './securityHelper';
 import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
 import { UserCredentials } from '../types';
 
+/**
+ * VERIFICAÇÃO/SEED DE CREDENCIAIS (comportamento seguro — Auditoria FASE 1, A-01).
+ *
+ * O comportamento antigo reescrevia palavras-passe e perfis de contas sempre
+ * que a leitura falhava ou faltava o campo `passwordResetVersion` — era a causa
+ * raiz da "perda diária de credenciais" e da "mudança espontânea de hierarquias".
+ *
+ * Regras actuais (invioláveis):
+ *  1. Se a leitura da base falhar → aborta SEM escrever nada;
+ *  2. NUNCA substitui a palavra-passe, o perfil/MFA de uma conta existente;
+ *  3. Contas eliminadas não voltam a ser recriadas;
+ *  4. Apenas em instalação nova (coleção vazia, lida com sucesso) são criadas
+ *     as contas oficiais iniciais;
+ *  5. O carimbo `passwordResetVersion` é preenchido preservando todos os
+ *     campos actuais da conta (nunca "repõe" valores).
+ */
 export async function runCredentialsReset(): Promise<void> {
   try {
     const existing = await dbService.getCredentials();
@@ -22,19 +39,11 @@ export async function runCredentialsReset(): Promise<void> {
       if (c && c.username) byUser.set(c.username.toLowerCase(), c);
     });
 
-    const toWrite: UserCredentials[] = [];
-
-    for (const seed of OFFICIAL_RESET_CREDENTIALS) {
-      const current = byUser.get(seed.username.toLowerCase());
-      const appliedVersion = current?.passwordResetVersion || 0;
-
-      if (current && appliedVersion >= CREDENTIALS_RESET_VERSION) {
-        // Reset já aplicado nesta conta (a palavra-passe atual é a que o operador definiu).
-        continue;
-      }
-
-      toWrite.push({
-        id: current?.id || seed.id,
+    // Instalação nova: a coleção foi lida com sucesso e está realmente vazia.
+    // Só neste caso criamos as contas oficiais iniciais.
+    if (byUser.size === 0) {
+      const seedAccounts: UserCredentials[] = OFFICIAL_RESET_CREDENTIALS.map(seed => ({
+        id: seed.id,
         username: seed.username,
         passwordHash: seed.passwordHash,
         role: seed.role,
@@ -42,47 +51,56 @@ export async function runCredentialsReset(): Promise<void> {
         mfaEnabled: false,
         mustChangePassword: true,
         passwordResetVersion: CREDENTIALS_RESET_VERSION
+      }));
+
+      for (const cred of seedAccounts) {
+        await dbService.saveCredential(cred);
+      }
+
+      void dbService.addAuditLog({
+        id: 'log-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        username: 'Sistema (Credenciais Iniciais)',
+        ipAddress: '127.0.0.1',
+        action: 'Instalação Nova — Contas Iniciais Criadas',
+        status: 'Alerta',
+        level: 'CRITICAL',
+        details: `Base de credenciais vazia: criadas ${seedAccounts.length} conta(s) oficiais iniciais. Cada operador deve definir a sua palavra-passe no primeiro login.`
       });
+      return;
     }
 
-    // Contas extra criadas fora da lista oficial: mantêm a palavra-passe, mas terão também
-    // de a atualizar no próximo login (não repõe credenciais de terceiros).
+    // Base com contas existentes: nunca reescrever palavra-passe nem perfis.
+    // Apenas garantir o carimbo de versão (preservando todos os campos).
+    const toStamp: UserCredentials[] = [];
     for (const current of existing || []) {
       if (!current || !current.username) continue;
-      const isOfficial = OFFICIAL_RESET_CREDENTIALS.some(
-        s => s.username.toLowerCase() === current.username.toLowerCase()
-      );
-      if (isOfficial) continue;
       if ((current.passwordResetVersion || 0) >= CREDENTIALS_RESET_VERSION) continue;
-
-      toWrite.push({
+      toStamp.push({
         ...current,
         mfaEnabled: current.mfaEnabled || false,
-        mustChangePassword: true,
         passwordResetVersion: CREDENTIALS_RESET_VERSION
       });
     }
 
-    if (toWrite.length === 0) return;
+    if (toStamp.length === 0) return;
 
-    for (const cred of toWrite) {
+    for (const cred of toStamp) {
       await dbService.saveCredential(cred);
     }
 
-    // Auditoria é secundária ao reset concluído; a base guarda-a localmente e
-    // tenta sincronizá-la depois caso a ligação esteja indisponível.
     void dbService.addAuditLog({
       id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
-      username: 'Sistema (Reset de Credenciais)',
+      username: 'Sistema (Credenciais)',
       ipAddress: '127.0.0.1',
-      action: 'Reset Global de Credenciais',
-      status: 'Alerta',
-      level: 'CRITICAL',
-      details: `Reset de credenciais aplicado (versão ${CREDENTIALS_RESET_VERSION}) a ${toWrite.length} conta(s). Todos os operadores terão de definir nova palavra-passe no próximo login.`
+      action: 'Carimbo de Versão de Credenciais',
+      status: 'Sucesso',
+      details: `${toStamp.length} conta(s) carimbadas com a versão ${CREDENTIALS_RESET_VERSION}. Palavras-passe e perfis intactos (nenhuma redefinição aplicada).`
     });
   } catch (err) {
-    console.error('[CredentialsReset] Failed to apply credential reset:', err);
+    // Falha de leitura/escrita: abortar sem tocar em nada é a acção correcta.
+    console.error('[CredentialsReset] Verificação de credenciais abortada (sem escritas):', err);
   }
 }
 

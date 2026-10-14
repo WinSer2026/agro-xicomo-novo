@@ -98,6 +98,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [email, setEmail] = useState('');
   const [companyNuit, setCompanyNuit] = useState('');
   const [criticalStockLevel, setCriticalStockLevel] = useState(10);
+  const [sessionLockMinutes, setSessionLockMinutes] = useState(15);
   const [printerA4, setPrinterA4] = useState('Microsoft Print to PDF');
   const [printerThermal, setPrinterThermal] = useState('Xprinter XP-80');
   const [barcodePrefix, setBarcodePrefix] = useState('');
@@ -214,6 +215,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setEmail(config.email || '');
       setCompanyNuit(config.companyNuit || '401976590');
       setCriticalStockLevel(config.criticalStockLevel || 10);
+      setSessionLockMinutes(config.sessionLockMinutes || 15);
       setPrinterA4(config.printerA4 || 'Microsoft Print to PDF');
       setPrinterThermal(config.printerThermal || 'Xprinter XP-80');
       setBarcodePrefix(config.barcodePrefix || '');
@@ -576,6 +578,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       email,
       companyNuit,
       criticalStockLevel: Number(criticalStockLevel),
+      sessionLockMinutes: Math.max(1, Number(sessionLockMinutes) || 15),
       printerA4,
       printerThermal,
       barcodePrefix,
@@ -918,66 +921,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     }
   };
 
-  // --- MAINTENANCE & SYSTEM PROCESSORS ---
-  const handleEliminarHistoricoTeste = async () => {
-    if (isSubmitting) return;
-    const conf = window.confirm(
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.'
-    );
-    if (!conf) return;
-
-    setIsSubmitting(true);
-    try {
-      await dbService.clearSystemData();
-
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Eliminação de Histórico de Teste',
-        status: 'Sucesso',
-        details: 'Histórico de vendas, facturas e recibos de teste eliminado com sucesso pelo Técnico. Sistema pronto para produção.'
-      });
-
-      showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.');
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast('Erro ao limpar histórico de teste.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleZerarSistema = async () => {
-    if (isSubmitting) return;
-    const conf = window.confirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
-    if (!conf) return;
-
-    setIsSubmitting(true);
-    try {
-      await dbService.clearSystemData();
-
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Zerar Sistema Executado',
-        status: 'Sucesso',
-        details: 'Manutenção realizada. Dados de faturação e transações limpos para reinstalação de exercício.'
-      });
-
-      showToast('Manutenção de limpeza concluída!');
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast('Erro ao zerar o sistema.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
+  // Os handlers "Eliminar Histórico de Teste", "Zerar Sistema" e "Novo Exercício
+  // Fiscal" foram removidos: todos chamavam clearSystemData() e apagavam
+  // permanentemente vendas reais sem backup, violando a regra inviolável nº 1
+  // do negócio. A limpeza de dados de teste é uma operação de manutenção fora da
+  // interface, com backup obrigatório e aprovação documentada.
 
   const handleFecharAno = async () => {
     const conf = window.confirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
@@ -994,26 +943,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     });
 
     showToast('Ano Fiscal fechado e arquivado com sucesso!');
-  };
-
-  const handleNovoAno = async () => {
-    const conf = window.confirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
-    if (!conf) return;
-
-    await dbService.clearSystemData();
-
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Abertura de Novo Exercício',
-      status: 'Sucesso',
-      details: 'Novo exercício comercial estabelecido com herança de tabelas cadastrais.'
-    });
-
-    showToast('Novo Exercício Fiscal Inicializado!');
-    loadAllData();
   };
 
   const handleBackupTotal = async () => {
@@ -1286,6 +1215,18 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         value={criticalStockLevel}
                         onChange={(e) => setCriticalStockLevel(Number(e.target.value))}
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Bloqueio de Sessão por Inactividade (min)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={240}
+                        value={sessionLockMinutes}
+                        onChange={(e) => setSessionLockMinutes(Number(e.target.value))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                        placeholder="15"
                       />
                     </div>
                   </div>
@@ -1918,7 +1859,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                     Ciclo e Exercício Fiscal
                   </h5>
                   <p className="text-[11px] text-gray-600 leading-relaxed">
-                    Operações de fecho de exercício contábil anual e abertura do próximo ano financeiro.
+                    Operações de fecho de exercício contábil anual. O histórico de vendas é preservado na íntegra.
                   </p>
                   <div className="space-y-2 pt-1">
                     <button
@@ -1929,42 +1870,28 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       <span className="material-symbols-outlined text-[15px]">lock</span>
                       Fechar Ano Fiscal
                     </button>
-                    <button
-                      type="button"
-                      onClick={handleNovoAno}
-                      className="w-full py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[15px]">calendar_today</span>
-                      Novo Exercício Fiscal
-                    </button>
                   </div>
                 </div>
 
-                {/* Database Reset & Testing Cleansing */}
-                <div className="p-4 bg-red-50/50 border border-red-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-red-900 text-xs uppercase flex items-center gap-1.5">
-                    <span className="material-symbols-outlined text-[16px] text-red-600">warning</span>
-                    Limpeza de Teste e Reposição de Fábrica
+                {/* Data Safety Notice — replaces destructive reset tools (Auditoria FASE 1, T-05) */}
+                <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-xl space-y-3">
+                  <h5 className="font-bold text-emerald-900 text-xs uppercase flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-emerald-600">verified_user</span>
+                    Protecção do Histórico de Vendas
                   </h5>
-                  <p className="text-[11px] text-red-700 leading-relaxed">
-                    Elimine transações de demonstração ou restaure o ERP para o estado inicial de implantação.
+                  <p className="text-[11px] text-emerald-800 leading-relaxed">
+                    As ferramentas de eliminação de histórico e reposição de fábrica foram removidas desta interface:
+                    o histórico de vendas é permanente e nunca pode ser apagado a partir do painel.
+                    Para manutenção com eliminação de dados de teste, contacte o suporte técnico com backup prévio obrigatório.
                   </p>
-                  <div className="space-y-2 pt-1">
+                  <div className="pt-1">
                     <button
                       type="button"
-                      onClick={handleEliminarHistoricoTeste}
-                      className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      onClick={handleBackupTotal}
+                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                     >
-                      <span className="material-symbols-outlined text-[16px]">delete_sweep</span>
-                      Eliminar Histórico de Teste (Vendas e Facturas)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleZerarSistema}
-                      className="w-full py-2.5 bg-white hover:bg-red-100 text-red-700 border border-red-300 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[16px]">delete_forever</span>
-                      Zerar Sistema (Fiscal Reset Total)
+                      <span className="material-symbols-outlined text-[16px]">download</span>
+                      Descarregar Backup Completo Agora
                     </button>
                   </div>
                 </div>

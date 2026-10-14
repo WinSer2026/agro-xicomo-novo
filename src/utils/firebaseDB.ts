@@ -398,6 +398,20 @@ export class FirebaseDBService {
     }
   }
 
+  /**
+   * Strict variant of getAll(): distinguishes "collection is empty" from
+   * "read failed". Critical reads (products, credentials) MUST use this so a
+   * transient network error can never be mistaken for an empty database and
+   * trigger destructive seeding/overwriting (Auditoria FASE 1, achados A-02/D-03).
+   */
+  private async getAllOrFail<T>(colName: string): Promise<T[]> {
+    console.log(`[FirebaseDBService] getAllOrFail() fetching collection: ${colName}`);
+    const snapshot = await getDocs(collection(db, colName));
+    const items = snapshot.docs.map(doc => doc.data() as T);
+    console.log(`[FirebaseDBService] getAllOrFail() fetched ${items.length} records from ${colName}`);
+    return items;
+  }
+
   /** Convert a Firestore document to an app record while preserving its document ID. */
   private recordFromSnapshot<T>(snapshot: QueryDocumentSnapshot<DocumentData>): T {
     const data = snapshot.data() as T & { id?: string };
@@ -546,7 +560,10 @@ export class FirebaseDBService {
         }
       } catch (e) {}
     }
-    const rawProducts = await this.getAll<Product>('products');
+    // Leitura estrita: se a ligação falhar, NÃO interpretar como "catálogo
+    // vazio" (isso re-injetava produtos de demonstração na base real). Em caso
+    // de erro, propagar e deixar o cache local servir de fallback.
+    const rawProducts = await this.getAllOrFail<Product>('products');
     if (rawProducts.length === 0) {
       console.log('[FirebaseDBService] getProducts() found 0 products in Firestore. Seeding initial products...');
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
@@ -748,8 +765,15 @@ export class FirebaseDBService {
 
   public async addSale(s: Sale): Promise<void> {
     console.log(`[FirebaseDBService] addSale() ID: ${s.id}, invoice: ${s.invoiceNumber}, total: ${s.total}`);
-    // Ensure all items retain their buying cost snapshot
-    const prods = await this.getProducts();
+    // Ensure all items retain their buying cost snapshot. The product catalog
+    // lookup is best-effort: a catalog read failure must never block saving a
+    // completed sale (items already carry their own cost snapshot).
+    let prods: Product[] = [];
+    try {
+      prods = await this.getProducts();
+    } catch (e) {
+      console.warn('[FirebaseDBService] addSale(): catalog unavailable for cost enrichment, using item snapshots.', e);
+    }
     const enrichedItems = (s.items || []).map(item => {
       const prod = prods.find(p => p.id === item.productId);
       // Produtos vendidos em saco e em quilo: o quilo não tem preço de compra próprio,
@@ -797,8 +821,13 @@ export class FirebaseDBService {
       }
     }
 
-    // Ensure item cost snapshots
-    const prods = await this.getProducts();
+    // Ensure item cost snapshots (best-effort: never block the sale batch).
+    let prods: Product[] = [];
+    try {
+      prods = await this.getProducts();
+    } catch (e) {
+      console.warn('[FirebaseDBService] addSaleWithStockDeduction(): catalog unavailable for cost enrichment, using item snapshots.', e);
+    }
     const enrichedItems = (sale.items || []).map(item => {
       const prod = prods.find(p => String(p.id) === String(item.productId));
       const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
@@ -1291,14 +1320,18 @@ export class FirebaseDBService {
       } catch (e) {}
     }
 
-    const list = await this.getAll<UserCredentials>('credentials');
+    // Leitura estrita: uma falha de rede NÃO pode ser interpretada como
+    // "sem contas" (isso regravava o admin inicial por cima das contas reais
+    // e despoletava o reset de credenciais — Auditoria FASE 1, A-02).
+    const list = await this.getAllOrFail<UserCredentials>('credentials');
     if (list && list.length > 0) {
       this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
       safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
       return this.credentialsCache;
     }
 
-    // Se a base de dados estiver completamente vazia, criamos um utilizador administrador inicial
+    // Instalação nova (leitura bem-sucedida e coleção realmente vazia):
+    // criamos um utilizador administrador inicial para o primeiro acesso.
     const initialAdmin: UserCredentials[] = [
       {
         id: 'usr-admin-inicial',
@@ -1549,7 +1582,20 @@ export class FirebaseDBService {
     }
   }
 
-  public async clearSystemData(): Promise<void> {
+  /**
+   * DESTRUTIVO: apaga vendas, quebras, presenças, salários, vendas pausadas e
+   * transformações. Regra inviolável do negócio: nenhuma venda pode ser perdida.
+   *
+   * Proteções (Auditoria FASE 1, T-05):
+   *  - Não existe qualquer entrada para esta função na interface de produção;
+   *  - Exige uma frase de confirmação explícita para qualquer uso futuro de
+   *    manutenção (sempre com backup prévio e aprovação documentada);
+   *  - As regras do Firestore passam a negar eliminações na coleção `sales`.
+   */
+  public async clearSystemData(confirmPhrase: string): Promise<void> {
+    if (confirmPhrase !== 'APAGAR VENDAS') {
+      throw new Error('clearSystemData: frase de confirmação inválida — operação bloqueada.');
+    }
     console.log('[FirebaseDBService] clearSystemData requested');
     // We intentionally keep credentials and settings for safety
     const collectionsToClear = ['sales', 'losses', 'attendance', 'payroll_payments', 'paused_sales', 'transformations'];
