@@ -6,6 +6,7 @@ import { dbService } from '../utils/firebaseDB';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
 import { getUnitCost, isHybridProduct, getBulkSellingPrice } from '../utils/priceHelper';
+import { clampItemDiscountValue, getItemDiscount, getMaxItemDiscountValue, getSaleTotals, ItemDiscountType } from '../utils/saleTotals';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
 import { generateNextInvoiceNumber, generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
@@ -155,21 +156,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     showToast('Rascunho de venda descartado.', 'success');
   };
 
-  const getSavedCartTotal = () => {
-    if (!savedActiveCart) return 0;
-    const sub = savedActiveCart.cart.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-    const getItemDisc = (item: SaleItem) => {
-      if (!item.discountValue || item.discountValue <= 0) return 0;
-      if (item.discountType === 'per_unit') return item.discountValue * item.quantity;
-      if (item.discountType === 'percent_unit') return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-      if (item.discountType === 'percent_total') return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-      return item.discountValue;
-    };
-    const itemDiscounts = savedActiveCart.cart.reduce((acc, item) => acc + getItemDisc(item), 0);
-    const disc = itemDiscounts + savedActiveCart.customSubtotalDiscount;
-    const base = Math.max(0, sub - disc);
-    return savedActiveCart.includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
-  };
+  const getSavedCartTotal = () => savedActiveCart
+    ? getSaleTotals(savedActiveCart.cart, savedActiveCart.customSubtotalDiscount, savedActiveCart.includeIva).total
+    : 0;
 
   // Auto-save active cart to IndexedDB when cart or other states change
   useEffect(() => {
@@ -224,12 +213,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   const [retroactiveProductQuery, setRetroactiveProductQuery] = useState('');
   const [selectedRegisteredCustomer, setSelectedRegisteredCustomer] = useState<string>('');
   const [retroactiveCompletedSale, setRetroactiveCompletedSale] = useState<Sale | null>(null);
-  // Feedback da operação de lançamento retroactivo: o modal de ecrã inteiro é
-  // opaco e cobre os toasts, por isso o estado da gravação e os erros têm de
-  // aparecer DENTRO do próprio modal.
+  // Mostrar o progresso e erros dentro do modal, além de impedir gravações duplicadas.
   const [isFinalizingRetroactive, setIsFinalizingRetroactive] = useState(false);
+  const retroactiveFinalizingRef = useRef(false);
   const [retroactiveError, setRetroactiveError] = useState('');
   const [retroactiveSlow, setRetroactiveSlow] = useState(false);
+  const retroactiveTotals = getSaleTotals(retroactiveCart);
 
   /**
    * Lançamento retroactivo: produtos híbridos (saco + quilo) podem ser relançados
@@ -269,10 +258,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     setRetroactiveCart(prev => prev.map(item => {
       if (item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit) {
         const newQty = Math.max(1, item.quantity + delta);
-        return { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        const updated = { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        return { ...updated, discountValue: clampItemDiscountValue(updated, updated.discountType || 'line_total', updated.discountValue || 0) };
       }
       return item;
     }));
+  };
+
+  const updateRetroactiveCartDiscount = (productId: string, type: ItemDiscountType, value: number, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    setRetroactiveCart(prev => prev.map(item =>
+      item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit
+        ? { ...item, discountType: type, discountValue: clampItemDiscountValue(item, type, value) }
+        : item
+    ));
   };
 
   const removeRetroactiveCartItem = (productId: string, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
@@ -281,14 +279,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     ));
   };
 
-  const getRetroactiveCartTotal = () => {
-    return retroactiveCart.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
-  };
-
   const handleFinalizeRetroactiveSale = async () => {
-    // Impede cliques repetidos enquanto uma gravação está em curso.
-    if (isFinalizingRetroactive) return;
-
+    // Um ref bloqueia mesmo dois cliques antes do próximo render do React.
+    if (retroactiveFinalizingRef.current) return;
     if (retroactiveCart.length === 0) {
       setRetroactiveError('Adicione pelo menos um produto ao carrinho da venda!');
       return;
@@ -304,6 +297,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       return;
     }
 
+    retroactiveFinalizingRef.current = true;
     setIsFinalizingRetroactive(true);
     setRetroactiveError('');
     setRetroactiveSlow(false);
@@ -332,9 +326,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     };
 
     try {
-      const sub = getRetroactiveCartTotal();
-      const disc = 0;
-      const tot = sub;
+      const { subtotal: sub, discount: disc, total: tot } = retroactiveTotals;
 
       let finalCustomerName = retroactiveCustomerName.trim() || 'Cliente Geral';
       let finalCustomerNuit = retroactiveCustomerNuit.trim() || undefined;
@@ -387,7 +379,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         customerName: finalCustomerName,
         customerNuit: finalCustomerNuit,
         customerAddress: finalCustomerAddress,
-        items: retroactiveCart,
+        items: retroactiveCart.map(item => ({
+          ...item,
+          totalPrice: Math.round(((item.unitPrice * item.quantity) - getItemDiscount(item)) * 100) / 100
+        })),
         subtotal: sub,
         discount: disc,
         total: tot,
@@ -493,6 +488,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       }
     } finally {
       window.clearTimeout(slowTimer);
+      retroactiveFinalizingRef.current = false;
       setIsFinalizingRetroactive(false);
       setRetroactiveSlow(false);
     }
@@ -1232,11 +1228,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     }
 
     setCart(
-      cart.map(item =>
-        item.productId === productId && item.sellingUnit === sellingUnit
-          ? { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice }
-          : item
-      )
+      cart.map(item => {
+        if (item.productId !== productId || item.sellingUnit !== sellingUnit) return item;
+        const updated = { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        return { ...updated, discountValue: clampItemDiscountValue(updated, updated.discountType || 'line_total', updated.discountValue || 0) };
+      })
     );
   };
 
@@ -1245,43 +1241,18 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     showToast('Produto removido do carrinho.', 'success');
   };
 
-  const updateCartDiscount = (productId: string, type: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total', value: number, sellingUnit?: 'Bulk' | 'Retail') => {
-    setCart(
-      cart.map(item =>
-        item.productId === productId && item.sellingUnit === sellingUnit
-          ? { ...item, discountType: type, discountValue: value }
-          : item
-      )
-    );
+  const updateCartDiscount = (productId: string, type: ItemDiscountType, value: number, sellingUnit?: 'Bulk' | 'Retail') => {
+    setCart(cart.map(item =>
+      item.productId === productId && item.sellingUnit === sellingUnit
+        ? { ...item, discountType: type, discountValue: clampItemDiscountValue(item, type, value) }
+        : item
+    ));
   };
 
-  const getItemDiscount = (item: SaleItem) => {
-    if (!item.discountValue || item.discountValue <= 0) return 0;
-    if (item.discountType === 'per_unit') {
-      return item.discountValue * item.quantity;
-    }
-    if (item.discountType === 'percent_unit') {
-      return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-    }
-    if (item.discountType === 'percent_total') {
-      return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-    }
-    return item.discountValue;
-  };
-
-  const getSubtotal = () => cart.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-  
-  const getDiscount = () => {
-    // 1. Sum of all item-level discounts
-    const itemDiscounts = cart.reduce((acc, item) => acc + getItemDiscount(item), 0);
-
-    return itemDiscounts + customSubtotalDiscount;
-  };
-
-  const getTotal = () => {
-    const base = Math.max(0, getSubtotal() - getDiscount());
-    return includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
-  };
+  const cartTotals = getSaleTotals(cart, customSubtotalDiscount, includeIva);
+  const getSubtotal = () => cartTotals.subtotal;
+  const getDiscount = () => cartTotals.discount;
+  const getTotal = () => cartTotals.total;
 
   const playScannerBeep = () => {
     try {
@@ -1341,7 +1312,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const sub = getSubtotal();
       const disc = getDiscount();
       const tot = getTotal();
-      const iva = includeIva ? Math.round((sub - disc) * 0.16 * 100) / 100 : 0;
+      const iva = cartTotals.ivaAmount;
 
       // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
       const finalizedItems = cart.map(item => {
@@ -1353,7 +1324,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           category: cat,
           costPrice: cost,
           buyingPrice: cost,
-          totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item)
+          totalPrice: Math.round(((item.unitPrice * item.quantity) - getItemDiscount(item)) * 100) / 100
         };
       });
 
@@ -2246,7 +2217,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                         <span className="text-gray-500 font-medium">Desconto:</span>
                         <select
                           value={item.discountType || 'line_total'}
-                          onChange={(e) => updateCartDiscount(item.productId, e.target.value as 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total', item.discountValue || 0, item.sellingUnit)}
+                          onChange={(e) => updateCartDiscount(item.productId, e.target.value as ItemDiscountType, item.discountValue || 0, item.sellingUnit)}
                           className="border border-gray-200 rounded px-1 py-0.5 bg-gray-50 text-[10px] focus:outline-none focus:border-primary text-gray-700 cursor-pointer font-medium"
                         >
                           <option value="line_total">Total fixo (MT)</option>
@@ -2260,10 +2231,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                         <input
                           type="number"
                           min="0"
+                          max={getMaxItemDiscountValue(item, item.discountType || 'line_total')}
+                          step="any"
                           value={item.discountValue || ''}
                           onChange={(e) => {
-                            const val = Math.max(0, Number(e.target.value));
-                            updateCartDiscount(item.productId, item.discountType || 'line_total', val, item.sellingUnit);
+                            updateCartDiscount(item.productId, item.discountType || 'line_total', Number(e.target.value), item.sellingUnit);
                           }}
                           placeholder="0"
                           className="w-14 border border-gray-200 rounded px-1 py-0.5 font-bold font-mono text-[10px] focus:outline-none focus:border-primary text-right"
@@ -2354,10 +2326,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                     -{getDiscount().toLocaleString()} MT
                   </span>
                   <span className="text-gray-700">
-                    {includeIva
-                      ? `${Math.round((getSubtotal() - getDiscount()) * 0.16).toLocaleString()} MT`
-                      : 'Isento'
-                    }
+                    {includeIva ? `${cartTotals.ivaAmount.toLocaleString()} MT` : 'Isento'}
                   </span>
                   <span className="text-emerald-600 font-extrabold">{getTotal().toLocaleString()} MT</span>
                 </div>
@@ -4001,18 +3970,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                       </thead>
                       <tbody className="divide-y divide-gray-100 bg-white text-gray-700">
                         {pausedSales.map((ps) => {
-                          const subTotal = ps.items.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-                          const getItemDisc = (item: SaleItem) => {
-                            if (!item.discountValue || item.discountValue <= 0) return 0;
-                            if (item.discountType === 'per_unit') return item.discountValue * item.quantity;
-                            if (item.discountType === 'percent_unit') return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-                            if (item.discountType === 'percent_total') return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-                            return item.discountValue;
-                          };
-                          const itemDiscounts = ps.items.reduce((acc, item) => acc + getItemDisc(item), 0);
-                          const disc = itemDiscounts + ps.customSubtotalDiscount;
-                          const base = Math.max(0, subTotal - disc);
-                          const total = ps.includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
+                          const total = getSaleTotals(ps.items, ps.customSubtotalDiscount, ps.includeIva).total;
 
                           return (
                             <tr key={ps.id} className="hover:bg-amber-50/70 hover:shadow-md transition-all border-b border-gray-100">
@@ -4089,7 +4047,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 <button
                   type="button"
                   onClick={() => setShowRetroactiveModal(false)}
-                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer border border-white/10"
+                  disabled={isFinalizingRetroactive}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-[18px]">close</span>
                   <span className="hidden sm:inline">Fechar (Sair)</span>
@@ -4117,7 +4076,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 </div>
               )}
               
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              <div className={`grid grid-cols-1 lg:grid-cols-12 gap-4 items-start ${isFinalizingRetroactive ? 'pointer-events-none opacity-60' : ''}`}>
                 
                 {/* 1. INFORMAÇÕES PRINCIPAIS DA VENDA (Width: 3/12 - Reduced) */}
                 <div className="lg:col-span-3 space-y-4 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-2xs">
@@ -4450,18 +4409,46 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                           <th className="p-2.5">Artigo</th>
                           <th className="p-2.5 text-center">Preço Un.</th>
                           <th className="p-2.5 text-center">Qtd</th>
-                          <th className="p-2.5 text-right">Subtotal</th>
+                          <th className="p-2.5 text-right">Total líquido</th>
                           <th className="p-2.5 text-center">Ação</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-gray-800">
                         {retroactiveCart.map(item => (
                           <tr key={`${item.productId}-${item.sellingUnit || 'Retail'}`} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="p-2.5">
+                            <td className="p-2.5 min-w-[195px]">
                               <p className="font-bold text-gray-900">{item.name}</p>
                               <p className="text-[9px] font-black uppercase text-gray-500">
                                 {item.sellingUnit === 'Bulk' ? `Grosso • ${item.unit}` : `Retalho • ${item.unit}`}
                               </p>
+                              <div className="flex flex-wrap items-center gap-1 mt-2 text-[10px]">
+                                <label className="font-bold text-gray-500">Desconto:</label>
+                                <select
+                                  value={item.discountType || 'line_total'}
+                                  onChange={(e) => updateRetroactiveCartDiscount(item.productId, e.target.value as ItemDiscountType, item.discountValue || 0, item.sellingUnit || 'Retail')}
+                                  aria-label={`Tipo de desconto: ${item.name} (${item.unit})`}
+                                  className="border border-gray-200 rounded px-1 py-1 bg-slate-50 text-gray-700 focus:outline-none focus:border-indigo-600"
+                                >
+                                  <option value="line_total">Total fixo (MT)</option>
+                                  <option value="per_unit">Unitário fixo (MT)</option>
+                                  <option value="percent_total">Total percentual (%)</option>
+                                  <option value="percent_unit">Unitário percentual (%)</option>
+                                </select>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max={getMaxItemDiscountValue(item, item.discountType || 'line_total')}
+                                  step="any"
+                                  value={item.discountValue || ''}
+                                  onChange={(e) => updateRetroactiveCartDiscount(item.productId, item.discountType || 'line_total', Number(e.target.value), item.sellingUnit || 'Retail')}
+                                  aria-label={`Valor do desconto: ${item.name} (${item.unit})`}
+                                  placeholder="0"
+                                  className="w-16 border border-gray-200 rounded px-1 py-1 text-right font-bold font-mono focus:outline-none focus:border-indigo-600"
+                                />
+                                <span className="font-bold text-gray-500">
+                                  {item.discountType === 'percent_total' || item.discountType === 'percent_unit' ? '%' : 'MT'}
+                                </span>
+                              </div>
                             </td>
                             <td className="p-2.5 text-center font-mono font-semibold text-[10px]">
                               {item.unitPrice.toLocaleString('pt-PT')} MT
@@ -4487,8 +4474,13 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                                 </button>
                               </div>
                             </td>
-                            <td className="p-2.5 text-right font-black font-mono text-indigo-700 text-[11px]">
-                              {(item.unitPrice * item.quantity).toLocaleString('pt-PT')} MT
+                            <td className="p-2.5 text-right font-black font-mono text-indigo-700 text-[11px] whitespace-nowrap">
+                              {((item.unitPrice * item.quantity) - getItemDiscount(item)).toLocaleString('pt-PT')} MT
+                              {getItemDiscount(item) > 0 && (
+                                <span className="block text-[9px] text-rose-600 font-semibold">
+                                  Desc. -{getItemDiscount(item).toLocaleString('pt-PT')} MT
+                                </span>
+                              )}
                             </td>
                             <td className="p-2.5 text-center">
                               <button
@@ -4518,15 +4510,22 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 <button
                   type="button"
                   onClick={() => setShowRetroactiveModal(false)}
-                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer"
+                  disabled={isFinalizingRetroactive}
+                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancelar
                 </button>
 
-                <div className="text-right sm:text-left">
+                <div className="text-right sm:text-left" aria-live="polite">
+                  <p className="text-[10px] text-gray-500 font-bold">
+                    Subtotal: {retroactiveTotals.subtotal.toLocaleString('pt-PT')} MT
+                  </p>
+                  <p className="text-[10px] text-rose-600 font-bold">
+                    Desconto: -{retroactiveTotals.discount.toLocaleString('pt-PT')} MT
+                  </p>
                   <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Total Final da Venda</p>
                   <p className="text-lg sm:text-2xl font-black font-mono text-indigo-900">
-                    {getRetroactiveCartTotal().toLocaleString('pt-PT')} MT
+                    {retroactiveTotals.total.toLocaleString('pt-PT')} MT
                   </p>
                 </div>
               </div>
@@ -4549,7 +4548,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                 ) : (
                   <>
                     <span className="material-symbols-outlined text-[20px]">check_circle</span>
-                    Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-PT')} MT)
+                    Finalizar Registo Retroativo ({retroactiveTotals.total.toLocaleString('pt-PT')} MT)
                   </>
                 )}
               </button>

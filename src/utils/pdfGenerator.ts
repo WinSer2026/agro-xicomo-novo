@@ -702,7 +702,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   const logoHeight = logoBase64 ? 28 : 0;
   const headerHeight = 115;
   const itemsHeight = items.length * 11;
-  const footerHeight = 90;
+  const footerHeight = 90 + (invoice.discount > 0 ? 5 : 0);
   const breakdownHeight = (invoice.paymentBreakdown?.length || 0) * 7;
   const totalHeight = Math.max(200, logoHeight + headerHeight + itemsHeight + footerHeight + breakdownHeight);
 
@@ -822,11 +822,16 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.line(3, y, 77, y);
   y += 5;
 
-  // SUBTOTAL
+  // SUBTOTAL / DESCONTO
   doc.setFontSize(9);
   doc.text('SUBTOTAL:', 4, y);
   doc.text(`${fmtMT(invoice.subtotal)} MT`, 76, y, { align: 'right' });
   y += 5;
+  if (invoice.discount > 0) {
+    doc.text('DESCONTO:', 4, y);
+    doc.text(`-${fmtMT(invoice.discount)} MT`, 76, y, { align: 'right' });
+    y += 5;
+  }
 
   // Dashed separator
   doc.line(3, y, 77, y);

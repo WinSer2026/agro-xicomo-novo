@@ -10,7 +10,8 @@ export type DateRangePreset =
   | 'Semana Passada' 
   | 'Este Mês' 
   | 'Mês Passado' 
-  | 'Este Ano' 
+  | 'Este Ano'
+  | 'Todo o Histórico'
   | 'Personalizado';
 
 export interface DateRange {
@@ -50,6 +51,9 @@ export function getDateRangeFromPreset(preset: DateRangePreset): { startDate: st
   const todayStr = formatDateToISO(now);
 
   switch (preset) {
+    case 'Todo o Histórico':
+      return { startDate: '', endDate: '' };
+
     case 'Hoje':
       return { startDate: todayStr, endDate: todayStr };
 
