@@ -1,11 +1,13 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
-import ToastBanner from './ToastBanner';
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect } from 'react';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { dbService } from '../utils/firebaseDB';
+import Toast from './Toast';
+import { describeError } from '../utils/errorHelper';
 import { Employee, Attendance, ContractType, PayrollPayment, DisciplinaryAction, EmployeeDamage, SystemSettings } from '../types';
 import EmployeeDetailModal from './EmployeeDetailModal';
 import { 
@@ -206,7 +208,7 @@ export default function HRModule() {
     const existing = attendance.find(a => a.employeeId === employeeId && a.date === dailyAttendanceDate);
 
     const payload: Attendance = {
-      id: existing ? existing.id : 'att-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+      id: existing ? existing.id : uid('att-'),
       employeeId: employeeId,
       employeeName: emp.name,
       date: dailyAttendanceDate,
@@ -337,7 +339,7 @@ export default function HRModule() {
     } catch (error) {
       console.error('Erro ao carregar dados de Recursos Humanos:', error);
       if (notifyOnError) {
-        showToast('Erro ao carregar dados do sistema.');
+        showToast(`${describeError(error, 'Não foi possível carregar os dados do sistema.').title} ${describeError(error).hint}`.trim());
       }
     } finally {
       setIsLoading(false);
@@ -367,7 +369,7 @@ export default function HRModule() {
     setIsSubmitting(true);
 
     const payload: Employee = {
-      id: isEditing ? empId : 'emp-' + Date.now(),
+      id: isEditing ? empId : uid('emp-'),
       name: empName.trim(),
       contact: empContact.trim() || undefined,
       contractType: empContract,
@@ -463,7 +465,7 @@ export default function HRModule() {
     const existing = attendance.find(a => a.employeeId === pontoEmployeeId && a.date === pontoDate);
 
     const payload: Attendance = {
-      id: existing ? existing.id : 'att-' + Date.now(),
+      id: existing ? existing.id : uid('att-'),
       employeeId: pontoEmployeeId,
       employeeName: emp.name,
       date: pontoDate,
@@ -506,7 +508,7 @@ export default function HRModule() {
     if (!emp) return;
 
     const payload: DisciplinaryAction = {
-      id: 'disc-' + Date.now(),
+      id: uid('disc-'),
       employeeId: discEmployeeId,
       employeeName: emp.name,
       infractionDate: discInfractionDate,
@@ -536,7 +538,7 @@ export default function HRModule() {
     if (!emp) return;
 
     const payload = {
-      id: 'dmg-' + Date.now(),
+      id: uid('dmg-'),
       employeeId: dmgEmployeeId,
       employeeName: emp.name,
       damagedItem: dmgItem,
@@ -964,10 +966,8 @@ export default function HRModule() {
 
   return (
     <div className="space-y-6" id="hr_module_main">
-      {/* Toast Notification */}
-      {toastMessage && (
-        <ToastBanner message={toastMessage} type="success" onClose={() => setToastMessage('')} />
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
 
       {/* Header and Brand */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">

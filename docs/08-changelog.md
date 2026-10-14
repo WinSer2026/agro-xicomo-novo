@@ -8,14 +8,14 @@ Formato inspirado em Keep a Changelog · Sistema: AgroChicomo (ERP/POS)
 
 ### Adicionado
 - **Numeração transaccional de facturas e recibos** (contadores Firestore + transacção): elimina números duplicados quando vários vendedores finalizam vendas ao mesmo tempo (achado D-01 da auditoria).
-- **IDs de venda com UUID** (substitui `Date.now()` — sem colisões).
-- **ToastBanner unificado** (`src/components/ToastBanner.tsx`): notificações com auto-fecho de 5 segundos e botão de fechar, acessíveis (`aria-live`), em todos os módulos.
+- **IDs de venda únicos anti-colisão** (timestamp + sequência + aleatório via `idHelper.uid()` — substitui `Date.now()` puro que colidia).
+- **Notificações unificadas em portal** (`src/components/Toast.tsx`): auto-fecho, botão de fechar, `aria-live`, e visíveis sobre modais (portal em `document.body`, z-index máximo) em todos os módulos.
 - **Bootstrap seguro de credenciais:** em instalação nova, conta `admin` com palavra-passe temporária **aleatória** exibida no ecrã de login.
 - **Política de troca de palavra-passe** (`mustChangePassword`) no primeiro acesso.
 - **Documentação obrigatória** (9 documentos em `docs/`): SRS, manual do utilizador, arquitectura, matriz RBAC, plano de segurança, API, plano de backup/recuperação, changelog e relatório de auditoria.
 
 ### Corrigido
-- **Defeito monetário:** valores de quebras e contagens físicas calculados com campo de preço inexistente (`buyPrice`) → sempre 0 MT; agora usam `buyingPrice`/`sellingPrice` reais.
+- **Defeito monetário:** valores de quebras e contagens físicas calculados com campo de preço inexistente (`buyPrice`) → sempre 0 MT; agora usam o custo por unidade base (`getUnitCost` — correcto também em produtos híbridos saco/kg).
 - **Ameaça D-01 (concorrência):** numeração de recibos com timestamps locais gerava colisões e renumerava recibos antigos.
 - **Notificações permanentes** que bloqueavam a interface e exigiam F5 (PDV, Faturas, Stock, RH, Finanças, Painel Técnico).
 - IP de auditoria falsificado (VPS externo) substituído por `'N/D'` honesto.

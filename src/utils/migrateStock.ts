@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
+import { uid } from './idHelper';
 import { dbService } from './firebaseDB';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { STOCK_LIST_QUANTITIES, STOCK_LIST_VERSION } from '../data/stockListUpdate';
@@ -116,7 +117,7 @@ export const runStockListUpdate = async () => {
     await dbService.saveSettings({ ...settings, stockListVersion: STOCK_LIST_VERSION } as SystemSettings);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Contagem Física)',
       ipAddress: '127.0.0.1',

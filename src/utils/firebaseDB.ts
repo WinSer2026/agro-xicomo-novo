@@ -44,6 +44,7 @@ import {
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
+import { uid } from './idHelper';
 import {
   getArchiveCutoffTimestamp,
   getCursorPageMetadata,
@@ -103,6 +104,8 @@ export interface AuditArchiveResult {
   cutoffTimestamp: string;
 }
 
+import type { StockCorrectionSnapshot } from './inventoryCutoff';
+
 const app = initializeApp(firebaseConfig);
 
 let dbInstance;
@@ -119,6 +122,11 @@ try {
 }
 
 const db = dbInstance;
+
+/** Comparações de ordenação tolerantes a campos em falta em registos legados. */
+function safeStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
 
 /**
  * Audit records are valuable, but they must not turn a completed sale or stock
@@ -144,6 +152,7 @@ export class FirebaseDBService {
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
   private attendanceCache: Attendance[] | null = null;
+  private lastWriteAckAt: number | null = null;
   private unsubscribers: (() => void)[] = [];
   private largeCollectionListenersStarted = false;
 
@@ -167,7 +176,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         customers.push(doc.data() as Customer);
       });
-      this.customersCache = customers.sort((a, b) => a.name.localeCompare(b.name));
+      this.customersCache = customers.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'customers', count: customers.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (customers):', error);
@@ -179,7 +188,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         transformations.push(doc.data() as ProductTransformation);
       });
-      this.transformationsCache = transformations.sort((a, b) => b.date.localeCompare(a.date));
+      this.transformationsCache = transformations.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations', count: transformations.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (transformations):', error);
@@ -192,7 +201,7 @@ export class FirebaseDBService {
         creds.push(doc.data() as UserCredentials);
       });
       if (creds.length > 0) {
-        this.credentialsCache = creds.sort((a, b) => a.username.localeCompare(b.username));
+        this.credentialsCache = creds.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
         safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
         window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'credentials', count: creds.length } }));
       }
@@ -206,7 +215,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         sessions.push(doc.data() as ActiveSession);
       });
-      this.activeSessionsCache = sessions.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+      this.activeSessionsCache = sessions.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
       safeStorage.setItem('agro_active_sessions_cache', JSON.stringify(this.activeSessionsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'active_sessions', count: sessions.length } }));
     }, (error) => {
@@ -229,7 +238,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'losses'), (snapshot) => {
       const losses: LossRecord[] = [];
       snapshot.forEach(d => losses.push(d.data() as LossRecord));
-      this.lossesCache = losses.sort((a, b) => b.date.localeCompare(a.date));
+      this.lossesCache = losses.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', count: losses.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (losses):', error);
@@ -239,7 +248,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'payroll_payments'), (snapshot) => {
       const payroll: PayrollPayment[] = [];
       snapshot.forEach(d => payroll.push(d.data() as PayrollPayment));
-      this.payrollCache = payroll.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+      this.payrollCache = payroll.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'payroll_payments', count: payroll.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (payroll_payments):', error);
@@ -249,7 +258,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'employees'), (snapshot) => {
       const employees: Employee[] = [];
       snapshot.forEach(d => employees.push(d.data() as Employee));
-      this.employeesCache = employees.sort((a, b) => a.name.localeCompare(b.name));
+      this.employeesCache = employees.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'employees', count: employees.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (employees):', error);
@@ -259,7 +268,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'attendance'), (snapshot) => {
       const attendance: Attendance[] = [];
       snapshot.forEach(d => attendance.push(d.data() as Attendance));
-      this.attendanceCache = attendance.sort((a, b) => b.date.localeCompare(a.date));
+      this.attendanceCache = attendance.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'attendance', count: attendance.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (attendance):', error);
@@ -269,7 +278,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'paused_sales'), (snapshot) => {
       const paused: PausedSale[] = [];
       snapshot.forEach(d => paused.push(d.data() as PausedSale));
-      this.pausedSalesCache = paused.sort((a, b) => (b.createdAt || b.date).localeCompare(a.createdAt || a.date));
+      this.pausedSalesCache = paused.sort((a, b) => safeStr(b.createdAt || b.date).localeCompare(safeStr(a.createdAt || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'paused_sales', count: paused.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (paused_sales):', error);
@@ -297,7 +306,7 @@ export class FirebaseDBService {
       snapshot.forEach(documentSnapshot => {
         products.push(this.sanitizeProduct(this.recordFromSnapshot<Product>(documentSnapshot)));
       });
-      this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+      this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', count: products.length } }));
     }, (error) => {
@@ -309,7 +318,7 @@ export class FirebaseDBService {
       snapshot.forEach(documentSnapshot => {
         sales.push(this.recordFromSnapshot<Sale>(documentSnapshot));
       });
-      this.salesCache = sales.sort((a, b) => b.date.localeCompare(a.date));
+      this.salesCache = sales.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: sales.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (sales):', error);
@@ -479,6 +488,7 @@ export class FirebaseDBService {
       const validId = String(id || data?.id || data?.invoiceNumber || Date.now());
       const sanitized = this.sanitizeData(data);
       await setDoc(doc(db, colName, validId), sanitized);
+      this.lastWriteAckAt = Date.now();
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, id: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error saving to ${colName}/${id}:`, e);
@@ -534,9 +544,16 @@ export class FirebaseDBService {
     };
   }
 
+  /**
+   * Devolve SEMPRE cópias superficiais dos produtos.
+   * Vários módulos alteram o produto no próprio objecto (ex.: prod.stockQty = ...)
+   * antes de gravar. Como a cache partilhada era devolvida por referência, essas
+   * alterações ficavam "sujas" na cache mesmo quando a gravação falhava — e dois
+   * terminais passavam a ver valores diferentes. As cópias evitam esse efeito.
+   */
   public async getProducts(): Promise<Product[]> {
     if (this.productsCache && this.productsCache.length > 0) {
-      return this.productsCache;
+      return this.productsCache.map(p => ({ ...p }));
     }
     const cached = safeStorage.getItem('agro_products_cache');
     if (cached) {
@@ -545,7 +562,7 @@ export class FirebaseDBService {
         if (Array.isArray(parsed) && parsed.length > 0) {
           const cleaned = parsed.map(p => this.sanitizeProduct(p));
           this.productsCache = cleaned;
-          return cleaned;
+          return cleaned.map(p => ({ ...p }));
         }
       } catch (e) {}
     }
@@ -557,12 +574,12 @@ export class FirebaseDBService {
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
       await this.upsertBatch('products', seeded);
       this.productsCache = seeded;
-      return seeded;
+      return seeded.map(p => ({ ...p }));
     }
     const products = rawProducts.map(p => this.sanitizeProduct(p));
-    this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+    this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
-    return this.productsCache;
+    return this.productsCache.map(p => ({ ...p }));
   }
 
   /**
@@ -651,17 +668,17 @@ export class FirebaseDBService {
 
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
-    if (this.salesCache && this.salesCache.length >= 0) {
+    if (this.salesCache && this.salesCache.length > 0) {
       this.getAll<Sale>('sales').then(fresh => {
         if (fresh && fresh.length !== this.salesCache?.length) {
-          this.salesCache = fresh.sort((a, b) => b.date.localeCompare(a.date));
+          this.salesCache = fresh.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
           window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: fresh.length } }));
         }
       }).catch(() => {});
       return this.salesCache;
     }
     const list = await this.getAll<Sale>('sales');
-    this.salesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.salesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.salesCache;
   }
 
@@ -889,13 +906,77 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
   }
 
+  /**
+   * CORTE DE INVENTÁRIO — grava saldos absolutos de stock em lote.
+   *
+   * Usa valores absolutos (e não incrementos) porque a operação é sempre precedida de
+   * uma pré-visualização: o saldo que o gestor aprovou no ecrã é exactamente o saldo
+   * que fica gravado, sem surpresas de concorrência.
+   */
+  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
+    const list = (snapshots || []).filter(s => s && s.productId);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400; // limite seguro abaixo das 500 operações por batch do Firestore
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const snapshot of list.slice(i, i + CHUNK)) {
+        const payload: Record<string, number> = { stockQty: Math.max(0, Number(snapshot.stockQty) || 0) };
+        if (snapshot.stockQtyBulk !== undefined) payload.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+        if (snapshot.stockQtyRetail !== undefined) payload.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+        batch.set(doc(db, 'products', String(snapshot.productId)), payload, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-correction' } }));
+    return list.length;
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — anula várias vendas numa só operação.
+   *
+   * @param sales      documentos já marcados como 'Cancelada' (ver annotateCancelledSale).
+   * @param snapshots  saldos de stock a gravar em simultâneo. Deixar vazio quando a
+   *                   anulação NÃO deve mexer no stock (caso típico: a contagem física
+   *                   já lançada no sistema é anterior a estas vendas).
+   */
+  public async cancelSalesBulk(sales: Sale[], snapshots: StockCorrectionSnapshot[] = []): Promise<number> {
+    const list = (sales || []).filter(Boolean);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400;
+    const stockList = (snapshots || []).filter(s => s && s.productId);
+
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const sale of list.slice(i, i + CHUNK)) {
+        const saleId = String(sale.id || sale.invoiceNumber || uid('sale-'));
+        batch.set(doc(db, 'sales', saleId), this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' }), { merge: true });
+      }
+      await batch.commit();
+    }
+
+    if (stockList.length > 0) {
+      await this.applyStockCorrection(stockList);
+    }
+
+    this.salesCache = null;
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: list.length } }));
+    return list.length;
+  }
+
+
+
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
-    if (this.lossesCache && this.lossesCache.length >= 0) {
+    if (this.lossesCache && this.lossesCache.length > 0) {
       return this.lossesCache;
     }
     const list = await this.getAll<LossRecord>('losses');
-    this.lossesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.lossesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.lossesCache;
   }
 
@@ -906,11 +987,11 @@ export class FirebaseDBService {
 
   // --- Product Transformations (Parte 4) ---
   public async getTransformations(): Promise<ProductTransformation[]> {
-    if (this.transformationsCache && this.transformationsCache.length >= 0) {
+    if (this.transformationsCache && this.transformationsCache.length > 0) {
       return this.transformationsCache;
     }
     const list = await this.getAll<ProductTransformation>('transformations');
-    this.transformationsCache = list.sort((a, b) => (b.date || b.createdAt).localeCompare(a.date || a.createdAt));
+    this.transformationsCache = list.sort((a, b) => safeStr(b.date || b.createdAt).localeCompare(safeStr(a.date || a.createdAt)));
     return this.transformationsCache;
   }
 
@@ -1078,11 +1159,11 @@ export class FirebaseDBService {
 
   // --- Employees ---
   public async getEmployees(): Promise<Employee[]> {
-    if (this.employeesCache && this.employeesCache.length >= 0) {
+    if (this.employeesCache && this.employeesCache.length > 0) {
       return this.employeesCache;
     }
     const list = await this.getAll<Employee>('employees');
-    this.employeesCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.employeesCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.employeesCache;
   }
   public async saveEmployee(e: Employee): Promise<void> { 
@@ -1096,11 +1177,11 @@ export class FirebaseDBService {
 
   // --- Attendance ---
   public async getAttendance(): Promise<Attendance[]> { 
-    if (this.attendanceCache && this.attendanceCache.length >= 0) {
+    if (this.attendanceCache && this.attendanceCache.length > 0) {
       return this.attendanceCache;
     }
     const list = await this.getAll<Attendance>('attendance');
-    this.attendanceCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.attendanceCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.attendanceCache;
   }
   public async saveAttendance(a: Attendance): Promise<void> { 
@@ -1111,7 +1192,7 @@ export class FirebaseDBService {
   // --- Audit Logs ---
   public async getAuditLogs(): Promise<AuditLog[]> {
     const list = await this.getAll<AuditLog>('audit_logs');
-    return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return list.sort((a, b) => safeStr(b.timestamp).localeCompare(safeStr(a.timestamp)));
   }
 
   /** Query active or archived audit history by period, one bounded page at a time. */
@@ -1228,11 +1309,11 @@ export class FirebaseDBService {
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
-    if (this.activeSessionsCache && this.activeSessionsCache.length >= 0) {
+    if (this.activeSessionsCache && this.activeSessionsCache.length > 0) {
       return this.activeSessionsCache;
     }
     const list = await this.getAll<ActiveSession>('active_sessions');
-    this.activeSessionsCache = list.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+    this.activeSessionsCache = list.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
     return this.activeSessionsCache;
   }
   public async saveActiveSession(s: ActiveSession): Promise<void> { 
@@ -1293,7 +1374,14 @@ export class FirebaseDBService {
       }
     } catch(e) {}
     const def = this.getDefaultSettings();
-    await this.saveSettings(def);
+    // As configurações por omissão mantêm a aplicação utilizável mesmo quando
+    // a primeira escrita falha (offline / permission-denied). Persistir o valor
+    // é secundário e não pode transformar o arranque numa rejeição não tratada.
+    try {
+      await this.saveSettings(def);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Não foi possível persistir as configurações por omissão:', error);
+    }
     return def;
   }
 
@@ -1324,7 +1412,7 @@ export class FirebaseDBService {
     // e despoletava o reset de credenciais — Auditoria FASE 1, A-02).
     const list = await this.getAllOrFail<UserCredentials>('credentials');
     if (list && list.length > 0) {
-      this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
+      this.credentialsCache = list.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
       safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
       return this.credentialsCache;
     }
@@ -1346,7 +1434,7 @@ export class FirebaseDBService {
     } else {
       this.credentialsCache.push(c);
     }
-    this.credentialsCache.sort((a, b) => a.username.localeCompare(b.username));
+    this.credentialsCache.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
     safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
   }
 
@@ -1360,11 +1448,11 @@ export class FirebaseDBService {
 
   // --- Payroll Payments ---
   public async getPayrollPayments(): Promise<PayrollPayment[]> { 
-    if (this.payrollCache && this.payrollCache.length >= 0) {
+    if (this.payrollCache && this.payrollCache.length > 0) {
       return this.payrollCache;
     }
     const list = await this.getAll<PayrollPayment>('payroll_payments');
-    this.payrollCache = list.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+    this.payrollCache = list.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
     return this.payrollCache;
   }
   public async savePayrollPayment(p: PayrollPayment): Promise<void> { 
@@ -1376,7 +1464,7 @@ export class FirebaseDBService {
   public async getCustomers(): Promise<Customer[]> {
     if (this.customersCache) return this.customersCache;
     const list = await this.getAll<Customer>('customers');
-    this.customersCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.customersCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.customersCache;
   }
   public async saveCustomer(c: Customer): Promise<void> { await this.upsert('customers', c.id, c); this.customersCache = null; }
@@ -1384,11 +1472,11 @@ export class FirebaseDBService {
 
   // --- Paused Sales ---
   public async getPausedSales(): Promise<PausedSale[]> {
-    if (this.pausedSalesCache && this.pausedSalesCache.length >= 0) {
+    if (this.pausedSalesCache && this.pausedSalesCache.length > 0) {
       return this.pausedSalesCache;
     }
     const list = await this.getAll<PausedSale>('paused_sales');
-    this.pausedSalesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.pausedSalesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.pausedSalesCache;
   }
   public async savePausedSale(ps: PausedSale): Promise<void> { 
@@ -1591,6 +1679,50 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'all', action: 'clear' } }));
   }
 
+  // --- Misc Helpers ---
+  /** Verdadeiro quando o navegador reporta ligação à internet. */
+  public isOnline(): boolean {
+    return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
+  }
+
+  /** timestamp da última escrita confirmada pelo servidor (null se nenhuma). */
+  public getLastWriteAck(): number | null { return this.lastWriteAckAt; }
+
+  /**
+   * Sonda REAL de escrita/leitura no Firestore.
+   * Serve para o técnico perceber, a partir da própria aplicação, se a base de
+   * dados está a aceitar escritas (antes isto devolvia sempre "sucesso" falso,
+   * o que escondia problemas de regras de segurança e de ligação).
+   */
+  public async probeDatabaseHealth(): Promise<{ ok: boolean; message: string; latencyMs?: number; code?: string }> {
+    const started = Date.now();
+    const probeId = 'probe';
+    try {
+      await this.upsert('_health', probeId, { at: new Date().toISOString(), origin: 'agro-xicomo' });
+      const snap = await getDoc(doc(db, '_health', probeId));
+      const latencyMs = Date.now() - started;
+      if (!snap.exists()) {
+        return { ok: false, message: 'A escrita foi aceite mas a leitura de confirmação não devolveu dados.', latencyMs };
+      }
+      try { await deleteDoc(doc(db, '_health', probeId)); } catch (e) {}
+      return {
+        ok: true,
+        latencyMs,
+        message: `Ligação OK. Escrita e leitura confirmadas em ${latencyMs} ms.`
+      };
+    } catch (e: any) {
+      const code = String(e?.code || '').replace(/^firestore\//, '');
+      let message = 'Falha na ligação à base de dados.';
+      if (code === 'permission-denied') {
+        message = 'A base de dados recusa escritas (regras de segurança). É necessário publicar as regras do Firestore que permitem leitura e escrita.';
+      } else if (code === 'unavailable' || code === 'deadline-exceeded') {
+        message = 'Sem ligação ao servidor da base de dados. Verifique a internet.';
+      } else if (e && e.message) {
+        message = `Falha na ligação: ${e.message}`;
+      }
+      return { ok: false, message, latencyMs: Date.now() - started, code };
+    }
+  }
 
   // --- Active Cart ---
   public async saveActiveCart(cartData: any): Promise<void> {

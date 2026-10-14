@@ -17,6 +17,7 @@
  */
 
 import { dbService } from './firebaseDB';
+import { uid } from './idHelper';
 import { hashPassword, generateTemporaryPassword } from './securityHelper';
 import { UserCredentials } from '../types';
 
@@ -54,7 +55,7 @@ export async function runCredentialsReset(): Promise<void> {
     }
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Credenciais Iniciais)',
       ipAddress: 'N/D',
@@ -93,7 +94,7 @@ export async function applyNewPassword(
     await dbService.saveCredential(updated);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: current.username,
       ipAddress: 'N/D',

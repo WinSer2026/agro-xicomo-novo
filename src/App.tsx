@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "./utils/safeStorage";
+import { uid } from './utils/idHelper';
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { dbService } from './utils/firebaseDB';
@@ -80,6 +81,18 @@ export default function App() {
   // ("SSE activo", "pendentes", "última sync") foram removidos — devolviam
   // constantes inventadas. O estado real da ligação Firestore será exposto quando
   // existir autenticação/observabilidade server-side.
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, []);
 
   // Critical stock alert states
   const [criticalProducts, setCriticalProducts] = useState<any[]>([]);
@@ -128,7 +141,7 @@ export default function App() {
       if (diff >= lockMs) {
         setIsSessionLocked(true);
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser.username,
           ipAddress: '127.0.0.1',
@@ -257,7 +270,7 @@ export default function App() {
       setGateError('Senha incorreta.');
       // Audit log failed attempt
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -322,7 +335,7 @@ export default function App() {
       }
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -351,7 +364,16 @@ export default function App() {
 
   return (
     <div className={`flex h-screen bg-background overflow-hidden font-sans text-slate-900 ${theme === 'dark' ? 'dark-mode' : ''}`}>
-      
+
+      {/* Banda global de ligação: sem internet as escritas ficam penduradas no
+          Firestore e o operador tem de saber porquê. */}
+      {!isOnline && (
+        <div className="fixed top-0 inset-x-0 z-[9998] bg-amber-500 text-slate-950 px-4 py-2 text-center text-xs font-black uppercase tracking-wider shadow-lg flex items-center justify-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">wifi_off</span>
+          Sem ligação à internet — as operações ficam em espera e serão sincronizadas quando a rede voltar.
+        </div>
+      )}
+
       {/* 5-Minute Inactivity Auto-Lock Screen Overlay */}
       {isSessionLocked && (
         <div className="fixed inset-0 bg-slate-950/90 z-[9999] flex items-center justify-center backdrop-blur-md">

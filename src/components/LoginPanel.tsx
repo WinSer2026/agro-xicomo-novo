@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
@@ -167,7 +168,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
 
         // Background non-blocking audit log
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser || 'Desconhecido',
           ipAddress,
@@ -304,7 +305,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         ipAddress: ip
       }),
       dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: user.username,
         ipAddress: ip,
