@@ -94,7 +94,7 @@ async function runTests() {
   assert(validateAccessPassword('2060').strong === true, '4 dígitos respeita a política oficial');
   assert(validateAccessPassword('gestor123').strong === false, '8 caracteres respeitam a rejeição da política oficial');
   const hash = await hashPassword('ab12');
-  assert(hash.startsWith('sha256:'), 'hashPassword gera hash salgado sha256:');
+  assert(hash.startsWith('pbkdf2:'), 'hashPassword gera hash salgado pbkdf2: (SHA-256, 120k iterações)');
   assert(await verifyPassword('ab12', hash), 'verifyPassword valida o hash gerado');
   assert(!(await verifyPassword('ab13', hash)), 'verifyPassword rejeita palavra-passe errada');
 

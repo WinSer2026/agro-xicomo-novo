@@ -48,8 +48,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [lossesPreset, setLossesPreset] = useState<DateRangePreset>('Este Mês');
 
   // Reconciliation & Physical Count States (Parte 7 Enhanced)
-  const [reconciliationData, setReconciliationData] = useState<any | null>(null);
-  const [isReconciling, setIsReconciling] = useState(false);
+  // NOTA (Auditoria FASE 1, F-06): o "motor de reconciliação" que devolvia
+  // diferença zero foi removido; a contagem física é calculada ao vivo no painel.
   const [reconciliationFilter, setReconciliationFilter] = useState<'all' | 'discrepancies' | 'synced'>('all');
   const [reconciliationSearch, setReconciliationSearch] = useState('');
   const [physicalCounts, setPhysicalCounts] = useState<Record<string, number>>({});
@@ -110,7 +110,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showNewProdLinkInput, setShowNewProdLinkInput] = useState(false);
   const [showEditLinkInput, setShowEditLinkInput] = useState(false);
 
-  // Stock Adjustment States (Expanded to all product fields, password code: "05082")
+  // Stock Adjustment States (Expanded to all product fields; gate uses the manager code configured in Painel Técnico)
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [stockPassword, setStockPassword] = useState('');
@@ -194,9 +194,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (!deleteProductTarget) return;
 
     const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = currentSettings.stockPasswordHash || '05082';
+    const expectedPass = (currentSettings.stockPasswordHash || '').trim();
 
-    if (deletePassword !== expectedPass && deletePassword !== '05082' && deletePassword !== '0147') {
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    if (!expectedPass || deletePassword !== expectedPass) {
       setDeleteError('Senha de Gestor de Stock incorreta!');
       return;
     }
@@ -211,7 +212,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
-        ipAddress: '197.218.10.1',
+        ipAddress: 'N/D',
         action: 'Eliminação de Produto',
         status: 'Sucesso',
         details: `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}) foi eliminado com autorização de gestor.`
@@ -236,9 +237,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setApplyError('');
 
     const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = currentSettings?.stockPasswordHash || '05082';
+    const expectedPass = (currentSettings?.stockPasswordHash || '').trim();
 
-    if (applyPassword !== expectedPass && applyPassword !== '05082' && applyPassword !== '0147') {
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    if (!expectedPass || applyPassword !== expectedPass) {
       setApplyError('Senha de autorização de gestor incorreta.');
       return;
     }
@@ -316,7 +318,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
-        ipAddress: '197.218.10.1',
+        ipAddress: 'N/D',
         action: 'Ajuste de Contagem Física',
         status: 'Sucesso',
         level: 'WARNING',
@@ -329,8 +331,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       // Reload fresh data
       const freshProds = await dbService.getProducts();
       setProducts(freshProds);
-      const res = await dbService.reconcileStock();
-      setReconciliationData(res);
+      // NOTA (Auditoria FASE 1, F-06): o "motor de reconciliação" que devolvia
+      // diferença zero foi removido; a contagem física é calculada ao vivo no painel.
       setShowApplyPhysicalModal(false);
       setApplyPassword('');
       setToastMessage(`Inventário físico sincronizado com sucesso! (${adjustedCount} artigos atualizados)`);
@@ -1520,9 +1522,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
-    const inputPw = (settings?.stockPasswordHash || '05082').trim();
+    const inputPw = (settings?.stockPasswordHash || '').trim();
     const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
-    if (!pw || (pw.trim() !== inputPw && pw.trim() !== '05082' && pw.trim() !== '0147')) {
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    if (!inputPw || !pw || pw.trim() !== inputPw) {
       triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.');
       return;
     }
@@ -1645,15 +1648,16 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
 
 
-  // Secure Manual Stock Adjustments (Requires secondary code: "05082")
+  // Secure Manual Stock Adjustments (Requires the manager code configured in Painel Técnico)
   const handleAdjustStock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setAdjustError('');
 
     const inputPw = (stockPassword || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    if (inputPw !== targetPw && inputPw !== '05082' && inputPw !== '0147') {
+    const targetPw = (settings?.stockPasswordHash || '').trim();
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    if (!targetPw || inputPw !== targetPw) {
       setAdjustError('A palavra-passe de segurança do stock está incorreta.');
       return;
     }
@@ -3141,13 +3145,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         type="password"
                         value={applyPassword}
                         onChange={(e) => setApplyPassword(e.target.value)}
-                        placeholder="Digite a palavra-passe do gestor (ex: 05082)..."
+                        placeholder="Digite a palavra-passe do gestor configurada"
                         className="w-full border border-slate-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
                         required
                         autoFocus
                       />
                       <p className="text-[11px] text-slate-500 mt-1">
-                        Insira a senha de validação de gestor (código: 05082 ou 0147) para autorizar a sincronização definitiva.
+                        Insira a senha de validação de gestor (código configurado no Painel Técnico) para autorizar a sincronização definitiva.
                       </p>
                     </div>
 
@@ -3250,7 +3254,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   autoFocus
                 />
                 <p className="text-[11px] text-gray-500 mt-1">
-                  Insira a senha de validação de gestor (ex: 05082) para autorizar a remoção.
+                  Insira a senha de validação de gestor (código configurado no Painel Técnico) para autorizar a remoção.
                 </p>
               </div>
 
@@ -3734,7 +3738,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         </div>
       )}
 
-      {/* --- Stock Adjust Security Modal (Password check "05082") --- */}
+      {/* --- Stock Adjust Security Modal (código de gestor configurado) --- */}
       {showAdjustModal && selectedProduct && (
         <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto p-2 sm:p-4 flex min-h-full items-center justify-center">
           <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[92vh] my-auto flex flex-col overflow-hidden border border-gray-200">
@@ -3957,7 +3961,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       data-lpignore="true"
                       value={stockPassword}
                       onChange={(e) => setStockPassword(e.target.value)}
-                      placeholder="Senha do Stock (Ex: 05082)"
+                      placeholder="Senha do Stock (código configurado)"
                       className="w-full border border-red-300 rounded px-2.5 py-1.5 text-[11px] text-center focus:border-red-500 focus:outline-none font-extrabold bg-white"
                     />
                   </div>

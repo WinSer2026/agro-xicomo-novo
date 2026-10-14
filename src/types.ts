@@ -319,6 +319,10 @@ export interface SystemSettings {
   companyNuit?: string;
   companyAddress?: string;
   criticalStockLevel?: number;
+  /** Minutos de inactividade antes de bloquear a sessão de balcão (predefinição: 15). */
+  sessionLockMinutes?: number;
+  /** Aviso exibido no ecrã de login (ex.: credenciais temporárias de instalação nova). */
+  bootstrapNotice?: string;
   printerA4?: string;
   printerThermal?: string;
   theme?: 'light' | 'dark';

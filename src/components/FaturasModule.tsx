@@ -5,7 +5,7 @@ import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils
 import Toast from './Toast';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
-import { generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { DateRangeFilter } from './DateRangeFilter';
 import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
@@ -184,25 +184,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  const handleClearAllHistory = () => {
-    askConfirmation(
-      'Eliminar Histórico de Teste (Vendas, Facturas e Recibos)',
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
-      async () => {
-        try {
-          await dbService.clearSystemData();
-          await runPostCommitTask({
-            label: 'atualizar a lista após limpar o histórico',
-            task: () => loadData(false)
-          });
-          showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
-        } catch (err) {
-          console.error(err);
-          showToast('Erro ao limpar histórico.', 'error');
-        }
-      }
-    );
-  };
+  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
+  // A função "Eliminar Histórico de Teste" foi removida. Qualquer operação que
+  // apague vendas viola a regra inviolável do negócio ("não perder nenhuma venda
+  // já efetuada") e não tem lugar na interface de produção.
 
   const handlePayInvoice = (sale: Sale) => {
     if (isProcessing) return;
@@ -215,7 +200,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         let paymentSaved = false;
         try {
           const allSales = await dbService.getSales();
-          const receiptNum = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const receiptNum = await reserveDocumentNumber(
+            generateNextReceiptNumber(allSales, 'ReciboA4'),
+            (key, min) => dbService.nextDocumentNumber(key, min)
+          );
           const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
           await dbService.addSale(updatedSale);
           paymentSaved = true;
@@ -276,8 +264,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     if (!sale) return;
 
     const inputPw = (securityModal.password || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    const isValidPassword = inputPw === targetPw || inputPw === '05082' || inputPw === '0147';
+    const targetPw = (settings?.stockPasswordHash || '').trim();
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    const isValidPassword = Boolean(targetPw) && inputPw === targetPw;
     if (!isValidPassword) {
       setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
       return;

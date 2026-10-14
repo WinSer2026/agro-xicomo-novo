@@ -77,32 +77,20 @@ export default function App() {
   const [gatePassword, setGatePassword] = useState('');
   const [gateError, setGateError] = useState('');
 
-  // Real-time synchronization tracking states
-  const syncMode = 'Online';
-  const [sseConnected, setSseConnected] = useState(true);
-  const [pendingCount, setPendingCount] = useState(0);
-  const [lastSyncTime, setLastSyncTime] = useState('');
-  const [isManualSyncing, setIsManualSyncing] = useState(false);
-  const [isOnline, setIsOnline] = useState(() => dbService.isOnline());
+  // NOTA (Auditoria FASE 1, F-05/T-04): os indicadores falsos de sincronização
+  // ("SSE activo", "pendentes", "última sync") foram removidos — devolviam
+  // constantes inventadas. O estado real da ligação Firestore será exposto quando
+  // existir autenticação/observabilidade server-side.
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
 
   useEffect(() => {
-    const updateSyncStatus = () => {
-      setSseConnected(dbService.isSSEActive());
-      setPendingCount(dbService.getPendingCount());
-      setLastSyncTime(dbService.getLastSyncTime());
-      setIsOnline(dbService.isOnline());
-    };
-
-    updateSyncStatus();
-    const interval = setInterval(updateSyncStatus, 2000);
-    window.addEventListener('db-update', updateSyncStatus);
-    window.addEventListener('online', updateSyncStatus);
-    window.addEventListener('offline', updateSyncStatus);
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('db-update', updateSyncStatus);
-      window.removeEventListener('online', updateSyncStatus);
-      window.removeEventListener('offline', updateSyncStatus);
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
     };
   }, []);
 
@@ -141,11 +129,16 @@ export default function App() {
   useEffect(() => {
     if (!currentUser || isSessionLocked) return;
 
+    // Bloqueio por inactividade configurável (predefinição: 15 minutos).
+    // A sessão NÃO é terminada — apenas bloqueada até reintroduzir a palavra-passe,
+    // e o carrinho em curso fica recuperável (Auditoria FASE 1, A-04).
+    const lockMinutes = Math.max(1, settings?.sessionLockMinutes || 15);
+    const lockMs = lockMinutes * 60 * 1000;
+
     const interval = setInterval(() => {
       const now = Date.now();
       const diff = now - lastActivity;
-      // 5 minutes in milliseconds is 300,000
-      if (diff >= 300000) {
+      if (diff >= lockMs) {
         setIsSessionLocked(true);
         dbService.addAuditLog({
           id: uid('log-'),
@@ -154,13 +147,13 @@ export default function App() {
           ipAddress: '127.0.0.1',
           action: 'Sessão Auto-Bloqueada',
           status: 'Alerta',
-          details: 'A sessão de balcão foi bloqueada devido a 5 minutos de inatividade.'
-        }).catch(err => console.log('Audit log lock error:', err));
+          details: `A sessão de balcão foi bloqueada devido a ${lockMinutes} minutos de inatividade.`
+        }).catch(err => console.warn('Audit log lock error:', err));
       }
     }, 10000); // Check every 10 seconds
 
     return () => clearInterval(interval);
-  }, [currentUser, lastActivity, isSessionLocked]);
+  }, [currentUser, lastActivity, isSessionLocked, settings]);
 
   const loadCriticalProducts = async () => {
     try {
@@ -169,7 +162,7 @@ export default function App() {
       const filtered = await dbService.getLowStockProducts(critLevel);
       setCriticalProducts(filtered);
     } catch (e) {
-      console.log('Error loading critical products:', e);
+      console.warn('Error loading critical products:', e);
     }
   };
 
@@ -255,18 +248,18 @@ export default function App() {
     setGateError('');
     if (!currentUser) return;
 
-    const isMaster = currentUser.username === 'Mazive' && gatePassword === '0147';
+    // Sem chaves mestre (Auditoria FASE 1, S-02): apenas a palavra-passe real da conta.
     let isValid = false;
-
-    if (isMaster) {
-      isValid = true;
-    } else {
+    try {
       const allCreds = await dbService.getCredentials();
       const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
-      // Aceita a palavra-passe em texto simples (legado) ou com hash seguro (sha256)
       if (user) {
         isValid = await verifyPassword(gatePassword.trim(), user.passwordHash);
       }
+    } catch (err) {
+      console.warn('Gate verification failed to load credentials:', err);
+      setGateError('Não foi possível validar a identidade (sem ligação à base de dados).');
+      return;
     }
 
     if (isValid) {
@@ -409,14 +402,7 @@ export default function App() {
                 
                 const cleanUnlock = unlockPassword.trim();
 
-                // Emergency master key bypass
-                if ((currentUser.username.toLowerCase() === 'mazive' || currentUser.username.toLowerCase() === 'admin') && (cleanUnlock === '0147' || cleanUnlock === 'admin' || cleanUnlock === '05082')) {
-                  setIsSessionLocked(false);
-                  setUnlockPassword('');
-                  setLastActivity(Date.now());
-                  return;
-                }
-
+                // Sem chaves mestre (Auditoria FASE 1, S-02): apenas a palavra-passe real da conta.
                 try {
                   const allCreds = await dbService.getCredentials();
                   const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
@@ -823,24 +809,6 @@ export default function App() {
         </div>
       </main>
 
-      {/* --- Syncing Background Loader --- */}
-      {isManualSyncing && (
-        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-white p-5 rounded-lg shadow-xl max-w-sm w-full border border-slate-200 text-center space-y-4">
-            <div className="relative w-12 h-12 mx-auto">
-              <div className="absolute inset-0 rounded-full border-4 border-slate-100"></div>
-              <div className="absolute inset-0 rounded-full border-4 border-t-emerald-500 border-r-transparent border-b-transparent border-l-transparent animate-spin"></div>
-            </div>
-            <div>
-              <p className="font-bold text-slate-900 text-sm">Sincronizando com a Nuvem</p>
-              <p className="text-xs text-slate-400 mt-1">A atualizar vendas, produtos e dados em tempo real...</p>
-            </div>
-            <div className="w-full bg-slate-100 rounded-full h-1">
-              <div className="bg-emerald-500 h-1 rounded-full animate-[pulse_1.5s_infinite]" style={{ width: '80%' }}></div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,8 +1,120 @@
 rules_version = '2';
+
+// ============================================================================
+// REGRAS DO FIRESTORE — AGRO XICOMO & SERVIÇOS, LDA
+// ----------------------------------------------------------------------------
+// IMPORTANTE (Auditoria FASE 1, achado S-01):
+// A política anterior era `allow read, write: if true` sobre TODOS os
+// documentos, incluindo eliminações. Esta versão intermédia mantém a
+// compatibilidade com a aplicação actual (que autentica no cliente, contra a
+// coleção `credentials`) mas endurece o que pode ser endurecido já:
+//
+//   1. O histórico de vendas NUNCA pode ser eliminado remotamente;
+//   2. Só existem as coleções legítimas — tudo o resto está fechado;
+//   3. Documentos de sistema ficam em só-leitura para clientes.
+//
+// ESTADO INTERMEDIÁRIO — PLANO DE ENDURECIMENTO (FASE 2/3):
+// A verdadeira protecção exige autenticação Firebase (ex.: Email/Password ou
+// Anonymous + App Check) e regras baseadas em `request.auth`. Até lá, qualquer
+// pessoa com a web API key pode continuar a LER e ESCREVER dados não protegidos
+// aqui. A migração de autenticação está planeada para a FASE 2/3.
+//
+// NOTA DE DEPLOY: publicar com
+//   npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
+// Sempre após backup completo (ver docs/runbook-onda-0-1.md).
+// ============================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
+
+    // ------------------------------------------------------------------
+    // VENDAS — histórico imutável (regra inviolável do negócio nº 1).
+    // Cancelamentos, liquidações e restaurações são ATUALIZAÇÕES de estado
+    // (permitidas). Eliminações são terminantemente proibidas.
+    // ------------------------------------------------------------------
+    match /sales/{saleId} {
+      allow read, create, update: if true;
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // PRODUTOS — catálogo operacional (leitura/escrita pela aplicação).
+    // ------------------------------------------------------------------
+    match /products/{productId} {
       allow read, write: if true;
     }
+
+    // ------------------------------------------------------------------
+    // CREDENCIAIS — utilizadores do sistema.
+    // ATENÇÃO: exposto enquanto a autenticação não for migrada para o
+    // Firebase Auth (FASE 2/3, achado S-04). Ver comentário no topo.
+    // ------------------------------------------------------------------
+    match /credentials/{credId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // SESSÕES ACTIVAS — gestão de sessões multi-utilizador.
+    // ------------------------------------------------------------------
+    match /active_sessions/{sessionId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // CLIENTES, QUEBRAS, TRANSFORMAÇÕES, RH.
+    // ------------------------------------------------------------------
+    match /customers/{customerId} {
+      allow read, write: if true;
+    }
+
+    match /losses/{lossId} {
+      allow read, write: if true;
+    }
+
+    match /transformations/{transformationId} {
+      allow read, write: if true;
+    }
+
+    match /employees/{employeeId} {
+      allow read, write: if true;
+    }
+
+    match /attendance/{attendanceId} {
+      allow read, write: if true;
+    }
+
+    match /payroll_payments/{payrollId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // VENDAS PAUSADAS — rascunhos de operação.
+    // ------------------------------------------------------------------
+    match /paused_sales/{pausedSaleId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // AUDITORIA — escrita pela aplicação; eliminação apenas para o
+    // arquivamento (copia para audit_logs_archive antes de remover).
+    // ------------------------------------------------------------------
+    match /audit_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    match /audit_logs_archive/{logId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // DEFINIÇÕES DO SISTEMA.
+    // ------------------------------------------------------------------
+    match /settings/{settingId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
+    // Qualquer outra coleção/documento: NEGADO por omissão.
+    // ------------------------------------------------------------------
   }
 }

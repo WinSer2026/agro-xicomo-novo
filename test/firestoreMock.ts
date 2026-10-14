@@ -258,6 +258,15 @@ export const firestoreMock = {
   },
 
   runTransaction: async (_db: any, fn: (t: any) => Promise<any>) => {
+    // A API real de transacções: t.set/update/delete devolvem void e os erros
+    // de escrita aparecem no commit da transacção. Aqui as escritas são
+    // acumuladas e aguardadas no fim — sem promessas flutuantes que o Vitest
+    // reportaria como "unhandled rejection".
+    const pendingWrites: Promise<unknown>[] = [];
+    const track = (p: Promise<unknown>) => {
+      pendingWrites.push(p.catch((e: unknown) => { throw e; }));
+      return undefined;
+    };
     const t = {
       async get(ref: any) {
         const col = __collection(colNameOf(ref));
@@ -265,16 +274,18 @@ export const firestoreMock = {
         return { exists: () => !!data, id: docIdOf(ref), data: () => (data ? clone(data) : undefined) };
       },
       set(ref: any, data: DocData, opts?: any) {
-        return firestoreMock.setDoc(ref, data, opts);
+        track(firestoreMock.setDoc(ref, data, opts));
       },
       update(ref: any, data: DocData) {
-        return firestoreMock.updateDoc(ref, data);
+        track(firestoreMock.updateDoc(ref, data));
       },
       delete(ref: any) {
-        return firestoreMock.deleteDoc(ref);
+        track(firestoreMock.deleteDoc(ref));
       }
     };
-    return fn(t);
+    const result = await fn(t);
+    await Promise.all(pendingWrites);
+    return result;
   }
 };
 
