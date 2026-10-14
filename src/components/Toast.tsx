@@ -38,7 +38,9 @@ export default function Toast({ message, type = 'success', duration = 4000, onDi
     return () => window.clearTimeout(timer);
   }, [message, duration, onDismiss]);
 
-  if (!message || typeof document === 'undefined') return null;
+  // Success confirmations are intentionally silent across the whole application.
+  // Keep warnings, errors, and validation feedback visible to the operator.
+  if (!message || typeof document === 'undefined' || type === 'success') return null;
 
   return createPortal(
     <div

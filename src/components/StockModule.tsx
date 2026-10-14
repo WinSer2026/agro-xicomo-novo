@@ -3,7 +3,7 @@ import { uid } from '../utils/idHelper';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
-import Toast from './Toast';
+import Toast, { type ToastKind } from './Toast';
 import { Product, LossRecord, SystemSettings, Sale } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
@@ -149,6 +149,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   // Notification Banner
   const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
@@ -221,8 +222,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setShowDeleteModal(false);
       setDeleteProductTarget(null);
       setDeletePassword('');
-      setToastMessage(`Produto "${deleteProductTarget.name}" eliminado com sucesso!`);
-      setTimeout(() => setToastMessage(''), 4000);
+      triggerToast(`Produto "${deleteProductTarget.name}" eliminado com sucesso!`);
     } catch (err) {
       console.error(err);
       setDeleteError('Erro ao eliminar produto.');
@@ -335,7 +335,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       // diferença zero foi removido; a contagem física é calculada ao vivo no painel.
       setShowApplyPhysicalModal(false);
       setApplyPassword('');
-      setToastMessage(`Inventário físico sincronizado com sucesso! (${adjustedCount} artigos atualizados)`);
+      triggerToast(`Inventário físico sincronizado com sucesso! (${adjustedCount} artigos atualizados)`);
     } catch (err) {
       console.error(err);
       setApplyError('Falha ao gravar os ajustes de inventário na base de dados.');
@@ -436,7 +436,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast("Novas referências geradas para todos os produtos!");
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.");
+      triggerToast("Erro ao gerar referências.", 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -469,7 +469,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast(`Novas referências geradas para os produtos selecionados!`);
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.");
+      triggerToast("Erro ao gerar referências.", 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -623,8 +623,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setCategories(Array.from(customCats));
   };
 
-  const triggerToast = (msg: string) => {
+  const triggerToast = (msg: string, type: ToastKind = 'success') => {
     setToastMessage(msg);
+    setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
   };
 
@@ -638,7 +639,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (!newProdName) {
       setNewProdError('Preencha o nome do produto.');
-      triggerToast('Preencha o nome do produto.');
+      triggerToast('Preencha o nome do produto.', 'error');
       return;
     }
 
@@ -657,7 +658,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (priceError) {
       setNewProdError(priceError);
-      triggerToast(priceError);
+      triggerToast(priceError, 'error');
       return;
     }
 
@@ -723,7 +724,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdImageUrl('');
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao cadastrar produto.');
+      triggerToast('Erro ao cadastrar produto.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -756,7 +757,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const handleRegenerateBarcodesSelected = () => {
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) {
-      triggerToast('Nenhum produto selecionado. Marque os produtos primeiro.');
+      triggerToast('Nenhum produto selecionado. Marque os produtos primeiro.', 'warning');
       return;
     }
     askConfirmation(
@@ -1328,7 +1329,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       : products;
 
     if (productsToExport.length === 0) {
-      triggerToast(selectedOnly ? 'Nenhum produto selecionado. Marque os produtos que deseja descarregar.' : 'Nenhum produto em catálogo.');
+      triggerToast(selectedOnly ? 'Nenhum produto selecionado. Marque os produtos que deseja descarregar.' : 'Nenhum produto em catálogo.', 'warning');
       return;
     }
 
@@ -1518,7 +1519,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   // Direct Inline Adjustment helper with password dialog verification
   const adjustProductStockDirectly = async (product: Product, newQty: number) => {
     if (newQty < 0) {
-      triggerToast('A quantidade em stock não pode ser negativa.');
+      triggerToast('A quantidade em stock não pode ser negativa.', 'error');
       return;
     }
 
@@ -1526,7 +1527,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
     // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
     if (!inputPw || !pw || pw.trim() !== inputPw) {
-      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.');
+      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.', 'warning');
       return;
     }
 
@@ -1680,7 +1681,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (priceError) {
       setAdjustError(priceError);
-      triggerToast(priceError);
+      triggerToast(priceError, 'error');
       return;
     }
 
@@ -1749,12 +1750,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (isSubmitting) return;
 
     if (!lossProduct || lossQty <= 0 || !lossJustification) {
-      triggerToast('Preencha todos os campos do registo de quebra.');
+      triggerToast('Preencha todos os campos do registo de quebra.', 'error');
       return;
     }
 
     if (lossQty > lossProduct.stockQty) {
-      triggerToast('A quantidade de quebra excede o stock ativo disponível.');
+      triggerToast('A quantidade de quebra excede o stock ativo disponível.', 'error');
       return;
     }
 
@@ -1806,7 +1807,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     loadInventoryData();
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao registar quebra.');
+      triggerToast('Erro ao registar quebra.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -1860,7 +1861,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   return (
     <div className="space-y-6" id="stock_module">
       {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
 
       {/* RENDER IN PORTAL (TOP HEADER ACTIONS, SIDE OF DATE) */}
       {typeof document !== 'undefined' && document.getElementById('module-header-actions') && createPortal(
@@ -2441,7 +2442,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 y += 6;
               });
               doc.save(`Mapa_Quebras_${lossesStartDate}_${lossesEndDate}.pdf`);
-              setToastMessage('Relatório PDF de Quebras gerado com sucesso!');
+              triggerToast('Relatório PDF de Quebras gerado com sucesso!');
             }}
             onExportExcel={() => {
               const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
@@ -2457,7 +2458,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               const wb = XLSX.utils.book_new();
               XLSX.utils.book_append_sheet(wb, ws, 'Quebras_Perdas');
               XLSX.writeFile(wb, `Quebras_Stock_${lossesStartDate}_a_${lossesEndDate}.xlsx`);
-              setToastMessage('Planilha Excel de Quebras descarregada com sucesso!');
+              triggerToast('Planilha Excel de Quebras descarregada com sucesso!');
             }}
           />
 
@@ -2627,7 +2628,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       preset[p.id] = p.stockQty || 0;
                     });
                     setPhysicalCounts(preset);
-                    setToastMessage('Saldos do sistema copiados para a contagem física!');
+                    triggerToast('Saldos do sistema copiados para a contagem física!');
                   }}
                   className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="Preenche todas as contagens com as quantidades atuais do sistema"
@@ -2644,7 +2645,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       reset[p.id] = 0;
                     });
                     setPhysicalCounts(reset);
-                    setToastMessage('Campos de contagem física zerados!');
+                    triggerToast('Campos de contagem física zerados!');
                   }}
                   className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="Zera todas as quantidades para nova contagem cega"
@@ -2840,7 +2841,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       const wb = XLSX.utils.book_new();
                       XLSX.utils.book_append_sheet(wb, ws, 'Contagem_Fisica_Stock');
                       XLSX.writeFile(wb, `Contagem_Fisica_Inventario_${new Date().toISOString().split('T')[0]}.xlsx`);
-                      setToastMessage('Planilha de Contagem Física exportada com sucesso!');
+                      triggerToast('Planilha de Contagem Física exportada com sucesso!');
                     }}
                     className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
@@ -2895,7 +2896,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       });
 
                       doc.save(`Mapa_Contagem_Fisica_${new Date().toISOString().split('T')[0]}.pdf`);
-                      setToastMessage('Relatório PDF de Contagem Física gerado!');
+                      triggerToast('Relatório PDF de Contagem Física gerado!');
                     }}
                     className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
@@ -3201,7 +3202,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           const prods = await dbService.getProducts();
           setProducts(prods);
           setShowTransformationModal(false);
-          setToastMessage('Transformação concluída e stock atualizado!');
+          triggerToast('Transformação concluída e stock atualizado!');
         }}
       />
 

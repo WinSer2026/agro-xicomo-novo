@@ -84,5 +84,12 @@ describe('PDV — Registo de Venda Antiga (lançamento retroactivo)', () => {
     expect(dump.sales[0].paymentMethod).toBe('Dinheiro');
     // stock must have been deducted
     expect(dump.products.find((p: any) => p.id === 'prod-1').stockQty).toBe(99);
+
+    // Let the post-commit flow finish: a completed sale must not produce a success toast.
+    await screen.findByText(/Recibo nº/);
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 100));
+    });
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

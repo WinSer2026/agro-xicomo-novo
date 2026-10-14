@@ -1,5 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
-import Toast from './Toast';
+import Toast, { type ToastKind } from './Toast';
 import { uid } from '../utils/idHelper';
 import { describeError } from '../utils/errorHelper';
 import { useConfirmDialog } from './ConfirmDialog';
@@ -100,6 +100,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   // Toast
   const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [isPrinterConnected, setIsPrinterConnected] = useState(false);
@@ -274,8 +275,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     );
   };
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, type: ToastKind = 'success') => {
     setToastMessage(msg);
+    setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
   };
 
@@ -296,7 +298,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       const result = await dbService.archiveAuditLogsBefore(archiveBeforeDate, 200);
       if (result.archivedCount === 0) {
-        showToast('Não existem registos ativos anteriores à data indicada.');
+        showToast('Não existem registos ativos anteriores à data indicada.', 'warning');
         return;
       }
 
@@ -313,11 +315,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(
         result.hasMore
           ? `${result.archivedCount} registos arquivados. Existem mais; repita a operação para continuar.`
-          : `${result.archivedCount} registos arquivados com segurança.`
+          : `${result.archivedCount} registos arquivados com segurança.`,
+        result.hasMore ? 'warning' : 'success'
       );
     } catch (error) {
       console.error('[TechnicalModule] Audit archive failed:', error);
-      showToast('Não foi possível arquivar os registos. Nenhum lote parcial foi eliminado.');
+      showToast('Não foi possível arquivar os registos. Nenhum lote parcial foi eliminado.', 'error');
     } finally {
       setIsArchivingAuditLogs(false);
     }
@@ -365,7 +368,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(`Relatório de Auditoria PDF descarregado com ${exportLogs.length} registo(s).`);
     } catch (error) {
       console.error('[TechnicalModule] Audit PDF export failed:', error);
-      showToast('Não foi possível exportar o relatório de auditoria.');
+      showToast('Não foi possível exportar o relatório de auditoria.', 'error');
     } finally {
       setIsExportingAuditLogs(false);
     }
@@ -391,7 +394,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(`Planilha de Auditoria descarregada com ${exportLogs.length} registo(s).`);
     } catch (error) {
       console.error('[TechnicalModule] Audit Excel export failed:', error);
-      showToast('Não foi possível exportar a planilha de auditoria.');
+      showToast('Não foi possível exportar a planilha de auditoria.', 'error');
     } finally {
       setIsExportingAuditLogs(false);
     }
@@ -401,7 +404,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 1.5 * 1024 * 1024) {
-        showToast('Erro: O ficheiro do logotipo não deve exceder 1.5MB.');
+        showToast('Erro: O ficheiro do logotipo não deve exceder 1.5MB.', 'error');
         return;
       }
       const reader = new FileReader();
@@ -422,13 +425,13 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
     const cleanUsername = usrUsername.trim();
     if (!cleanUsername) {
-      showToast('Por favor, indique o utilizador.');
+      showToast('Por favor, indique o utilizador.', 'error');
       return;
     }
 
     // Na EDIÇÃO a palavra-passe pode ficar vazia (mantém-se a actual).
     if (!usrPassword.trim() && !editingUser) {
-      showToast('Por favor, indique a palavra-passe.');
+      showToast('Por favor, indique a palavra-passe.', 'error');
       return;
     }
 
@@ -438,7 +441,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         && (!editingUser || u.id !== editingUser.id)
     );
     if (duplicate) {
-      showToast(`Já existe o utilizador "${duplicate.username}". Escolha outro nome.`);
+      showToast(`Já existe o utilizador "${duplicate.username}". Escolha outro nome.`, 'error');
       return;
     }
 
@@ -452,7 +455,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     // o que rejeitava a gravação das contas antigas com um erro de política.
     const decision = decidePasswordUpdate(editingUser, usrPassword);
     if (decision.action === 'invalid') {
-      showToast(decision.message || 'Palavra-passe inválida.');
+      showToast(decision.message || 'Palavra-passe inválida.', 'error');
       return;
     }
 
@@ -501,7 +504,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     } catch (err) {
       const info = describeError(err, 'Não foi possível gravar o utilizador.');
       console.error('[Técnico] handleSaveUser:', info.raw);
-      showToast(info.title);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -521,7 +524,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   const promptDeleteUser = (id: string, username: string) => {
     if (username.toLowerCase() === 'admin') {
-      showToast('O administrador padrão "admin" não pode ser eliminado.');
+      showToast('O administrador padrão "admin" não pode ser eliminado.', 'error');
       return;
     }
     setUserToDelete({ id, username });
@@ -533,7 +536,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const { id, username } = userToDelete;
 
     if (username.toLowerCase() === 'admin') {
-      showToast('O administrador padrão "admin" não pode ser eliminado.');
+      showToast('O administrador padrão "admin" não pode ser eliminado.', 'error');
       setUserToDelete(null);
       return;
     }
@@ -558,7 +561,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     } catch (err) {
       const info = describeError(err, 'Não foi possível eliminar o utilizador.');
       console.error('[Técnico] confirmDeleteUser:', info.raw);
-      showToast(info.title);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -570,7 +573,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     if (isSubmitting) return;
 
     if (!compName || !stockCode) {
-      showToast('Por favor, preencha o nome da empresa e o código de stock.');
+      showToast('Por favor, preencha o nome da empresa e o código de stock.', 'error');
       return;
     }
 
@@ -627,7 +630,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     } catch (err) {
       const info = describeError(err, 'Não foi possível gravar as configurações.');
       console.error('[Técnico] handleSaveSettings:', info.raw);
-      showToast(info.title);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -714,7 +717,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   return (
     <div className="space-y-6 animate-fade-in" id="tech_module">
       {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
       {confirmDialog}
 
       {/* Title */}
@@ -1330,7 +1333,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             setIsVirtualMode(false);
                             showToast('Impressora Térmica associada com sucesso!');
                           } else {
-                            showToast(`Falha de Conexão: ${res.error}`);
+                            showToast(`Falha de Conexão: ${res.error}`, 'error');
                           }
                         }}
                         className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
@@ -1346,7 +1349,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           setIsPrinterConnected(false);
                           setIsVirtualMode(false);
                           setHardwareError(null);
-                          showToast('Dispositivo de impressão desconectado.');
+                          showToast('Dispositivo de impressão desconectado.', 'warning');
                         }}
                         className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
                       >
@@ -1471,10 +1474,10 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                                     showToast('Banco de dados restaurado com sucesso!');
                                     loadAllData();
                                   } else {
-                                    showToast('Erro: Dados de backup não encontrados.');
+                                    showToast('Erro: Dados de backup não encontrados.', 'error');
                                   }
                                 } catch (err) {
-                                  showToast('Erro ao restaurar o backup.');
+                                  showToast('Erro ao restaurar o backup.', 'error');
                                 }
                               },
                               { danger: true, confirmLabel: 'Restaurar' }
@@ -1519,7 +1522,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             showToast('Recuperação efetuada com sucesso a partir do ficheiro de backup!');
                             loadAllData();
                           } catch (err) {
-                            showToast('Ficheiro de backup inválido ou corrompido.');
+                            showToast('Ficheiro de backup inválido ou corrompido.', 'error');
                           }
                         };
                         reader.readAsText(file);
@@ -1750,7 +1753,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             if (!isDisabled) {
                               if (isChecked) {
                                 if (usrRoles.length === 1) {
-                                  showToast('O utilizador deve possuir pelo menos 1 nível de permissão.');
+                                  showToast('O utilizador deve possuir pelo menos 1 nível de permissão.', 'error');
                                   return;
                                 }
                                 setUsrRoles(usrRoles.filter(item => item !== r.id));
