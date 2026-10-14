@@ -1,5 +1,5 @@
 import { getDateRangeFromPreset, isDateInRange, formatDatePT } from '../src/utils/dateRangeHelper';
-import { hashPassword, verifyPassword, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
+import { hashPassword, verifyPassword, needsPasswordRehash, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
 import { generateNextReceiptNumber, generateNextInvoiceNumber } from '../src/utils/sequenceHelper';
 import { Product, ProductTransformation, Sale, SaleItem } from '../src/types';
 import { clampItemDiscountValue, getItemDiscount, getMaxItemDiscountValue, getSaleTotals } from '../src/utils/saleTotals';
@@ -45,15 +45,25 @@ async function runTests() {
   console.log('\n--- Test Suite 2: Security & Crypto ---');
   const pwd = 'Xicomo@Admin2026!';
   const hashed = await hashPassword(pwd);
-  assert(hashed.startsWith('sha256:'), 'Password hash uses salt and SHA-256');
+  assert(hashed.startsWith('pbkdf2:'), 'Password hash uses salt and PBKDF2');
   const isValid = await verifyPassword(pwd, hashed);
   assert(isValid === true, 'Valid password verification succeeds');
   const isInvalid = await verifyPassword('WrongPassword', hashed);
   assert(isInvalid === false, 'Invalid password rejected');
+  assert(needsPasswordRehash(hashed) === false, 'PBKDF2 hashes do not need rehash');
+  assert(needsPasswordRehash('05082') === true, 'Legacy plaintext hashes are flagged for migration');
 
-  // Backward-compatibility: plain text hash verification
+  // Backward-compatibility: plain text hash verification (migration path)
   const isPlainValid = await verifyPassword('05082', '05082');
   assert(isPlainValid === true, 'Plain legacy password fallback check succeeds');
+
+  // Backward-compatibility: legacy salted SHA-256 verification (self-made test vector)
+  const isLegacyValid = await verifyPassword(
+    'teste1',
+    'sha256:SALT1234:29dc010c114d6021a750f6a270bbd27c8c771ab192c18c842bca171514b0f598'
+  );
+  assert(isLegacyValid === true, 'Legacy sha256 password verification still succeeds');
+  assert(needsPasswordRehash('sha256:x:y') === true, 'Legacy sha256 hashes are flagged for migration');
 
   // XSS Sanitization
   const dangerousStr = '<script>alert("hack")</script> Milho';

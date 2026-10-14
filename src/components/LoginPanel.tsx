@@ -1,11 +1,11 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
 import { getUserRoles } from '../utils/roleHelper';
-import { validateAccessPassword, verifyPassword } from '../utils/securityHelper';
+import { validateAccessPassword, verifyPassword, needsPasswordRehash, hashPassword } from '../utils/securityHelper';
 import { applyNewPassword } from '../utils/credentialsReset';
-import { OFFICIAL_RESET_CREDENTIALS, CREDENTIALS_RESET_VERSION } from '../data/credentialsReset';
 
 interface LoginPanelProps {
   onLoginSuccess: (user: { username: string; role: string; roles?: AppRole[] }) => void;
@@ -15,12 +15,9 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [showMFA, setShowMFA] = useState(false);
-  const [mfaCode, setMfaCode] = useState('');
-  const [pendingUser, setPendingUser] = useState<UserCredentials | null>(null);
-  const [show2FASetup, setShow2FASetup] = useState(false);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingUser, setPendingUser] = useState<UserCredentials | null>(null);
 
   // Primeiro acesso após o reset de credenciais: troca obrigatória de palavra-passe
   const [showPasswordChange, setShowPasswordChange] = useState(false);
@@ -114,19 +111,6 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     return () => clearInterval(interval);
   }, [lockoutUntil]);
 
-  // Credenciais oficiais de contingência (usadas apenas se a base de dados ainda não tiver
-  // credenciais sincronizadas). Palavras-passe TEMPORÁRIAS: obrigam troca no primeiro login.
-  const OFFICIAL_BACKUP_CREDS: UserCredentials[] = OFFICIAL_RESET_CREDENTIALS.map(c => ({
-    id: c.id,
-    username: c.username,
-    passwordHash: c.passwordHash,
-    role: c.role,
-    roles: c.roles,
-    mfaEnabled: false,
-    mustChangePassword: true,
-    passwordResetVersion: CREDENTIALS_RESET_VERSION
-  }));
-
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -158,76 +142,21 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       const cleanUser = username.trim();
       const cleanPass = password.trim();
       const lower = cleanUser.toLowerCase();
-      const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+      // Auditoria honesta: sem servidor, o IP real do cliente não é conhecido.
+      const ipAddress = 'N/D';
 
-      // 1. Emergency Master Key & Admin Bypass Check (Técnico / Master)
-      if ((lower === 'mazive' || lower === 'admin') && (cleanPass === '0147' || cleanPass === 'admin' || cleanPass === '05082')) {
-        safeStorage.removeItem('agro_login_failed_attempts');
-        safeStorage.removeItem('agro_login_lockout_until');
-
-        // Mesmo com a chave mestre, se a conta tiver palavra-passe temporária do reset,
-        // o operador é obrigado a definir uma nova palavra-passe antes de entrar.
-        try {
-          const creds = await dbService.getCredentials();
-          const masterUser = (creds || []).find(c => c.username.toLowerCase() === lower);
-          if (masterUser && masterUser.mustChangePassword) {
-            setPendingUser(masterUser);
-            setNewPassword('');
-            setConfirmPassword('');
-            setChangePasswordError('');
-            setShowPasswordChange(true);
-            setIsSubmitting(false);
-            return;
-          }
-        } catch (e) {
-          console.warn('Master key credential check failed:', e);
-        }
-
-        const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
-        safeSessionStorage.setItem('agro_session_id', masterSessionId);
-
-        // Background non-blocking persistence
-        dbService.addAuditLog({
-          id: 'log-' + Date.now(),
-          timestamp: new Date().toISOString(),
-          username: cleanUser,
-          ipAddress,
-          action: 'Login com Chave Mestre de Emergência',
-          status: 'Sucesso',
-          level: 'CRITICAL',
-          details: 'Acesso master/técnico concedido com sucesso.'
-        }).catch(err => console.warn('Audit log write error:', err));
-
-        dbService.saveActiveSession({
-          id: masterSessionId,
-          username: cleanUser,
-          role: 'Técnico',
-          roles: ['Técnico'],
-          loginTime: new Date().toISOString(),
-          ipAddress
-        }).catch(err => console.warn('Active session write error:', err));
-
-        onLoginSuccess({ username: cleanUser, role: 'Técnico', roles: ['Técnico'] });
-        return;
-      }
-
-      // 2. Query normal credentials with fallback
+      // Credenciais apenas da base de dados (sem chaves mestre nem lista de
+      // contingência hardcoded — Auditoria FASE 1, S-02/S-04).
       let allCreds: UserCredentials[] = [];
       try {
         allCreds = await dbService.getCredentials();
       } catch (err) {
-        console.warn('Failed to fetch credentials from database service, using local fallback:', err);
+        console.warn('Failed to fetch credentials from database service:', err);
+        setError('Não foi possível ligar à base de dados. Verifique a ligação à internet e tente novamente.');
+        return;
       }
 
-      if (!allCreds || allCreds.length === 0) {
-        allCreds = OFFICIAL_BACKUP_CREDS;
-      }
-
-      const user = allCreds.find(c => 
-        c.username.toLowerCase() === lower || 
-        (lower === 'ainira' && c.username.toLowerCase() === 'ainara') || 
-        (lower === 'ainara' && c.username.toLowerCase() === 'ainira')
-      );
+      const user = (allCreds || []).find(c => c.username.toLowerCase() === lower);
 
       const isPasswordMatch = user ? await verifyPassword(cleanPass, user.passwordHash) : false;
 
@@ -239,7 +168,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
 
         // Background non-blocking audit log
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: cleanUser || 'Desconhecido',
           ipAddress,
@@ -272,7 +201,31 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       safeStorage.removeItem('agro_login_failed_attempts');
       safeStorage.removeItem('agro_login_lockout_until');
 
-      // 3. Primeiro acesso após o reset de credenciais: exigir nova palavra-passe
+      // Migração de hash legado (sha256/texto simples) para PBKDF2 no login.
+      if (user && needsPasswordRehash(user.passwordHash)) {
+        try {
+          const migrated: UserCredentials = {
+            ...user,
+            passwordHash: await hashPassword(cleanPass),
+            passwordResetVersion: user.passwordResetVersion
+          };
+          await dbService.saveCredential(migrated);
+          void dbService.addAuditLog({
+            id: 'log-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8),
+            timestamp: new Date().toISOString(),
+            username: cleanUser,
+            ipAddress,
+            action: 'Palavra-passe Migrada para Formato Seguro',
+            status: 'Sucesso',
+            level: 'INFO',
+            details: 'O hash da palavra-passe foi promovido para PBKDF2 (migração automática).'
+          }).catch(() => {});
+        } catch (migErr) {
+          console.warn('Password hash migration failed (login continues):', migErr);
+        }
+      }
+
+      // 3. Primeiro acesso: exigir nova palavra-passe
       if (user.mustChangePassword) {
         setPendingUser(user);
         setNewPassword('');
@@ -283,7 +236,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      // 4. Técnico / Admin direct login without blocker
+      // 4. Login normal
       await finalizeSession(user, ipAddress);
 
     } catch (err) {
@@ -320,7 +273,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+      const ipAddress = 'N/D';
       await finalizeSession({ ...pendingUser, passwordHash: '', mustChangePassword: false }, ipAddress);
       setShowPasswordChange(false);
       setPendingUser(null);
@@ -331,42 +284,6 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       setChangePasswordError('Erro ao gravar a nova palavra-passe. Tente novamente.');
     } finally {
       setIsSubmitting(false);
-    }
-  };
-
-  const handleVerifyMFA = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-
-    if (!pendingUser) return;
-
-    if (mfaCode.length !== 6 || isNaN(Number(mfaCode))) {
-      setError('Insira um código de segurança de 6 dígitos.');
-      return;
-    }
-
-    const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
-
-    // Accept "123456", "000000" or valid simulated TOTP code
-    if (mfaCode === '123456' || mfaCode === '000000' || true) {
-      if (show2FASetup) {
-        pendingUser.mfaEnabled = true;
-        pendingUser.mfaSecret = 'MAZIVE2FA' + Date.now();
-        await dbService.saveCredential(pendingUser);
-      }
-      await finalizeSession(pendingUser, ipAddress);
-    } else {
-      setError('Código MFA incorreto. Tente novamente ou use a Chave de Emergência.');
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: pendingUser.username,
-        ipAddress,
-        action: 'MFA Falhado',
-        status: 'Falha',
-        level: 'WARNING',
-        details: 'Código de autenticação de dois fatores inválido.'
-      });
     }
   };
 
@@ -388,7 +305,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         ipAddress: ip
       }),
       dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: user.username,
         ipAddress: ip,
@@ -445,6 +362,14 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
             <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-xs font-bold flex items-center gap-2 animate-shake">
               <span className="material-symbols-outlined text-[18px] text-red-600">error</span>
               <span>{error}</span>
+            </div>
+          )}
+
+          {/* Bootstrap notice (instalação nova) */}
+          {settings?.bootstrapNotice && !showPasswordChange && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-xl text-xs font-bold leading-relaxed">
+              <span className="material-symbols-outlined text-[16px] align-middle mr-1">info</span>
+              {settings.bootstrapNotice}
             </div>
           )}
 
@@ -535,7 +460,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
                 Voltar ao Login Principal
               </button>
             </form>
-          ) : !showMFA && !show2FASetup ? (
+          ) : (
             <form onSubmit={handleLoginSubmit} autoComplete="off" noValidate className="space-y-4">
               <div>
                 <label className="block text-xs font-black uppercase text-gray-700 mb-1">
@@ -643,76 +568,6 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
                   <span>Técnicos: <strong className="text-emerald-700">{activeTechsCount}/4</strong></span>
                 </div>
               </div>
-            </form>
-          ) : (
-            <form onSubmit={handleVerifyMFA} autoComplete="off" noValidate className="space-y-4">
-              {show2FASetup && (
-                <div className="bg-gray-50 p-4 border border-gray-200 rounded-xl text-center space-y-2">
-                  <p className="text-xs font-bold text-gray-700">Segurança Requerida: Configurar Autenticação de 2 Fatores (MFA)</p>
-                  <div className="w-28 h-28 bg-white mx-auto flex items-center justify-center rounded-lg border border-gray-300 shadow-xs">
-                    <svg className="w-20 h-20 text-gray-800" viewBox="0 0 100 100" fill="currentColor">
-                      <rect x="10" y="10" width="20" height="20" />
-                      <rect x="70" y="10" width="20" height="20" />
-                      <rect x="10" y="70" width="20" height="20" />
-                      <rect x="40" y="40" width="20" height="20" />
-                      <rect x="40" y="10" width="10" height="10" />
-                      <rect x="10" y="40" width="10" height="10" />
-                      <rect x="70" y="40" width="10" height="20" />
-                      <rect x="40" y="70" width="20" height="10" />
-                      <rect x="70" y="70" width="20" height="20" />
-                    </svg>
-                  </div>
-                  <p className="text-[10px] text-gray-500">
-                    Leia o QR Code no Google Authenticator ou insira o código manual abaixo.
-                  </p>
-                </div>
-              )}
-
-              {showMFA && (
-                <div className="text-center bg-emerald-50/50 p-4 border border-emerald-100 rounded-xl">
-                  <span className="material-symbols-outlined text-[36px] text-emerald-700">security_token</span>
-                  <p className="text-xs font-bold text-gray-700 mt-1">Validação de Identidade de Técnico</p>
-                  <p className="text-[11px] text-gray-500">
-                    Insira o token de segurança gerado no seu telemóvel.
-                  </p>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-black uppercase text-gray-700 mb-1 text-center">
-                  Código de Verificação de 6 Dígitos
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={mfaCode}
-                  onChange={(e) => setMfaCode(e.target.value)}
-                  autoComplete="one-time-code"
-                  placeholder="••••••"
-                  className="w-full text-center border border-gray-300 rounded-xl py-2.5 text-lg font-mono tracking-[0.25em] focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3 bg-emerald-700 hover:bg-emerald-800 transition-all text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-md flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <span className="material-symbols-outlined text-[18px]">verified_user</span>
-                Confirmar Token MFA
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setShowMFA(false);
-                  setShow2FASetup(false);
-                  setPendingUser(null);
-                  setError('');
-                }}
-                className="w-full py-2 border border-gray-300 text-gray-700 font-bold text-xs rounded-xl hover:bg-gray-50 transition-colors cursor-pointer"
-              >
-                Voltar ao Login Principal
-              </button>
             </form>
           )}
         </div>

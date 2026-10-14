@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import Toast from './Toast';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
@@ -2316,13 +2317,8 @@ export default function FinanceModule() {
         </div>
       )}
 
-      {/* Toast banner */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700">
-          <span className="material-symbols-outlined text-emerald-500">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
     </div>
   );
 }

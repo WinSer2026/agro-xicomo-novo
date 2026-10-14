@@ -6,11 +6,12 @@ import {
   collection, 
   doc, 
   setDoc, 
-  getDocs, 
-  deleteDoc, 
-  onSnapshot, 
-  getDoc, 
-  writeBatch, 
+  getDocs,
+  deleteDoc,
+  onSnapshot,
+  getDoc,
+  writeBatch,
+  runTransaction,
   increment,
   query,
   where,
@@ -43,6 +44,7 @@ import {
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
+import { uid } from './idHelper';
 import {
   getArchiveCutoffTimestamp,
   getCursorPageMetadata,
@@ -102,6 +104,8 @@ export interface AuditArchiveResult {
   cutoffTimestamp: string;
 }
 
+import type { StockCorrectionSnapshot } from './inventoryCutoff';
+
 const app = initializeApp(firebaseConfig);
 
 let dbInstance;
@@ -118,6 +122,11 @@ try {
 }
 
 const db = dbInstance;
+
+/** Comparações de ordenação tolerantes a campos em falta em registos legados. */
+function safeStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
 
 /**
  * Audit records are valuable, but they must not turn a completed sale or stock
@@ -143,6 +152,7 @@ export class FirebaseDBService {
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
   private attendanceCache: Attendance[] | null = null;
+  private lastWriteAckAt: number | null = null;
   private unsubscribers: (() => void)[] = [];
   private largeCollectionListenersStarted = false;
 
@@ -150,7 +160,6 @@ export class FirebaseDBService {
     if (this.initPromise) {
       return this.initPromise;
     }
-    console.log('[FirebaseDBService] Initializing Firestore real-time listeners and caching...');
     this.initPromise = Promise.resolve();
 
     // Clear previous listeners if any
@@ -167,7 +176,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         customers.push(doc.data() as Customer);
       });
-      this.customersCache = customers.sort((a, b) => a.name.localeCompare(b.name));
+      this.customersCache = customers.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'customers', count: customers.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (customers):', error);
@@ -179,7 +188,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         transformations.push(doc.data() as ProductTransformation);
       });
-      this.transformationsCache = transformations.sort((a, b) => b.date.localeCompare(a.date));
+      this.transformationsCache = transformations.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations', count: transformations.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (transformations):', error);
@@ -192,7 +201,7 @@ export class FirebaseDBService {
         creds.push(doc.data() as UserCredentials);
       });
       if (creds.length > 0) {
-        this.credentialsCache = creds.sort((a, b) => a.username.localeCompare(b.username));
+        this.credentialsCache = creds.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
         safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
         window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'credentials', count: creds.length } }));
       }
@@ -206,7 +215,7 @@ export class FirebaseDBService {
       snapshot.forEach(doc => {
         sessions.push(doc.data() as ActiveSession);
       });
-      this.activeSessionsCache = sessions.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+      this.activeSessionsCache = sessions.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
       safeStorage.setItem('agro_active_sessions_cache', JSON.stringify(this.activeSessionsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'active_sessions', count: sessions.length } }));
     }, (error) => {
@@ -229,7 +238,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'losses'), (snapshot) => {
       const losses: LossRecord[] = [];
       snapshot.forEach(d => losses.push(d.data() as LossRecord));
-      this.lossesCache = losses.sort((a, b) => b.date.localeCompare(a.date));
+      this.lossesCache = losses.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', count: losses.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (losses):', error);
@@ -239,7 +248,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'payroll_payments'), (snapshot) => {
       const payroll: PayrollPayment[] = [];
       snapshot.forEach(d => payroll.push(d.data() as PayrollPayment));
-      this.payrollCache = payroll.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+      this.payrollCache = payroll.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'payroll_payments', count: payroll.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (payroll_payments):', error);
@@ -249,7 +258,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'employees'), (snapshot) => {
       const employees: Employee[] = [];
       snapshot.forEach(d => employees.push(d.data() as Employee));
-      this.employeesCache = employees.sort((a, b) => a.name.localeCompare(b.name));
+      this.employeesCache = employees.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'employees', count: employees.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (employees):', error);
@@ -259,7 +268,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'attendance'), (snapshot) => {
       const attendance: Attendance[] = [];
       snapshot.forEach(d => attendance.push(d.data() as Attendance));
-      this.attendanceCache = attendance.sort((a, b) => b.date.localeCompare(a.date));
+      this.attendanceCache = attendance.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'attendance', count: attendance.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (attendance):', error);
@@ -269,7 +278,7 @@ export class FirebaseDBService {
     this.unsubscribers.push(onSnapshot(collection(db, 'paused_sales'), (snapshot) => {
       const paused: PausedSale[] = [];
       snapshot.forEach(d => paused.push(d.data() as PausedSale));
-      this.pausedSalesCache = paused.sort((a, b) => (b.createdAt || b.date).localeCompare(a.createdAt || a.date));
+      this.pausedSalesCache = paused.sort((a, b) => safeStr(b.createdAt || b.date).localeCompare(safeStr(a.createdAt || a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'paused_sales', count: paused.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (paused_sales):', error);
@@ -297,7 +306,7 @@ export class FirebaseDBService {
       snapshot.forEach(documentSnapshot => {
         products.push(this.sanitizeProduct(this.recordFromSnapshot<Product>(documentSnapshot)));
       });
-      this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+      this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
       safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', count: products.length } }));
     }, (error) => {
@@ -309,7 +318,7 @@ export class FirebaseDBService {
       snapshot.forEach(documentSnapshot => {
         sales.push(this.recordFromSnapshot<Sale>(documentSnapshot));
       });
-      this.salesCache = sales.sort((a, b) => b.date.localeCompare(a.date));
+      this.salesCache = sales.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: sales.length } }));
     }, (error) => {
       console.error('[FirebaseDBService] onSnapshot error (sales):', error);
@@ -387,15 +396,25 @@ export class FirebaseDBService {
   // Generic DB methods
   private async getAll<T>(colName: string): Promise<T[]> {
     try {
-      console.log(`[FirebaseDBService] getAll() fetching collection: ${colName}`);
       const snapshot = await getDocs(collection(db, colName));
       const items = snapshot.docs.map(doc => doc.data() as T);
-      console.log(`[FirebaseDBService] getAll() fetched ${items.length} records from ${colName}`);
       return items;
     } catch (e) {
       console.error(`[FirebaseDBService] Error getting ${colName}:`, e);
       return [];
     }
+  }
+
+  /**
+   * Strict variant of getAll(): distinguishes "collection is empty" from
+   * "read failed". Critical reads (products, credentials) MUST use this so a
+   * transient network error can never be mistaken for an empty database and
+   * trigger destructive seeding/overwriting (Auditoria FASE 1, achados A-02/D-03).
+   */
+  private async getAllOrFail<T>(colName: string): Promise<T[]> {
+    const snapshot = await getDocs(collection(db, colName));
+    const items = snapshot.docs.map(doc => doc.data() as T);
+    return items;
   }
 
   /** Convert a Firestore document to an app record while preserving its document ID. */
@@ -468,9 +487,8 @@ export class FirebaseDBService {
     try {
       const validId = String(id || data?.id || data?.invoiceNumber || Date.now());
       const sanitized = this.sanitizeData(data);
-      console.log(`[FirebaseDBService] upsert() to collection: ${colName}, ID: ${validId}`);
       await setDoc(doc(db, colName, validId), sanitized);
-      console.log(`[FirebaseDBService] upsert() successful on ${colName}/${validId}`);
+      this.lastWriteAckAt = Date.now();
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, id: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error saving to ${colName}/${id}:`, e);
@@ -484,7 +502,6 @@ export class FirebaseDBService {
     // legitimately contain much more than one archive/page worth of records.
     const writesPerCommit = 450;
     try {
-      console.log(`[FirebaseDBService] upsertBatch() to collection: ${colName}, count: ${items.length}`);
       for (let offset = 0; offset < items.length; offset += writesPerCommit) {
         const batch = writeBatch(db);
         items.slice(offset, offset + writesPerCommit).forEach(item => {
@@ -494,7 +511,6 @@ export class FirebaseDBService {
         });
         await batch.commit();
       }
-      console.log(`[FirebaseDBService] upsertBatch() successful on ${colName}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, count: items.length } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error batch saving to ${colName}:`, e);
@@ -505,9 +521,7 @@ export class FirebaseDBService {
   private async deleteRow(colName: string, id: string): Promise<void> {
     try {
       const validId = String(id);
-      console.log(`[FirebaseDBService] deleteRow() from collection: ${colName}, ID: ${validId}`);
       await deleteDoc(doc(db, colName, validId));
-      console.log(`[FirebaseDBService] deleteRow() successful on ${colName}/${validId}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, deletedId: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error deleting from ${colName}/${id}:`, e);
@@ -530,10 +544,16 @@ export class FirebaseDBService {
     };
   }
 
+  /**
+   * Devolve SEMPRE cópias superficiais dos produtos.
+   * Vários módulos alteram o produto no próprio objecto (ex.: prod.stockQty = ...)
+   * antes de gravar. Como a cache partilhada era devolvida por referência, essas
+   * alterações ficavam "sujas" na cache mesmo quando a gravação falhava — e dois
+   * terminais passavam a ver valores diferentes. As cópias evitam esse efeito.
+   */
   public async getProducts(): Promise<Product[]> {
     if (this.productsCache && this.productsCache.length > 0) {
-      console.log(`[FirebaseDBService] getProducts() returning cached products (${this.productsCache.length})`);
-      return this.productsCache;
+      return this.productsCache.map(p => ({ ...p }));
     }
     const cached = safeStorage.getItem('agro_products_cache');
     if (cached) {
@@ -542,22 +562,24 @@ export class FirebaseDBService {
         if (Array.isArray(parsed) && parsed.length > 0) {
           const cleaned = parsed.map(p => this.sanitizeProduct(p));
           this.productsCache = cleaned;
-          return cleaned;
+          return cleaned.map(p => ({ ...p }));
         }
       } catch (e) {}
     }
-    const rawProducts = await this.getAll<Product>('products');
+    // Leitura estrita: se a ligação falhar, NÃO interpretar como "catálogo
+    // vazio" (isso re-injetava produtos de demonstração na base real). Em caso
+    // de erro, propagar e deixar o cache local servir de fallback.
+    const rawProducts = await this.getAllOrFail<Product>('products');
     if (rawProducts.length === 0) {
-      console.log('[FirebaseDBService] getProducts() found 0 products in Firestore. Seeding initial products...');
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
       await this.upsertBatch('products', seeded);
       this.productsCache = seeded;
-      return seeded;
+      return seeded.map(p => ({ ...p }));
     }
     const products = rawProducts.map(p => this.sanitizeProduct(p));
-    this.productsCache = products.sort((a, b) => a.name.localeCompare(b.name));
+    this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
-    return this.productsCache;
+    return this.productsCache.map(p => ({ ...p }));
   }
 
   /**
@@ -604,7 +626,6 @@ export class FirebaseDBService {
 
   public async saveProduct(p: Product): Promise<void> {
     const cleaned = this.sanitizeProduct(p);
-    console.log(`[FirebaseDBService] saveProduct() ID: ${cleaned.id}, name: ${cleaned.name}, stock: ${cleaned.stockQty}`);
     await this.upsert('products', cleaned.id, cleaned);
     this.productsCache = null; // Invalidate cache so next fetch re-syncs
   }
@@ -612,7 +633,6 @@ export class FirebaseDBService {
   public async deductProductStock(cartItems: any[]): Promise<void> {
     if (cartItems.length === 0) return;
     try {
-      console.log(`[FirebaseDBService] deductProductStock() for ${cartItems.length} items`);
       const batch = writeBatch(db);
       for (const item of cartItems) {
         const docRef = doc(db, "products", item.productId);
@@ -628,7 +648,6 @@ export class FirebaseDBService {
       }
       await batch.commit();
       this.productsCache = null;
-      console.log('[FirebaseDBService] deductProductStock() batch commit successful.');
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
     } catch (e) {
       console.error("[FirebaseDBService] Error deducting stock:", e);
@@ -638,32 +657,28 @@ export class FirebaseDBService {
   }
 
   public async saveProducts(list: Product[]): Promise<void> {
-    console.log(`[FirebaseDBService] saveProducts() batch count: ${list.length}`);
     await this.upsertBatch('products', list);
     this.productsCache = null;
   }
 
   public async deleteProduct(id: string): Promise<void> {
-    console.log(`[FirebaseDBService] deleteProduct() ID: ${id}`);
     await this.deleteRow('products', id);
     this.productsCache = null;
   }
 
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
-    if (this.salesCache && this.salesCache.length >= 0) {
-      console.log(`[FirebaseDBService] getSales() returning cached/realtime sales (${this.salesCache.length})`);
+    if (this.salesCache && this.salesCache.length > 0) {
       this.getAll<Sale>('sales').then(fresh => {
         if (fresh && fresh.length !== this.salesCache?.length) {
-          this.salesCache = fresh.sort((a, b) => b.date.localeCompare(a.date));
+          this.salesCache = fresh.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
           window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', count: fresh.length } }));
         }
       }).catch(() => {});
       return this.salesCache;
     }
     const list = await this.getAll<Sale>('sales');
-    this.salesCache = list.sort((a, b) => b.date.localeCompare(a.date));
-    console.log(`[FirebaseDBService] getSales() fetched ${this.salesCache.length} sales from Firestore.`);
+    this.salesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.salesCache;
   }
 
@@ -746,10 +761,36 @@ export class FirebaseDBService {
     };
   }
 
+  /**
+   * Numeração sequencial transaccional de documentos (facturas/recibos).
+   * Serializa pedidos simultâneos de vendedores diferentes através de uma
+   * transacção Firestore sobre `counters/{key}` (Auditoria FASE 1, D-01).
+   *
+   * `minimumNext` é o próximo número calculado localmente a partir do histórico
+   * (garante continuidade com a numeração legada); o valor devolvido é sempre
+   * >= minimumNext e nunca é repetido entre pedidos concorrentes.
+   */
+  public async nextDocumentNumber(counterKey: string, minimumNext: number): Promise<number> {
+    const ref = doc(db, 'counters', counterKey);
+    return runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const current = snap.exists() ? Number(snap.data().value || 0) : 0;
+      const next = Math.max(current + 1, minimumNext);
+      tx.set(ref, { value: next, updatedAt: new Date().toISOString() }, { merge: true });
+      return next;
+    });
+  }
+
   public async addSale(s: Sale): Promise<void> {
-    console.log(`[FirebaseDBService] addSale() ID: ${s.id}, invoice: ${s.invoiceNumber}, total: ${s.total}`);
-    // Ensure all items retain their buying cost snapshot
-    const prods = await this.getProducts();
+    // Ensure all items retain their buying cost snapshot. The product catalog
+    // lookup is best-effort: a catalog read failure must never block saving a
+    // completed sale (items already carry their own cost snapshot).
+    let prods: Product[] = [];
+    try {
+      prods = await this.getProducts();
+    } catch (e) {
+      console.warn('[FirebaseDBService] addSale(): catalog unavailable for cost enrichment, using item snapshots.', e);
+    }
     const enrichedItems = (s.items || []).map(item => {
       const prod = prods.find(p => p.id === item.productId);
       // Produtos vendidos em saco e em quilo: o quilo não tem preço de compra próprio,
@@ -797,8 +838,13 @@ export class FirebaseDBService {
       }
     }
 
-    // Ensure item cost snapshots
-    const prods = await this.getProducts();
+    // Ensure item cost snapshots (best-effort: never block the sale batch).
+    let prods: Product[] = [];
+    try {
+      prods = await this.getProducts();
+    } catch (e) {
+      console.warn('[FirebaseDBService] addSaleWithStockDeduction(): catalog unavailable for cost enrichment, using item snapshots.', e);
+    }
     const enrichedItems = (sale.items || []).map(item => {
       const prod = prods.find(p => String(p.id) === String(item.productId));
       const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
@@ -860,29 +906,92 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
   }
 
+  /**
+   * CORTE DE INVENTÁRIO — grava saldos absolutos de stock em lote.
+   *
+   * Usa valores absolutos (e não incrementos) porque a operação é sempre precedida de
+   * uma pré-visualização: o saldo que o gestor aprovou no ecrã é exactamente o saldo
+   * que fica gravado, sem surpresas de concorrência.
+   */
+  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
+    const list = (snapshots || []).filter(s => s && s.productId);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400; // limite seguro abaixo das 500 operações por batch do Firestore
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const snapshot of list.slice(i, i + CHUNK)) {
+        const payload: Record<string, number> = { stockQty: Math.max(0, Number(snapshot.stockQty) || 0) };
+        if (snapshot.stockQtyBulk !== undefined) payload.stockQtyBulk = Math.max(0, Number(snapshot.stockQtyBulk) || 0);
+        if (snapshot.stockQtyRetail !== undefined) payload.stockQtyRetail = Math.max(0, Number(snapshot.stockQtyRetail) || 0);
+        batch.set(doc(db, 'products', String(snapshot.productId)), payload, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-correction' } }));
+    return list.length;
+  }
+
+  /**
+   * CORTE DE INVENTÁRIO — anula várias vendas numa só operação.
+   *
+   * @param sales      documentos já marcados como 'Cancelada' (ver annotateCancelledSale).
+   * @param snapshots  saldos de stock a gravar em simultâneo. Deixar vazio quando a
+   *                   anulação NÃO deve mexer no stock (caso típico: a contagem física
+   *                   já lançada no sistema é anterior a estas vendas).
+   */
+  public async cancelSalesBulk(sales: Sale[], snapshots: StockCorrectionSnapshot[] = []): Promise<number> {
+    const list = (sales || []).filter(Boolean);
+    if (list.length === 0) return 0;
+
+    const CHUNK = 400;
+    const stockList = (snapshots || []).filter(s => s && s.productId);
+
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      for (const sale of list.slice(i, i + CHUNK)) {
+        const saleId = String(sale.id || sale.invoiceNumber || uid('sale-'));
+        batch.set(doc(db, 'sales', saleId), this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' }), { merge: true });
+      }
+      await batch.commit();
+    }
+
+    if (stockList.length > 0) {
+      await this.applyStockCorrection(stockList);
+    }
+
+    this.salesCache = null;
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: list.length } }));
+    return list.length;
+  }
+
+
+
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
-    if (this.lossesCache && this.lossesCache.length >= 0) {
+    if (this.lossesCache && this.lossesCache.length > 0) {
       return this.lossesCache;
     }
     const list = await this.getAll<LossRecord>('losses');
-    this.lossesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.lossesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.lossesCache;
   }
 
   public async addLoss(l: LossRecord): Promise<void> {
-    console.log(`[FirebaseDBService] addLoss() ID: ${l.id}`);
     await this.upsert('losses', l.id, l);
     this.lossesCache = null;
   }
 
   // --- Product Transformations (Parte 4) ---
   public async getTransformations(): Promise<ProductTransformation[]> {
-    if (this.transformationsCache && this.transformationsCache.length >= 0) {
+    if (this.transformationsCache && this.transformationsCache.length > 0) {
       return this.transformationsCache;
     }
     const list = await this.getAll<ProductTransformation>('transformations');
-    this.transformationsCache = list.sort((a, b) => (b.date || b.createdAt).localeCompare(a.date || a.createdAt));
+    this.transformationsCache = list.sort((a, b) => safeStr(b.date || b.createdAt).localeCompare(safeStr(a.date || a.createdAt)));
     return this.transformationsCache;
   }
 
@@ -1050,11 +1159,11 @@ export class FirebaseDBService {
 
   // --- Employees ---
   public async getEmployees(): Promise<Employee[]> {
-    if (this.employeesCache && this.employeesCache.length >= 0) {
+    if (this.employeesCache && this.employeesCache.length > 0) {
       return this.employeesCache;
     }
     const list = await this.getAll<Employee>('employees');
-    this.employeesCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.employeesCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.employeesCache;
   }
   public async saveEmployee(e: Employee): Promise<void> { 
@@ -1068,11 +1177,11 @@ export class FirebaseDBService {
 
   // --- Attendance ---
   public async getAttendance(): Promise<Attendance[]> { 
-    if (this.attendanceCache && this.attendanceCache.length >= 0) {
+    if (this.attendanceCache && this.attendanceCache.length > 0) {
       return this.attendanceCache;
     }
     const list = await this.getAll<Attendance>('attendance');
-    this.attendanceCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.attendanceCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.attendanceCache;
   }
   public async saveAttendance(a: Attendance): Promise<void> { 
@@ -1083,7 +1192,7 @@ export class FirebaseDBService {
   // --- Audit Logs ---
   public async getAuditLogs(): Promise<AuditLog[]> {
     const list = await this.getAll<AuditLog>('audit_logs');
-    return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return list.sort((a, b) => safeStr(b.timestamp).localeCompare(safeStr(a.timestamp)));
   }
 
   /** Query active or archived audit history by period, one bounded page at a time. */
@@ -1200,11 +1309,11 @@ export class FirebaseDBService {
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
-    if (this.activeSessionsCache && this.activeSessionsCache.length >= 0) {
+    if (this.activeSessionsCache && this.activeSessionsCache.length > 0) {
       return this.activeSessionsCache;
     }
     const list = await this.getAll<ActiveSession>('active_sessions');
-    this.activeSessionsCache = list.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
+    this.activeSessionsCache = list.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
     return this.activeSessionsCache;
   }
   public async saveActiveSession(s: ActiveSession): Promise<void> { 
@@ -1233,7 +1342,7 @@ export class FirebaseDBService {
   // --- Settings ---
   private getDefaultSettings(): SystemSettings {
     return {
-      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '05082',
+      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '',
       vodacom1: '845197072', vodacom2: '84 94 23 241', vodacom3: '', movitel1: '86 36 99900', movitel2: '', movitel3: '',
       fixo1: '', fixo2: '', email: 'agroxicomo1@gmail.com', banco: 'First Capital Bank, S.A.', numero_conta: '99466610001',
       nib: '001000000099466610196', banco2: '', numero_conta2: '', nib2: '', mpesa: '', emola: '',
@@ -1265,7 +1374,14 @@ export class FirebaseDBService {
       }
     } catch(e) {}
     const def = this.getDefaultSettings();
-    await this.saveSettings(def);
+    // As configurações por omissão mantêm a aplicação utilizável mesmo quando
+    // a primeira escrita falha (offline / permission-denied). Persistir o valor
+    // é secundário e não pode transformar o arranque numa rejeição não tratada.
+    try {
+      await this.saveSettings(def);
+    } catch (error) {
+      console.warn('[FirebaseDBService] Não foi possível persistir as configurações por omissão:', error);
+    }
     return def;
   }
 
@@ -1291,30 +1407,20 @@ export class FirebaseDBService {
       } catch (e) {}
     }
 
-    const list = await this.getAll<UserCredentials>('credentials');
+    // Leitura estrita: uma falha de rede NÃO pode ser interpretada como
+    // "sem contas" (isso regravava o admin inicial por cima das contas reais
+    // e despoletava o reset de credenciais — Auditoria FASE 1, A-02).
+    const list = await this.getAllOrFail<UserCredentials>('credentials');
     if (list && list.length > 0) {
-      this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
+      this.credentialsCache = list.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
       safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
       return this.credentialsCache;
     }
 
-    // Se a base de dados estiver completamente vazia, criamos um utilizador administrador inicial
-    const initialAdmin: UserCredentials[] = [
-      {
-        id: 'usr-admin-inicial',
-        username: 'admin',
-        passwordHash: 'sha256:AXadmin2026:ffe6646a86429864a103ddd12a441381390e88eee2e1d639268c4360b0e67e02',
-        role: 'Técnico',
-        roles: ['Técnico'],
-        mfaEnabled: false,
-        mustChangePassword: true,
-        passwordResetVersion: 2
-      }
-    ];
-    await this.upsertBatch('credentials', initialAdmin);
-    this.credentialsCache = initialAdmin;
-    safeStorage.setItem('agro_credentials_cache', JSON.stringify(initialAdmin));
-    return initialAdmin;
+    // Coleção realmente vazia (instalação nova). O bootstrap de contas
+    // iniciais é feito exclusivamente por ensureInitialCredentials()
+    // (src/utils/credentialsReset.ts), com palavra-passe temporária aleatória.
+    return [];
   }
 
   public async saveCredential(c: UserCredentials): Promise<void> {
@@ -1328,7 +1434,7 @@ export class FirebaseDBService {
     } else {
       this.credentialsCache.push(c);
     }
-    this.credentialsCache.sort((a, b) => a.username.localeCompare(b.username));
+    this.credentialsCache.sort((a, b) => safeStr(a.username).localeCompare(safeStr(b.username)));
     safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
   }
 
@@ -1342,11 +1448,11 @@ export class FirebaseDBService {
 
   // --- Payroll Payments ---
   public async getPayrollPayments(): Promise<PayrollPayment[]> { 
-    if (this.payrollCache && this.payrollCache.length >= 0) {
+    if (this.payrollCache && this.payrollCache.length > 0) {
       return this.payrollCache;
     }
     const list = await this.getAll<PayrollPayment>('payroll_payments');
-    this.payrollCache = list.sort((a, b) => (b.paymentDate || b.date).localeCompare(a.paymentDate || a.date));
+    this.payrollCache = list.sort((a, b) => safeStr(b.paymentDate || b.date).localeCompare(safeStr(a.paymentDate || a.date)));
     return this.payrollCache;
   }
   public async savePayrollPayment(p: PayrollPayment): Promise<void> { 
@@ -1358,7 +1464,7 @@ export class FirebaseDBService {
   public async getCustomers(): Promise<Customer[]> {
     if (this.customersCache) return this.customersCache;
     const list = await this.getAll<Customer>('customers');
-    this.customersCache = list.sort((a, b) => a.name.localeCompare(b.name));
+    this.customersCache = list.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
     return this.customersCache;
   }
   public async saveCustomer(c: Customer): Promise<void> { await this.upsert('customers', c.id, c); this.customersCache = null; }
@@ -1366,11 +1472,11 @@ export class FirebaseDBService {
 
   // --- Paused Sales ---
   public async getPausedSales(): Promise<PausedSale[]> {
-    if (this.pausedSalesCache && this.pausedSalesCache.length >= 0) {
+    if (this.pausedSalesCache && this.pausedSalesCache.length > 0) {
       return this.pausedSalesCache;
     }
     const list = await this.getAll<PausedSale>('paused_sales');
-    this.pausedSalesCache = list.sort((a, b) => b.date.localeCompare(a.date));
+    this.pausedSalesCache = list.sort((a, b) => safeStr(b.date).localeCompare(safeStr(a.date)));
     return this.pausedSalesCache;
   }
   public async savePausedSale(ps: PausedSale): Promise<void> { 
@@ -1533,7 +1639,6 @@ export class FirebaseDBService {
         safeStorage.setItem(key, dataStr);
         index.unshift(timestamp);
         safeStorage.setItem('agro_erp_backups_index', JSON.stringify(index));
-        console.log('[FirebaseDBService] Automated scheduled backup saved at:', timestamp);
       } catch (quotaError) {
         console.warn('Quota exceeded. Emergency purge of older backups...');
         for (const t of index) {
@@ -1549,8 +1654,20 @@ export class FirebaseDBService {
     }
   }
 
-  public async clearSystemData(): Promise<void> {
-    console.log('[FirebaseDBService] clearSystemData requested');
+  /**
+   * DESTRUTIVO: apaga vendas, quebras, presenças, salários, vendas pausadas e
+   * transformações. Regra inviolável do negócio: nenhuma venda pode ser perdida.
+   *
+   * Proteções (Auditoria FASE 1, T-05):
+   *  - Não existe qualquer entrada para esta função na interface de produção;
+   *  - Exige uma frase de confirmação explícita para qualquer uso futuro de
+   *    manutenção (sempre com backup prévio e aprovação documentada);
+   *  - As regras do Firestore passam a negar eliminações na coleção `sales`.
+   */
+  public async clearSystemData(confirmPhrase: string): Promise<void> {
+    if (confirmPhrase !== 'APAGAR VENDAS') {
+      throw new Error('clearSystemData: frase de confirmação inválida — operação bloqueada.');
+    }
     // We intentionally keep credentials and settings for safety
     const collectionsToClear = ['sales', 'losses', 'attendance', 'payroll_payments', 'paused_sales', 'transformations'];
     for (const col of collectionsToClear) {
@@ -1562,106 +1679,50 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'all', action: 'clear' } }));
   }
 
-  // --- Stock Reconciliation Engine (Parte 7) ---
-  public async reconcileStock(): Promise<{
-    items: Array<{
-      productId: string;
-      productName: string;
-      recordedStock: number;
-      calculatedStock: number;
-      difference: number;
-      totalSold: number;
-      totalLost: number;
-      totalTransformedIn: number;
-      totalTransformedOut: number;
-      status: 'Sincronizado' | 'Discrepância';
-    }>;
-    discrepancies: Array<any>;
-    discrepantCount: number;
-    alignedCount: number;
-    totalProductsChecked: number;
-    hasDiscrepancies: boolean;
-  }> {
-    const products = await this.getProducts();
-    const sales = await this.getSales();
-    const losses = await this.getLosses();
-    const transformations = await this.getTransformations();
-
-    const items = [];
-
-    for (const prod of products) {
-      // Calculate total sold (confirmed/paid sales only)
-      let totalSold = 0;
-      sales.forEach(s => {
-        if (s.status === 'Cancelada') return;
-        (s.items || []).forEach(it => {
-          if (it.productId === prod.id) {
-            totalSold += it.quantity;
-          }
-        });
-      });
-
-      // Calculate total lost
-      let totalLost = 0;
-      losses.forEach(l => {
-        if (l.productId === prod.id) {
-          totalLost += l.quantity;
-        }
-      });
-
-      // Calculate transformations out (where prod was original)
-      let totalTransformedOut = 0;
-      transformations.forEach(t => {
-        if (t.status === 'Cancelada') return;
-        if (t.originalProductId === prod.id) {
-          totalTransformedOut += t.originalQuantity;
-        }
-      });
-
-      // Calculate transformations in (where prod was resulting)
-      let totalTransformedIn = 0;
-      transformations.forEach(t => {
-        if (t.status === 'Cancelada') return;
-        (t.items || []).forEach(it => {
-          if (it.resultingProductId === prod.id) {
-            totalTransformedIn += it.quantity;
-          }
-        });
-      });
-
-      const recordedStock = prod.stockQty;
-      const difference = 0; // Synchronized baseline
-
-      items.push({
-        productId: prod.id,
-        productName: prod.name,
-        recordedStock,
-        calculatedStock: recordedStock,
-        difference,
-        totalSold,
-        totalLost,
-        totalTransformedIn,
-        totalTransformedOut,
-        status: (difference === 0 ? 'Sincronizado' : 'Discrepância') as 'Sincronizado' | 'Discrepância'
-      });
-    }
-
-    const discrepancies = items.filter(i => i.difference !== 0);
-
-    return {
-      items,
-      discrepancies,
-      discrepantCount: discrepancies.length,
-      alignedCount: items.length - discrepancies.length,
-      totalProductsChecked: products.length,
-      hasDiscrepancies: discrepancies.length > 0
-    };
+  // --- Misc Helpers ---
+  /** Verdadeiro quando o navegador reporta ligação à internet. */
+  public isOnline(): boolean {
+    return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
   }
 
-  // --- Misc Helpers ---
-  public isSSEActive(): boolean { return true; }
-  public getPendingCount(): number { return 0; }
-  public getLastSyncTime(): string { return new Date().toLocaleTimeString(); }
+  /** timestamp da última escrita confirmada pelo servidor (null se nenhuma). */
+  public getLastWriteAck(): number | null { return this.lastWriteAckAt; }
+
+  /**
+   * Sonda REAL de escrita/leitura no Firestore.
+   * Serve para o técnico perceber, a partir da própria aplicação, se a base de
+   * dados está a aceitar escritas (antes isto devolvia sempre "sucesso" falso,
+   * o que escondia problemas de regras de segurança e de ligação).
+   */
+  public async probeDatabaseHealth(): Promise<{ ok: boolean; message: string; latencyMs?: number; code?: string }> {
+    const started = Date.now();
+    const probeId = 'probe';
+    try {
+      await this.upsert('_health', probeId, { at: new Date().toISOString(), origin: 'agro-xicomo' });
+      const snap = await getDoc(doc(db, '_health', probeId));
+      const latencyMs = Date.now() - started;
+      if (!snap.exists()) {
+        return { ok: false, message: 'A escrita foi aceite mas a leitura de confirmação não devolveu dados.', latencyMs };
+      }
+      try { await deleteDoc(doc(db, '_health', probeId)); } catch (e) {}
+      return {
+        ok: true,
+        latencyMs,
+        message: `Ligação OK. Escrita e leitura confirmadas em ${latencyMs} ms.`
+      };
+    } catch (e: any) {
+      const code = String(e?.code || '').replace(/^firestore\//, '');
+      let message = 'Falha na ligação à base de dados.';
+      if (code === 'permission-denied') {
+        message = 'A base de dados recusa escritas (regras de segurança). É necessário publicar as regras do Firestore que permitem leitura e escrita.';
+      } else if (code === 'unavailable' || code === 'deadline-exceeded') {
+        message = 'Sem ligação ao servidor da base de dados. Verifique a internet.';
+      } else if (e && e.message) {
+        message = `Falha na ligação: ${e.message}`;
+      }
+      return { ok: false, message, latencyMs: Date.now() - started, code };
+    }
+  }
 
   // --- Active Cart ---
   public async saveActiveCart(cartData: any): Promise<void> {
@@ -1683,17 +1744,7 @@ export class FirebaseDBService {
     } catch (e) {}
   }
 
-  // --- Compatibility Stubs ---
-  public isConfigured(): boolean { return true; }
-  public getFirebaseConfig(): { url: string; key: string } { return { url: 'Firebase', key: 'Managed by AI Studio' }; }
-  public setFirebaseConfig(url: string, key: string): void {}
-  public clearFirebaseConfig(): void {}
-  public async testConnection(customUrl?: string, customKey?: string): Promise<{ success: boolean; message: string; latencyMs?: number }> {
-    return { success: true, message: 'Firebase conectado com sucesso e operando com sincronização em tempo real!', latencyMs: 38 };
-  }
-  public async syncAllWithFirebase(): Promise<{ success: boolean; logs: string[]; summary: Record<string, { local: number; cloud: number; synced: number }> }> {
-    return { success: true, logs: ['Sincronização Firebase em Tempo Real ativa e consistente.'], summary: {} };
-  }
+  // --- Catalog Reset (official inventory restore used by StockModule) ---
   public async resetProductsToInitial(): Promise<Product[]> {
     this.productsCache = null;
     safeStorage.removeItem('agro_products_cache');

@@ -1,19 +1,47 @@
 /**
  * Security, Cryptography & Input Sanitization Helpers
  * AGRO - XICOMO & SERVIÇOS, LDA
+ *
+ * Formatos de palavra-passe guardados (por ordem de preferência):
+ *   pbkdf2:ITERAÇÕES:SALT:HASH   → actual (PBKDF2-SHA256, Web Crypto)
+ *   sha256:SALT:HASH             → legado (migra para pbkdf2 no próximo login)
+ *   texto simples                → legado antigo (migra para pbkdf2 no próximo login)
  */
 
-// Simple robust browser & Node compatible SHA-256 with salt
+const PBKDF2_ITERATIONS = 120000;
+
+/**
+ * Gera um hash forte (PBKDF2-SHA256 com 120.000 iterações e salt aleatório).
+ * Compatível com browser e Node (Web Crypto).
+ */
 export async function hashPassword(password: string): Promise<string> {
   const salt = generateSalt(16);
-  const hash = await sha256(salt + password);
-  return `sha256:${salt}:${hash}`;
+  const hash = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2:${PBKDF2_ITERATIONS}:${salt}:${hash}`;
 }
 
+/**
+ * Verifica uma palavra-passe contra o hash guardado.
+ * Aceita os três formatos para retro-compatibilidade; o chamador deve usar
+ * `needsPasswordRehash()` para promover hashes legados no próximo login.
+ */
 export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   if (!storedHash) return false;
 
-  // Modern salted SHA-256 hash
+  // Formato actual: PBKDF2
+  if (storedHash.startsWith('pbkdf2:')) {
+    const parts = storedHash.split(':');
+    if (parts.length === 4) {
+      const iterations = parseInt(parts[1], 10) || PBKDF2_ITERATIONS;
+      const salt = parts[2];
+      const expectedHash = parts[3];
+      const computedHash = await pbkdf2(password, salt, iterations);
+      return computedHash === expectedHash;
+    }
+    return false;
+  }
+
+  // Legado: SHA-256 com salt
   if (storedHash.startsWith('sha256:')) {
     const parts = storedHash.split(':');
     if (parts.length === 3) {
@@ -22,10 +50,18 @@ export async function verifyPassword(password: string, storedHash: string): Prom
       const computedHash = await sha256(salt + password);
       return computedHash === expectedHash;
     }
+    return false;
   }
 
-  // Legacy plaintext fallback check for backwards compatibility
+  // Legado: texto simples. Mantido APENAS como caminho de migração — quando a
+  // comparação tem sucesso, o chamador deve guardar imediatamente o hash PBKDF2
+  // (needsPasswordRehash) e a coluna deixa de conter texto simples.
   return password === storedHash;
+}
+
+/** True quando o hash guardado é legado e deve ser promovido a PBKDF2 no próximo login. */
+export function needsPasswordRehash(storedHash: string): boolean {
+  return !!storedHash && !storedHash.startsWith('pbkdf2:');
 }
 
 function generateSalt(length: number = 16): string {
@@ -43,6 +79,33 @@ function generateSalt(length: number = 16): string {
     }
   }
   return result;
+}
+
+/** Gera uma palavra-passe temporária aleatória (instalações novas). */
+export function generateTemporaryPassword(length: number = 10): string {
+  return generateSalt(length);
+}
+
+async function pbkdf2(password: string, salt: string, iterations: number): Promise<string> {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+
+  if (cryptoObj && cryptoObj.subtle) {
+    const enc = new TextEncoder();
+    const key = await cryptoObj.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await cryptoObj.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(salt), iterations },
+      key,
+      256
+    );
+    return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Fallback determinístico sem Web Crypto: SHA-256 iterado sobre salt+password.
+  let acc = salt + password;
+  for (let i = 0; i < Math.min(iterations, 1000); i++) {
+    acc = await sha256(acc);
+  }
+  return acc;
 }
 
 async function sha256(message: string): Promise<string> {
@@ -73,7 +136,7 @@ export function sanitizeString(input: string | null | undefined): string {
   if (!input) return '';
   return String(input)
     .replace(/<[^>]*>?/gm, '') // Strip HTML tags
-    .replace(/[<>'"]/g, '')     // Strip special chars
+    .replace(/[<>'\"]/g, '')     // Strip special chars
     .trim();
 }
 
@@ -110,7 +173,52 @@ export function validateAccessPassword(password: string): { strong: boolean; mes
     return { strong: false, message: 'A palavra-passe não pode conter espaços.' };
   }
   if (!/^[A-Za-zÀ-ÿ0-9@#$%&*!?._-]+$/.test(value)) {
-    return { strong: false, message: 'A palavra-passe só pode conter letras e números.' };
+    return { strong: false, message: 'A palavra-passe só pode conter letras, números e os símbolos @#$%&*!?._- .' };
   }
   return { strong: true };
+}
+
+/**
+ * Decisão de palavra-passe no formulário de utilizadores.
+ *
+ * MOTIVO: na edição, o campo era preenchido com o hash guardado e, ao gravar, o
+ * hash/senha antiga era tratado como palavra-passe NOVA e rejeitado pela política
+ * de 4 a 6 caracteres — bloqueando a gravação de contas antigas.
+ *
+ * Regras:
+ *  - edição + campo vazio                 → MANTER a palavra-passe actual;
+ *  - edição + campo igual ao hash guardado → MANTER (o hash foi carregado pelo UI);
+ *  - criação (ou alteração real)           → validar pela política oficial e HASHEAR.
+ */
+export type PasswordDecision =
+  | { action: 'keep'; hash: string }
+  | { action: 'set'; password: string }
+  | { action: 'invalid'; message: string };
+
+export function decidePasswordUpdate(
+  editing: { passwordHash: string } | null | undefined,
+  typedRaw: string
+): PasswordDecision {
+  const typed = (typedRaw || '').trim();
+
+  if (editing) {
+    if (!typed || typed === editing.passwordHash) {
+      return { action: 'keep', hash: editing.passwordHash };
+    }
+    if (typed.startsWith('sha256:')) {
+      // O operador não escreve hashes à mão: é o valor antigo carregado pelo UI.
+      return { action: 'keep', hash: editing.passwordHash };
+    }
+    const policy = validateAccessPassword(typed);
+    if (!policy.strong) {
+      return { action: 'invalid', message: policy.message || 'Palavra-passe inválida.' };
+    }
+    return { action: 'set', password: typed };
+  }
+
+  const policy = validateAccessPassword(typed);
+  if (!policy.strong) {
+    return { action: 'invalid', message: policy.message || 'Palavra-passe inválida.' };
+  }
+  return { action: 'set', password: typed };
 }

@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { uid } from '../utils/idHelper';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
+import Toast from './Toast';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
-import { generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { DateRangeFilter } from './DateRangeFilter';
+import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask } from '../utils/postCommit';
 import * as XLSX from 'xlsx';
@@ -51,6 +54,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  // Ferramenta de corte de inventário (anulação em massa / correcção de stock)
+  const [showCutoffTool, setShowCutoffTool] = useState(false);
 
   const [securityModal, setSecurityModal] = useState<{
     show: boolean;
@@ -178,25 +184,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  const handleClearAllHistory = () => {
-    askConfirmation(
-      'Eliminar Histórico de Teste (Vendas, Facturas e Recibos)',
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
-      async () => {
-        try {
-          await dbService.clearSystemData();
-          await runPostCommitTask({
-            label: 'atualizar a lista após limpar o histórico',
-            task: () => loadData(false)
-          });
-          showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
-        } catch (err) {
-          console.error(err);
-          showToast('Erro ao limpar histórico.', 'error');
-        }
-      }
-    );
-  };
+  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
+  // A função "Eliminar Histórico de Teste" foi removida. Qualquer operação que
+  // apague vendas viola a regra inviolável do negócio ("não perder nenhuma venda
+  // já efetuada") e não tem lugar na interface de produção.
 
   const handlePayInvoice = (sale: Sale) => {
     if (isProcessing) return;
@@ -209,7 +200,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         let paymentSaved = false;
         try {
           const allSales = await dbService.getSales();
-          const receiptNum = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const receiptNum = await reserveDocumentNumber(
+            generateNextReceiptNumber(allSales, 'ReciboA4'),
+            (key, min) => dbService.nextDocumentNumber(key, min)
+          );
           const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
           await dbService.addSale(updatedSale);
           paymentSaved = true;
@@ -270,8 +264,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     if (!sale) return;
 
     const inputPw = (securityModal.password || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    const isValidPassword = inputPw === targetPw || inputPw === '05082' || inputPw === '0147';
+    const targetPw = (settings?.stockPasswordHash || '').trim();
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    const isValidPassword = Boolean(targetPw) && inputPw === targetPw;
     if (!isValidPassword) {
       setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
       return;
@@ -310,13 +305,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           }
           await dbService.cancelSaleWithStockRestoration(sale, restockItems);
         } else {
-          await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
+          await dbService.addSale({ ...sale, id: String(sale.id || uid('sale-')), status: 'Cancelada' });
         }
 
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -330,7 +325,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         });
         showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
       } else {
-        const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
+        const updatedSale: Sale = { ...sale, id: String(sale.id || uid('sale-')), status: 'Pendente' };
         if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
           const deductionItems: any[] = [];
@@ -364,7 +359,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'restore', sale: null, password: '', error: '' });
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser?.username || 'Gestor',
           ipAddress: '127.0.0.1',
@@ -557,21 +552,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   return (
     <div className="space-y-6" id="faturas_module_container">
-      {/* Toast Notification Banner */}
-      {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
-          toastType === 'success'
-            ? 'bg-emerald-600 text-white border-emerald-700'
-            : toastType === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
-              : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
 
       {/* Module Title */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
@@ -579,7 +561,28 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <span className="material-symbols-outlined text-emerald-600">receipt_long</span>
           Gestão de Facturas
         </h2>
+
+        <button
+          type="button"
+          onClick={() => setShowCutoffTool(true)}
+          className="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-[11px] rounded-xl flex items-center gap-1.5 shadow-md cursor-pointer self-start md:self-auto"
+          title="Anular em bloco as vendas de um dia (contagem física lançada depois das vendas) ou corrigir o stock sem anular facturas"
+        >
+          <span className="material-symbols-outlined text-[16px]">content_cut</span>
+          Corte de Inventário
+        </button>
       </div>
+
+      {/* Ferramenta de anulação em massa / correcção de stock por corte de inventário */}
+      <InventoryCutoffTool
+        isOpen={showCutoffTool}
+        onClose={() => setShowCutoffTool(false)}
+        currentUser={currentUser ? { username: currentUser.username, role: currentUser.role } : null}
+        onCompleted={() => {
+          loadData();
+          showToast('Corte de inventário aplicado. Dados actualizados.', 'success');
+        }}
+      />
 
       {/* Date Range Filter */}
       <DateRangeFilter

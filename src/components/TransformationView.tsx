@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { uid } from '../utils/idHelper';
 import { ProductTransformation, Product, SystemSettings } from '../types';
 import { dbService } from '../utils/firebaseDB';
 import { DateRangeFilter } from './DateRangeFilter';
@@ -6,6 +7,8 @@ import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } 
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import { useConfirmDialog } from './ConfirmDialog';
+import Toast from './Toast';
 
 interface TransformationViewProps {
   products: Product[];
@@ -284,18 +287,26 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
     showToast('Exportação para Excel concluída com sucesso!');
   };
 
-  const handleCancelTransformation = async (trf: ProductTransformation) => {
+  const { askConfirm, dialog: confirmDialog } = useConfirmDialog();
+
+  const handleCancelTransformation = (trf: ProductTransformation) => {
     if (trf.status === 'Cancelada') return;
 
-    const confirmed = window.confirm(`Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`);
-    if (!confirmed) return;
+    askConfirm(
+      'Anular transformação',
+      `Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`,
+      () => doCancelTransformation(trf),
+      { danger: true, confirmLabel: 'Anular transformação' }
+    );
+  };
 
+  const doCancelTransformation = async (trf: ProductTransformation) => {
     setIsReversing(trf.id);
     try {
       await dbService.cancelTransformationWithStockReversal(trf);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -317,13 +328,8 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   return (
     <div className="space-y-6">
       
-      {/* Toast */}
-      {toastMsg && (
-        <div className="fixed bottom-5 right-5 z-50 bg-emerald-800 text-white px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-bottom-2">
-          <span className="material-symbols-outlined text-[18px]">check_circle</span>
-          <span>{toastMsg}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMsg} type="success" onDismiss={() => setToastMsg('')} />
 
       {/* Top Banner & Action */}
       <div className="bg-linear-to-r from-emerald-800 to-teal-900 rounded-2xl p-5 sm:p-6 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -674,6 +680,8 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
           </div>
         )}
       </div>
+
+      {confirmDialog}
     </div>
   );
 };
