@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import ToastBanner from './ToastBanner';
 import React, { useState, useEffect } from 'react';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
@@ -965,10 +966,7 @@ export default function HRModule() {
     <div className="space-y-6" id="hr_module_main">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700 animate-fade-in">
-          <span className="material-symbols-outlined text-emerald-400">info</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <ToastBanner message={toastMessage} type="success" onClose={() => setToastMessage('')} />
       )}
 
       {/* Header and Brand */}

@@ -6,7 +6,8 @@ import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedS
 import { getSingularUnit } from '../utils/unitHelper';
 import { getUnitCost, isHybridProduct } from '../utils/priceHelper';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
-import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { generateNextInvoiceNumber, generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
+import ToastBanner from './ToastBanner';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
@@ -318,13 +319,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       }
 
       const existingSales = await dbService.getSales();
-      const invoiceNum = generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva');
+      const invoiceNum = await reserveDocumentNumber(
+        generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva'),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
       const manualRec = retroactiveReceiptNo.trim() || undefined;
-      const receiptNum = manualRec || generateNextReceiptNumber(existingSales, 'Thermal');
+      const receiptNum = manualRec || await reserveDocumentNumber(
+        generateNextReceiptNumber(existingSales, 'Thermal'),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
       const saleDateISO = retroactiveDateTime ? new Date(retroactiveDateTime).toISOString() : new Date().toISOString();
 
       const newSale: Sale = {
-        id: 'sale-retro-' + Date.now(),
+        id: 'sale-retro-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2)),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         manualReceiptReference: manualRec,
@@ -495,7 +502,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
               }
             },
             (decodedText) => {
-              console.log('[Real Scanner] Decoded Text:', decodedText);
               
               // Strict Validation: Only accept valid EAN-13 or confirmed patterns to avoid ghost scans
               const isEAN13 = /^\d{13}$/.test(decodedText);
@@ -932,11 +938,9 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     if (settings) {
       if (settings.barcodePrefix && cleaned.startsWith(settings.barcodePrefix)) {
         cleaned = cleaned.substring(settings.barcodePrefix.length);
-        console.log(`[Scanner Normalizer] Removed prefix "${settings.barcodePrefix}". New: "${cleaned}"`);
       }
       if (settings.barcodeSuffix && cleaned.endsWith(settings.barcodeSuffix)) {
         cleaned = cleaned.substring(0, cleaned.length - settings.barcodeSuffix.length);
-        console.log(`[Scanner Normalizer] Removed suffix "${settings.barcodeSuffix}". New: "${cleaned}"`);
       }
     }
     return cleaned.trim();
@@ -950,22 +954,17 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     // to bypass any React state updating/batching delay when scanning.
     const rawQuery = (barcodeInputRef.current?.value || searchQuery).trim();
     const query = normalizeCode(rawQuery);
-    console.log(`[Manual/Scan Input Search] Initiated. Query string: "${query}" | Length: ${query.length}`);
-    console.log(`[Manual/Scan Input Search] React state 'searchQuery': "${searchQuery}"`);
     
     if (!query) {
-      console.log(`[Manual/Scan Input Search] Empty query ignored.`);
       return;
     }
 
-    console.log(`[Manual/Scan Input Search] Searching catalog containing ${products.length} products...`);
 
     // Search specifically by code or SKU (exact match first)
     const found = products.find(p => {
       const codeMatch = p.code.trim().toLowerCase() === query.toLowerCase();
       const refMatch = p.reference && p.reference.trim().toLowerCase() === query.toLowerCase();
       if (codeMatch || refMatch) {
-        console.log(`[Manual/Scan Input Search MATCH FOUND] Exact match! Product: "${p.name}" | Code: "${p.code}" | Reference: "${p.reference || 'N/A'}"`);
       }
       return codeMatch || refMatch;
     });
@@ -977,7 +976,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         barcodeInputRef.current.value = '';
       }
     } else {
-      console.log(`[Manual/Scan Input Search] No exact match found for "${query}". Checking fallback partial similarity/inclusion...`);
       
       // Fallback: If query contains the code or code contains the query
       const partialFound = products.find(p => {
@@ -985,7 +983,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         const codeContainsQuery = p.code.trim().length >= 4 && p.code.trim().toLowerCase().includes(query.toLowerCase());
         
         if (queryContainsCode || codeContainsQuery) {
-          console.log(`[Manual/Scan Input Search PARTIAL MATCH FOUND] Match by similarity! Product: "${p.name}" | Code: "${p.code}" | Match Type: ${queryContainsCode ? 'Query-contains-Code' : 'Code-contains-Query'}`);
         }
         return queryContainsCode || codeContainsQuery;
       });
@@ -1000,15 +997,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       } else {
         console.warn(`[Manual/Scan Input Search FAILED] No products matched "${query}" even with similarity fallbacks.`);
         
-        // Detailed diagnostics listing closest matches
-        const closestByLength = products.filter(p => Math.abs(p.code.trim().length - query.length) <= 3);
-        console.log(`[Manual/Scan Input Search Diagnostics] All registered product codes:`, products.map(p => p.code));
-        if (closestByLength.length > 0) {
-          console.log(`[Manual/Scan Input Search Diagnostics] Product codes of similar length (±3 chars):`, 
-            closestByLength.map(p => ({ name: p.name, code: p.code, reference: p.reference }))
-          );
-        }
-        
+        // Diagnostics of closest matches removed (debug logging cleanup).
+
         setUnrecognizedBarcode(query);
         setSelectedProductToAssociate('');
         showToast('Produto ou Serviço com este código não encontrado.', 'error');
@@ -1245,7 +1235,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       osc.start();
       osc.stop(audioCtx.currentTime + 0.08);
     } catch (e) {
-      console.log("Audio Context beep error", e);
+      console.warn("Audio Context beep error", e);
     }
   };
 
@@ -1317,11 +1307,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         finalStatus = 'Crédito';
       }
 
-      // Generate sequential invoice number (Fact-2026-N) and receipt number (Rec-2026-N)
+      // Números sequenciais transaccionais (FAC-2026-N / REC-...): reservados
+      // atomicamente para não duplicar entre vendedores simultâneos (D-01).
       const existingSales = await dbService.getSales();
-      const invoiceNum = generateNextInvoiceNumber(existingSales, effectiveDocType);
-      const receiptNum = (finalStatus === 'Paga' || printFormat === 'ReciboA4' || printFormat === 'Thermal')
-        ? generateNextReceiptNumber(existingSales, printFormat)
+      const invoiceNum = await reserveDocumentNumber(
+        generateNextInvoiceNumber(existingSales, effectiveDocType),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
+      const needsReceipt = (finalStatus === 'Paga' || printFormat === 'ReciboA4' || printFormat === 'Thermal');
+      const receiptNum = needsReceipt
+        ? await reserveDocumentNumber(
+            generateNextReceiptNumber(existingSales, printFormat),
+            (key, min) => dbService.nextDocumentNumber(key, min)
+          )
         : undefined;
 
       const activeBreakdown = paymentMethod === 'Múltiplo'
@@ -1329,7 +1327,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         : undefined;
 
       const newSale: Sale = {
-        id: 'sale-' + Date.now(),
+        id: 'sale-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2)),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         date: new Date().toISOString(),
@@ -1821,18 +1819,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
           {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border ${
-          toastType === 'success'
-            ? 'bg-primary text-white border-green-700'
-            : toastType === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
-              : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <ToastBanner message={toastMessage} type={toastType} onClose={() => setToastMessage('')} />
       )}
 
       {/* Main Product Selection Grid (8/12 widths) */}

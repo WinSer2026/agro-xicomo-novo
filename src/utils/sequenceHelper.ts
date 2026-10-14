@@ -50,6 +50,46 @@ export function generateNextInvoiceNumber(existingSales: Sale[], docType: 'Fatur
   return `${prefix}${String(nextNum).padStart(4, '0')}`;
 }
 
+/**
+ * Extrai o prefixo e o próximo número sequencial mínimo a partir de um número
+ * gerado localmente (ex.: "FAC-2026-0007" → { prefix: "FAC-2026-", next: 7 }).
+ * Usado em conjunto com dbService.nextDocumentNumber() para serialização real
+ * entre vendedores simultâneos (Auditoria FASE 1, D-01).
+ */
+export function extractSequenceParts(generatedNumber: string): { prefix: string; next: number } {
+  const match = generatedNumber.match(/^(.*?)(\d+)$/);
+  if (!match) {
+    return { prefix: generatedNumber, next: 1 };
+  }
+  return { prefix: match[1], next: parseInt(match[2], 10) || 1 };
+}
+
+/** Formata o número sequencial com o mesmo zero-padding dos documentos existentes. */
+export function formatSequenceNumber(prefix: string, serial: number): string {
+  return `${prefix}${String(serial).padStart(4, '0')}`;
+}
+
+/**
+ * Reserva o próximo número de documento de forma transaccional.
+ * `reserver` (normalmente dbService.nextDocumentNumber) serializa pedidos
+ * concorrentes; se a transacção falhar, mantém o número calculado localmente
+ * para nunca impedir a gravação de uma venda concluída.
+ */
+export async function reserveDocumentNumber(
+  generatedNumber: string,
+  reserver: (counterKey: string, minimumNext: number) => Promise<number>
+): Promise<string> {
+  const { prefix, next } = extractSequenceParts(generatedNumber);
+  try {
+    const counterKey = prefix.replace(/-$/, '');
+    const serial = await reserver(counterKey, next);
+    return formatSequenceNumber(prefix, serial);
+  } catch (error) {
+    console.warn('[sequenceHelper] Numeração transacional indisponível; mantém numeração local.', error);
+    return generatedNumber;
+  }
+}
+
 export function generateNextReceiptNumber(existingSales: Sale[], printFormat?: 'Thermal' | 'ReciboA4' | 'A4' | 'DoubleA5' | 'FaturaProforma' | 'Proforma'): string {
   const currentYear = new Date().getFullYear();
   

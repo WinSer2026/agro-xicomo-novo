@@ -6,11 +6,12 @@ import {
   collection, 
   doc, 
   setDoc, 
-  getDocs, 
-  deleteDoc, 
-  onSnapshot, 
-  getDoc, 
-  writeBatch, 
+  getDocs,
+  deleteDoc,
+  onSnapshot,
+  getDoc,
+  writeBatch,
+  runTransaction,
   increment,
   query,
   where,
@@ -150,7 +151,6 @@ export class FirebaseDBService {
     if (this.initPromise) {
       return this.initPromise;
     }
-    console.log('[FirebaseDBService] Initializing Firestore real-time listeners and caching...');
     this.initPromise = Promise.resolve();
 
     // Clear previous listeners if any
@@ -387,10 +387,8 @@ export class FirebaseDBService {
   // Generic DB methods
   private async getAll<T>(colName: string): Promise<T[]> {
     try {
-      console.log(`[FirebaseDBService] getAll() fetching collection: ${colName}`);
       const snapshot = await getDocs(collection(db, colName));
       const items = snapshot.docs.map(doc => doc.data() as T);
-      console.log(`[FirebaseDBService] getAll() fetched ${items.length} records from ${colName}`);
       return items;
     } catch (e) {
       console.error(`[FirebaseDBService] Error getting ${colName}:`, e);
@@ -405,10 +403,8 @@ export class FirebaseDBService {
    * trigger destructive seeding/overwriting (Auditoria FASE 1, achados A-02/D-03).
    */
   private async getAllOrFail<T>(colName: string): Promise<T[]> {
-    console.log(`[FirebaseDBService] getAllOrFail() fetching collection: ${colName}`);
     const snapshot = await getDocs(collection(db, colName));
     const items = snapshot.docs.map(doc => doc.data() as T);
-    console.log(`[FirebaseDBService] getAllOrFail() fetched ${items.length} records from ${colName}`);
     return items;
   }
 
@@ -482,9 +478,7 @@ export class FirebaseDBService {
     try {
       const validId = String(id || data?.id || data?.invoiceNumber || Date.now());
       const sanitized = this.sanitizeData(data);
-      console.log(`[FirebaseDBService] upsert() to collection: ${colName}, ID: ${validId}`);
       await setDoc(doc(db, colName, validId), sanitized);
-      console.log(`[FirebaseDBService] upsert() successful on ${colName}/${validId}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, id: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error saving to ${colName}/${id}:`, e);
@@ -498,7 +492,6 @@ export class FirebaseDBService {
     // legitimately contain much more than one archive/page worth of records.
     const writesPerCommit = 450;
     try {
-      console.log(`[FirebaseDBService] upsertBatch() to collection: ${colName}, count: ${items.length}`);
       for (let offset = 0; offset < items.length; offset += writesPerCommit) {
         const batch = writeBatch(db);
         items.slice(offset, offset + writesPerCommit).forEach(item => {
@@ -508,7 +501,6 @@ export class FirebaseDBService {
         });
         await batch.commit();
       }
-      console.log(`[FirebaseDBService] upsertBatch() successful on ${colName}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, count: items.length } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error batch saving to ${colName}:`, e);
@@ -519,9 +511,7 @@ export class FirebaseDBService {
   private async deleteRow(colName: string, id: string): Promise<void> {
     try {
       const validId = String(id);
-      console.log(`[FirebaseDBService] deleteRow() from collection: ${colName}, ID: ${validId}`);
       await deleteDoc(doc(db, colName, validId));
-      console.log(`[FirebaseDBService] deleteRow() successful on ${colName}/${validId}`);
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: colName, deletedId: validId } }));
     } catch (e) {
       console.error(`[FirebaseDBService] Error deleting from ${colName}/${id}:`, e);
@@ -546,7 +536,6 @@ export class FirebaseDBService {
 
   public async getProducts(): Promise<Product[]> {
     if (this.productsCache && this.productsCache.length > 0) {
-      console.log(`[FirebaseDBService] getProducts() returning cached products (${this.productsCache.length})`);
       return this.productsCache;
     }
     const cached = safeStorage.getItem('agro_products_cache');
@@ -565,7 +554,6 @@ export class FirebaseDBService {
     // de erro, propagar e deixar o cache local servir de fallback.
     const rawProducts = await this.getAllOrFail<Product>('products');
     if (rawProducts.length === 0) {
-      console.log('[FirebaseDBService] getProducts() found 0 products in Firestore. Seeding initial products...');
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
       await this.upsertBatch('products', seeded);
       this.productsCache = seeded;
@@ -621,7 +609,6 @@ export class FirebaseDBService {
 
   public async saveProduct(p: Product): Promise<void> {
     const cleaned = this.sanitizeProduct(p);
-    console.log(`[FirebaseDBService] saveProduct() ID: ${cleaned.id}, name: ${cleaned.name}, stock: ${cleaned.stockQty}`);
     await this.upsert('products', cleaned.id, cleaned);
     this.productsCache = null; // Invalidate cache so next fetch re-syncs
   }
@@ -629,7 +616,6 @@ export class FirebaseDBService {
   public async deductProductStock(cartItems: any[]): Promise<void> {
     if (cartItems.length === 0) return;
     try {
-      console.log(`[FirebaseDBService] deductProductStock() for ${cartItems.length} items`);
       const batch = writeBatch(db);
       for (const item of cartItems) {
         const docRef = doc(db, "products", item.productId);
@@ -645,7 +631,6 @@ export class FirebaseDBService {
       }
       await batch.commit();
       this.productsCache = null;
-      console.log('[FirebaseDBService] deductProductStock() batch commit successful.');
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
     } catch (e) {
       console.error("[FirebaseDBService] Error deducting stock:", e);
@@ -655,13 +640,11 @@ export class FirebaseDBService {
   }
 
   public async saveProducts(list: Product[]): Promise<void> {
-    console.log(`[FirebaseDBService] saveProducts() batch count: ${list.length}`);
     await this.upsertBatch('products', list);
     this.productsCache = null;
   }
 
   public async deleteProduct(id: string): Promise<void> {
-    console.log(`[FirebaseDBService] deleteProduct() ID: ${id}`);
     await this.deleteRow('products', id);
     this.productsCache = null;
   }
@@ -669,7 +652,6 @@ export class FirebaseDBService {
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
     if (this.salesCache && this.salesCache.length >= 0) {
-      console.log(`[FirebaseDBService] getSales() returning cached/realtime sales (${this.salesCache.length})`);
       this.getAll<Sale>('sales').then(fresh => {
         if (fresh && fresh.length !== this.salesCache?.length) {
           this.salesCache = fresh.sort((a, b) => b.date.localeCompare(a.date));
@@ -680,7 +662,6 @@ export class FirebaseDBService {
     }
     const list = await this.getAll<Sale>('sales');
     this.salesCache = list.sort((a, b) => b.date.localeCompare(a.date));
-    console.log(`[FirebaseDBService] getSales() fetched ${this.salesCache.length} sales from Firestore.`);
     return this.salesCache;
   }
 
@@ -763,8 +744,27 @@ export class FirebaseDBService {
     };
   }
 
+  /**
+   * Numeração sequencial transaccional de documentos (facturas/recibos).
+   * Serializa pedidos simultâneos de vendedores diferentes através de uma
+   * transacção Firestore sobre `counters/{key}` (Auditoria FASE 1, D-01).
+   *
+   * `minimumNext` é o próximo número calculado localmente a partir do histórico
+   * (garante continuidade com a numeração legada); o valor devolvido é sempre
+   * >= minimumNext e nunca é repetido entre pedidos concorrentes.
+   */
+  public async nextDocumentNumber(counterKey: string, minimumNext: number): Promise<number> {
+    const ref = doc(db, 'counters', counterKey);
+    return runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const current = snap.exists() ? Number(snap.data().value || 0) : 0;
+      const next = Math.max(current + 1, minimumNext);
+      tx.set(ref, { value: next, updatedAt: new Date().toISOString() }, { merge: true });
+      return next;
+    });
+  }
+
   public async addSale(s: Sale): Promise<void> {
-    console.log(`[FirebaseDBService] addSale() ID: ${s.id}, invoice: ${s.invoiceNumber}, total: ${s.total}`);
     // Ensure all items retain their buying cost snapshot. The product catalog
     // lookup is best-effort: a catalog read failure must never block saving a
     // completed sale (items already carry their own cost snapshot).
@@ -900,7 +900,6 @@ export class FirebaseDBService {
   }
 
   public async addLoss(l: LossRecord): Promise<void> {
-    console.log(`[FirebaseDBService] addLoss() ID: ${l.id}`);
     await this.upsert('losses', l.id, l);
     this.lossesCache = null;
   }
@@ -1262,7 +1261,7 @@ export class FirebaseDBService {
   // --- Settings ---
   private getDefaultSettings(): SystemSettings {
     return {
-      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '05082',
+      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '',
       vodacom1: '845197072', vodacom2: '84 94 23 241', vodacom3: '', movitel1: '86 36 99900', movitel2: '', movitel3: '',
       fixo1: '', fixo2: '', email: 'agroxicomo1@gmail.com', banco: 'First Capital Bank, S.A.', numero_conta: '99466610001',
       nib: '001000000099466610196', banco2: '', numero_conta2: '', nib2: '', mpesa: '', emola: '',
@@ -1330,24 +1329,10 @@ export class FirebaseDBService {
       return this.credentialsCache;
     }
 
-    // Instalação nova (leitura bem-sucedida e coleção realmente vazia):
-    // criamos um utilizador administrador inicial para o primeiro acesso.
-    const initialAdmin: UserCredentials[] = [
-      {
-        id: 'usr-admin-inicial',
-        username: 'admin',
-        passwordHash: 'sha256:AXadmin2026:ffe6646a86429864a103ddd12a441381390e88eee2e1d639268c4360b0e67e02',
-        role: 'Técnico',
-        roles: ['Técnico'],
-        mfaEnabled: false,
-        mustChangePassword: true,
-        passwordResetVersion: 2
-      }
-    ];
-    await this.upsertBatch('credentials', initialAdmin);
-    this.credentialsCache = initialAdmin;
-    safeStorage.setItem('agro_credentials_cache', JSON.stringify(initialAdmin));
-    return initialAdmin;
+    // Coleção realmente vazia (instalação nova). O bootstrap de contas
+    // iniciais é feito exclusivamente por ensureInitialCredentials()
+    // (src/utils/credentialsReset.ts), com palavra-passe temporária aleatória.
+    return [];
   }
 
   public async saveCredential(c: UserCredentials): Promise<void> {
@@ -1566,7 +1551,6 @@ export class FirebaseDBService {
         safeStorage.setItem(key, dataStr);
         index.unshift(timestamp);
         safeStorage.setItem('agro_erp_backups_index', JSON.stringify(index));
-        console.log('[FirebaseDBService] Automated scheduled backup saved at:', timestamp);
       } catch (quotaError) {
         console.warn('Quota exceeded. Emergency purge of older backups...');
         for (const t of index) {
@@ -1596,7 +1580,6 @@ export class FirebaseDBService {
     if (confirmPhrase !== 'APAGAR VENDAS') {
       throw new Error('clearSystemData: frase de confirmação inválida — operação bloqueada.');
     }
-    console.log('[FirebaseDBService] clearSystemData requested');
     // We intentionally keep credentials and settings for safety
     const collectionsToClear = ['sales', 'losses', 'attendance', 'payroll_payments', 'paused_sales', 'transformations'];
     for (const col of collectionsToClear) {
@@ -1608,106 +1591,6 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'all', action: 'clear' } }));
   }
 
-  // --- Stock Reconciliation Engine (Parte 7) ---
-  public async reconcileStock(): Promise<{
-    items: Array<{
-      productId: string;
-      productName: string;
-      recordedStock: number;
-      calculatedStock: number;
-      difference: number;
-      totalSold: number;
-      totalLost: number;
-      totalTransformedIn: number;
-      totalTransformedOut: number;
-      status: 'Sincronizado' | 'Discrepância';
-    }>;
-    discrepancies: Array<any>;
-    discrepantCount: number;
-    alignedCount: number;
-    totalProductsChecked: number;
-    hasDiscrepancies: boolean;
-  }> {
-    const products = await this.getProducts();
-    const sales = await this.getSales();
-    const losses = await this.getLosses();
-    const transformations = await this.getTransformations();
-
-    const items = [];
-
-    for (const prod of products) {
-      // Calculate total sold (confirmed/paid sales only)
-      let totalSold = 0;
-      sales.forEach(s => {
-        if (s.status === 'Cancelada') return;
-        (s.items || []).forEach(it => {
-          if (it.productId === prod.id) {
-            totalSold += it.quantity;
-          }
-        });
-      });
-
-      // Calculate total lost
-      let totalLost = 0;
-      losses.forEach(l => {
-        if (l.productId === prod.id) {
-          totalLost += l.quantity;
-        }
-      });
-
-      // Calculate transformations out (where prod was original)
-      let totalTransformedOut = 0;
-      transformations.forEach(t => {
-        if (t.status === 'Cancelada') return;
-        if (t.originalProductId === prod.id) {
-          totalTransformedOut += t.originalQuantity;
-        }
-      });
-
-      // Calculate transformations in (where prod was resulting)
-      let totalTransformedIn = 0;
-      transformations.forEach(t => {
-        if (t.status === 'Cancelada') return;
-        (t.items || []).forEach(it => {
-          if (it.resultingProductId === prod.id) {
-            totalTransformedIn += it.quantity;
-          }
-        });
-      });
-
-      const recordedStock = prod.stockQty;
-      const difference = 0; // Synchronized baseline
-
-      items.push({
-        productId: prod.id,
-        productName: prod.name,
-        recordedStock,
-        calculatedStock: recordedStock,
-        difference,
-        totalSold,
-        totalLost,
-        totalTransformedIn,
-        totalTransformedOut,
-        status: (difference === 0 ? 'Sincronizado' : 'Discrepância') as 'Sincronizado' | 'Discrepância'
-      });
-    }
-
-    const discrepancies = items.filter(i => i.difference !== 0);
-
-    return {
-      items,
-      discrepancies,
-      discrepantCount: discrepancies.length,
-      alignedCount: items.length - discrepancies.length,
-      totalProductsChecked: products.length,
-      hasDiscrepancies: discrepancies.length > 0
-    };
-  }
-
-  // --- Misc Helpers ---
-  public isSSEActive(): boolean { return true; }
-  public getPendingCount(): number { return 0; }
-  public getLastSyncTime(): string { return new Date().toLocaleTimeString(); }
 
   // --- Active Cart ---
   public async saveActiveCart(cartData: any): Promise<void> {
@@ -1729,17 +1612,7 @@ export class FirebaseDBService {
     } catch (e) {}
   }
 
-  // --- Compatibility Stubs ---
-  public isConfigured(): boolean { return true; }
-  public getFirebaseConfig(): { url: string; key: string } { return { url: 'Firebase', key: 'Managed by AI Studio' }; }
-  public setFirebaseConfig(url: string, key: string): void {}
-  public clearFirebaseConfig(): void {}
-  public async testConnection(customUrl?: string, customKey?: string): Promise<{ success: boolean; message: string; latencyMs?: number }> {
-    return { success: true, message: 'Firebase conectado com sucesso e operando com sincronização em tempo real!', latencyMs: 38 };
-  }
-  public async syncAllWithFirebase(): Promise<{ success: boolean; logs: string[]; summary: Record<string, { local: number; cloud: number; synced: number }> }> {
-    return { success: true, logs: ['Sincronização Firebase em Tempo Real ativa e consistente.'], summary: {} };
-  }
+  // --- Catalog Reset (official inventory restore used by StockModule) ---
   public async resetProductsToInitial(): Promise<Product[]> {
     this.productsCache = null;
     safeStorage.removeItem('agro_products_cache');

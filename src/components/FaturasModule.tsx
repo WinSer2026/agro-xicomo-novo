@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ToastBanner from './ToastBanner';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
-import { generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask } from '../utils/postCommit';
@@ -194,7 +195,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         let paymentSaved = false;
         try {
           const allSales = await dbService.getSales();
-          const receiptNum = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const receiptNum = await reserveDocumentNumber(
+            generateNextReceiptNumber(allSales, 'ReciboA4'),
+            (key, min) => dbService.nextDocumentNumber(key, min)
+          );
           const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
           await dbService.addSale(updatedSale);
           paymentSaved = true;
@@ -255,8 +259,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     if (!sale) return;
 
     const inputPw = (securityModal.password || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    const isValidPassword = inputPw === targetPw || inputPw === '05082' || inputPw === '0147';
+    const targetPw = (settings?.stockPasswordHash || '').trim();
+    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
+    const isValidPassword = Boolean(targetPw) && inputPw === targetPw;
     if (!isValidPassword) {
       setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
       return;
@@ -544,18 +549,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     <div className="space-y-6" id="faturas_module_container">
       {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
-          toastType === 'success'
-            ? 'bg-emerald-600 text-white border-emerald-700'
-            : toastType === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
-              : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <ToastBanner message={toastMessage} type={toastType} onClose={() => setToastMessage('')} />
       )}
 
       {/* Module Title */}

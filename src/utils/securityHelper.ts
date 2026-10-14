@@ -1,19 +1,47 @@
 /**
  * Security, Cryptography & Input Sanitization Helpers
  * AGRO - XICOMO & SERVIÇOS, LDA
+ *
+ * Formatos de palavra-passe guardados (por ordem de preferência):
+ *   pbkdf2:ITERAÇÕES:SALT:HASH   → actual (PBKDF2-SHA256, Web Crypto)
+ *   sha256:SALT:HASH             → legado (migra para pbkdf2 no próximo login)
+ *   texto simples                → legado antigo (migra para pbkdf2 no próximo login)
  */
 
-// Simple robust browser & Node compatible SHA-256 with salt
+const PBKDF2_ITERATIONS = 120000;
+
+/**
+ * Gera um hash forte (PBKDF2-SHA256 com 120.000 iterações e salt aleatório).
+ * Compatível com browser e Node (Web Crypto).
+ */
 export async function hashPassword(password: string): Promise<string> {
   const salt = generateSalt(16);
-  const hash = await sha256(salt + password);
-  return `sha256:${salt}:${hash}`;
+  const hash = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2:${PBKDF2_ITERATIONS}:${salt}:${hash}`;
 }
 
+/**
+ * Verifica uma palavra-passe contra o hash guardado.
+ * Aceita os três formatos para retro-compatibilidade; o chamador deve usar
+ * `needsPasswordRehash()` para promover hashes legados no próximo login.
+ */
 export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   if (!storedHash) return false;
 
-  // Modern salted SHA-256 hash
+  // Formato actual: PBKDF2
+  if (storedHash.startsWith('pbkdf2:')) {
+    const parts = storedHash.split(':');
+    if (parts.length === 4) {
+      const iterations = parseInt(parts[1], 10) || PBKDF2_ITERATIONS;
+      const salt = parts[2];
+      const expectedHash = parts[3];
+      const computedHash = await pbkdf2(password, salt, iterations);
+      return computedHash === expectedHash;
+    }
+    return false;
+  }
+
+  // Legado: SHA-256 com salt
   if (storedHash.startsWith('sha256:')) {
     const parts = storedHash.split(':');
     if (parts.length === 3) {
@@ -22,10 +50,18 @@ export async function verifyPassword(password: string, storedHash: string): Prom
       const computedHash = await sha256(salt + password);
       return computedHash === expectedHash;
     }
+    return false;
   }
 
-  // Legacy plaintext fallback check for backwards compatibility
+  // Legado: texto simples. Mantido APENAS como caminho de migração — quando a
+  // comparação tem sucesso, o chamador deve guardar imediatamente o hash PBKDF2
+  // (needsPasswordRehash) e a coluna deixa de conter texto simples.
   return password === storedHash;
+}
+
+/** True quando o hash guardado é legado e deve ser promovido a PBKDF2 no próximo login. */
+export function needsPasswordRehash(storedHash: string): boolean {
+  return !!storedHash && !storedHash.startsWith('pbkdf2:');
 }
 
 function generateSalt(length: number = 16): string {
@@ -43,6 +79,33 @@ function generateSalt(length: number = 16): string {
     }
   }
   return result;
+}
+
+/** Gera uma palavra-passe temporária aleatória (instalações novas). */
+export function generateTemporaryPassword(length: number = 10): string {
+  return generateSalt(length);
+}
+
+async function pbkdf2(password: string, salt: string, iterations: number): Promise<string> {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+
+  if (cryptoObj && cryptoObj.subtle) {
+    const enc = new TextEncoder();
+    const key = await cryptoObj.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await cryptoObj.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(salt), iterations },
+      key,
+      256
+    );
+    return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Fallback determinístico sem Web Crypto: SHA-256 iterado sobre salt+password.
+  let acc = salt + password;
+  for (let i = 0; i < Math.min(iterations, 1000); i++) {
+    acc = await sha256(acc);
+  }
+  return acc;
 }
 
 async function sha256(message: string): Promise<string> {
@@ -73,7 +136,7 @@ export function sanitizeString(input: string | null | undefined): string {
   if (!input) return '';
   return String(input)
     .replace(/<[^>]*>?/gm, '') // Strip HTML tags
-    .replace(/[<>'"]/g, '')     // Strip special chars
+    .replace(/[<>'\"]/g, '')     // Strip special chars
     .trim();
 }
 

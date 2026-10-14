@@ -1,4 +1,5 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import ToastBanner from './ToastBanner';
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
@@ -30,7 +31,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [users, setUsers] = useState<UserCredentials[]>([]);
 
   // Active Technical Panel Tab
-  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'sessions'>('settings');
   const [settingsSubTab, setSettingsSubTab] = useState<'empresa' | 'bancos' | 'impressoras' | 'backups' | 'sistema'>('empresa');
 
   // Logs Date Range Filter
@@ -52,28 +53,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     date.setMonth(date.getMonth() - 6);
     return date.toISOString().slice(0, 10);
   });
-
-  // Reconciliation Tool States
-  const [techReconcileData, setTechReconcileData] = useState<any | null>(null);
-  const [isTechReconciling, setIsTechReconciling] = useState(false);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
-
-  // Firebase Cloud Management States
-  const [firebaseUrlInput, setFirebaseUrlInput] = useState('');
-  const [firebaseKeyInput, setFirebaseKeyInput] = useState('');
-  const [testingFirebase, setTestingFirebase] = useState(false);
-  const [firebaseTestResult, setFirebaseTestResult] = useState<{ success: boolean; message: string; latencyMs?: number } | null>(null);
-  const [syncingFirebase, setSyncingFirebase] = useState(false);
-  const [firebaseSyncLogs, setFirebaseSyncLogs] = useState<string[]>([]);
-  const [firebaseSyncSummary, setFirebaseSyncSummary] = useState<Record<string, { local: number; cloud: number; synced: number }> | null>(null);
-
-  // AI Assistant Tab States
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [aiAttachedFiles, setAiAttachedFiles] = useState<Array<{ id: string; base64: string; mime: string; name: string }>>([]);
-  const [aiVoiceRecording, setAiVoiceRecording] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiResponse, setAiResponse] = useState<any | null>(null);
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
   // Editing Settings
   const [compName, setCompName] = useState('');
@@ -112,7 +92,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [usrUsername, setUsrUsername] = useState('');
   const [usrPassword, setUsrPassword] = useState('');
   const [usrRoles, setUsrRoles] = useState<AppRole[]>(['Operador']);
-  const [usrMfa, setUsrMfa] = useState(false);
   const [usrMustChange, setUsrMustChange] = useState(false);
   const [userToDelete, setUserToDelete] = useState<{ id: string; username: string } | null>(null);
 
@@ -176,11 +155,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const loadAllData = async () => {
     try {
       await dbService.init();
-
-      // Load Firebase config inputs
-      const supConf = dbService.getFirebaseConfig();
-      if (supConf.url) setFirebaseUrlInput(supConf.url);
-      if (supConf.key) setFirebaseKeyInput(supConf.key);
 
       // Settings, users and sessions are small operational datasets. Sales,
       // products and audit history intentionally do not load in full here.
@@ -451,7 +425,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       passwordHash: finalPasswordHash,
       roles: rolesToSave,
       role: rolesToSave.join(', '),
-      mfaEnabled: usrMfa,
+      mfaEnabled: editingUser?.mfaEnabled || false,
       mustChangePassword: isExistingHash ? (editingUser?.mustChangePassword || false) : usrMustChange,
       passwordResetVersion: editingUser?.passwordResetVersion
     };
@@ -478,7 +452,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUsrUsername('');
       setUsrPassword('');
       setUsrRoles(['Operador']);
-      setUsrMfa(false);
       setUsrMustChange(false);
 
       loadAllData();
@@ -496,7 +469,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     setUsrPassword(user.passwordHash);
     const userRoles = getUserRoles(user);
     setUsrRoles(userRoles.length > 0 ? userRoles : ['Operador']);
-    setUsrMfa(user.mfaEnabled || false);
     setUsrMustChange(user.mustChangePassword || false);
   };
 
@@ -613,313 +585,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   // --- firebase CLOUD MANAGEMENT HANDLERS ---
-  const handleTestFirebaseConnection = async () => {
-    setTestingFirebase(true);
-    setFirebaseTestResult(null);
-    const res = await dbService.testConnection(firebaseUrlInput, firebaseKeyInput);
-    setTestingFirebase(false);
-    setFirebaseTestResult(res);
-    if (res.success) {
-      showToast('Conectado com sucesso ao Firebase!');
-    } else {
-      showToast(`Falha na conexão: ${res.message}`);
-    }
-  };
-
-  const handleSaveFirebaseConfig = async () => {
-    if (!firebaseUrlInput || !firebaseKeyInput) {
-      showToast('Preencha a URL e a Chave Anon de API do Firebase.');
-      return;
-    }
-    dbService.setFirebaseConfig(firebaseUrlInput, firebaseKeyInput);
-    showToast('Credenciais ativadas! Sincronizando com a Nuvem...');
-    await loadAllData();
-    handleTestFirebaseConnection();
-  };
-
-  const handleClearFirebaseConfig = async () => {
-    dbService.clearFirebaseConfig();
-    setFirebaseUrlInput('');
-    setFirebaseKeyInput('');
-    setFirebaseTestResult(null);
-    showToast('Desconectado do Firebase. O sistema está no modo local.');
-    await loadAllData();
-  };
-
-  const handleSyncAllWithFirebase = async () => {
-    setSyncingFirebase(true);
-    setFirebaseSyncLogs(['🚀 A iniciar sincronização bidirecional das 11 tabelas com o Firebase...']);
-    setFirebaseSyncSummary(null);
-
-    const res = await dbService.syncAllWithFirebase();
-    setSyncingFirebase(false);
-    setFirebaseSyncLogs(res.logs);
-    setFirebaseSyncSummary(res.summary);
-
-    if (res.success) {
-      showToast('Sincronização com o Firebase concluída!');
-    } else {
-      showToast('Sincronização concluída com avisos. Verifique o log.');
-    }
-    await loadAllData();
-  };
-
-  // --- AI ASSISTANT SYSTEM CHANGE HANDLERS ---
-  const handleAiFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        const newFile = {
-          id: 'file-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-          base64,
-          mime: file.type,
-          name: file.name
-        };
-        setAiAttachedFiles(prev => [...prev, newFile]);
-        showToast(`Anexado com sucesso: ${file.name}`);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunks.push(e.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const newFile = {
-            id: 'voice-' + Date.now(),
-            base64,
-            mime: 'audio/webm',
-            name: 'gravaçao_voz_tecnico.webm'
-          };
-          setAiAttachedFiles(prev => [...prev, newFile]);
-          showToast("Áudio de voz gravado e anexado com sucesso!");
-        };
-        reader.readAsDataURL(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setAiVoiceRecording(true);
-    } catch (err) {
-      console.error("Erro ao acessar microfone:", err);
-      showToast("Não foi possível acessar o microfone. Verifique as permissões.");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorder && aiVoiceRecording) {
-      mediaRecorder.stop();
-      setAiVoiceRecording(false);
-    }
-  };
-
-  const handleSendToAi = async () => {
-    if (!aiPrompt && aiAttachedFiles.length === 0) {
-      showToast("Insira um comando de texto ou anexe pelo menos um ficheiro (imagem, áudio, PDF)!");
-      return;
-    }
-
-    setAiLoading(true);
-    setAiResponse(null);
-
-    try {
-      const res = await fetch('/api/gemini/technician-ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          prompt: aiPrompt,
-          files: aiAttachedFiles.map(f => ({
-            base64: f.base64,
-            mime: f.mime,
-            name: f.name
-          }))
-        })
-      });
-
-      if (!res.ok) {
-        let errMsg = 'Falha ao processar pelo assistente IA.';
-        try {
-          const errData = await res.json();
-          errMsg = errData.error || errMsg;
-        } catch {
-          try {
-            const errText = await res.text();
-            if (errText) {
-              const titleMatch = errText.match(/<title>([\s\S]*?)<\/title>/i);
-              if (titleMatch && titleMatch[1]) {
-                errMsg = `Erro do Servidor (${res.status}): ${titleMatch[1].trim()}`;
-              } else {
-                errMsg = `Erro do Servidor (${res.status}): ${errText.substring(0, 150)}...`;
-              }
-            } else {
-              errMsg = `Erro do Servidor com status ${res.status}.`;
-            }
-          } catch {
-            errMsg = `Erro do Servidor com status ${res.status}.`;
-          }
-        }
-        throw new Error(errMsg);
-      }
-
-      const data = await res.json();
-      setAiResponse(data);
-      showToast("Sugestões analisadas pelo assistente IA!");
-    } catch (err: any) {
-      console.error(err);
-      showToast("Erro: " + err.message);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleApplyAiChanges = async () => {
-    if (!aiResponse || !aiResponse.changes) return;
-
-    try {
-      const { changes } = aiResponse;
-      let appliedCount = 0;
-
-      // 1. Apply Settings changes
-      if (changes.settings && settings) {
-        const updatedSettings = {
-          ...settings,
-          ...changes.settings
-        };
-        await dbService.saveSettings(updatedSettings);
-        appliedCount++;
-      }
-
-      // 2. Apply User changes
-      if (changes.newUser) {
-        const u = changes.newUser;
-        const newUser: UserCredentials = {
-          id: 'usr-' + Date.now(),
-          username: u.username.trim(),
-          passwordHash: u.password || u.passwordHash || '123456',
-          role: u.role || 'Operador',
-          mfaEnabled: false
-        };
-        await dbService.saveCredential(newUser);
-        appliedCount++;
-      }
-
-      // 3. Apply Product changes
-      if (changes.newProduct) {
-        const p = changes.newProduct;
-        const aiBuy = Number(p.buyingPrice) || 0;
-        const aiSell = Number(p.sellingPrice) || 0;
-        // Regra: nunca gravar preços em que a compra seja igual ou superior à venda
-        const aiPriceError = validateStandardPrices(aiBuy, aiSell, false);
-        if (!aiPriceError) {
-          const newProd: Product = {
-            id: 'prod-' + Date.now(),
-            code: p.code || 'PRD-' + Date.now().toString().substring(8),
-            name: p.name,
-            category: p.category || 'Adubos',
-            stockQty: Number(p.stockQty) || 0,
-            buyingPrice: aiBuy,
-            sellingPrice: aiSell,
-            baseUnit: p.baseUnit || 'Unidades'
-          };
-          await dbService.saveProduct(newProd);
-          appliedCount++;
-        } else {
-          console.warn('[AI Apply] Produto ignorado por violar a regra de preços:', aiPriceError);
-        }
-      }
-
-      // 4. Apply Stock Updates (Batch update)
-      if (changes.stockUpdates && Array.isArray(changes.stockUpdates)) {
-        const allProducts = await dbService.getProducts();
-        for (const update of changes.stockUpdates) {
-          const search = update.productSearch.toLowerCase();
-          const target = allProducts.find(p => 
-            p.name.toLowerCase().includes(search) || 
-            p.code.toLowerCase().includes(search)
-          );
-
-          if (target) {
-            target.stockQty += Number(update.quantityToAdd) || 0;
-
-            // Regra de preços: só aplica alterações que mantenham a compra abaixo da venda
-            const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : target.buyingPrice;
-            const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : target.sellingPrice;
-            const priceError = isHybridProduct(target)
-              ? validateHybridPrices(
-                  target.buyingPriceBulk ?? target.buyingPrice,
-                  target.sellingPriceBulk || proposedSell * (target.conversionRate || 1),
-                  proposedSell,
-                  Number(target.conversionRate) || 1
-                )
-              : validateStandardPrices(proposedBuy, proposedSell, target.isService);
-
-            if (!priceError) {
-              if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
-              if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
-            } else {
-              console.warn('[AI Apply] Preços não alterados (regra de preços):', priceError);
-            }
-            
-            // Re-calculate bulk/retail if applicable
-            if (target.parentUnit && target.conversionRate && target.conversionRate > 1) {
-              const rate = target.conversionRate;
-              target.stockQtyBulk = Math.floor(target.stockQty / rate);
-              target.stockQtyRetail = target.stockQty % rate;
-            }
-
-            await dbService.saveProduct(target);
-            appliedCount++;
-          }
-        }
-      }
-
-      if (appliedCount > 0) {
-        // Log to Audit logs
-        void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
-          timestamp: new Date().toISOString(),
-          username: 'Técnico (Assistente IA)',
-          ipAddress: '127.0.0.1',
-          action: 'Alterações via Assistente IA',
-          status: 'Sucesso',
-          details: `Aplicado com sucesso ${appliedCount} alteração(ões) baseada(s) na resposta estruturada da Inteligência Artificial.`
-        });
-
-        showToast(`${appliedCount} Alterações aplicadas com sucesso pelo Assistente IA!`);
-        setAiResponse(null);
-        setAiPrompt('');
-        setAiAttachedFiles([]);
-        await loadAllData();
-        void Promise.resolve(onSettingsUpdated?.()).catch(error => {
-        console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
-      });
-      } else {
-        showToast("Nenhuma alteração detectada para aplicar.");
-      }
-    } catch (error: any) {
-      console.error(error);
-      showToast("Erro ao aplicar alterações: " + error.message);
-    }
-  };
 
   // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
   // Os handlers "Eliminar Histórico de Teste", "Zerar Sistema" e "Novo Exercício
@@ -998,10 +663,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     <div className="space-y-6 animate-fade-in" id="tech_module">
       {/* Toast banner */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">shield_person</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
+        <ToastBanner message={toastMessage} type="success" onClose={() => setToastMessage('')} />
       )}
 
       {/* Title */}
@@ -1071,19 +733,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               {activeSessions.length}
             </span>
           )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('cloud_firebase')}
-          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
-            activeTab === 'cloud_firebase'
-              ? 'bg-teal-600 text-white border-teal-700 shadow-md ring-2 ring-teal-500/20'
-              : 'bg-white text-slate-700 border-slate-200 hover:border-teal-300 hover:bg-teal-50/50'
-          }`}
-        >
-          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'cloud_firebase' ? 'text-white' : 'text-teal-600'}`}>cloud_sync</span>
-          <span>Nuvem</span>
         </button>
 
         <button
@@ -1917,7 +1566,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                     <th className="p-3">Utilizador</th>
                     <th className="p-3">Nível / Role</th>
                     <th className="p-3">Palavra-passe</th>
-                    <th className="p-3 text-center">MFA Autenticação</th>
                     <th className="p-3 text-center">Ações</th>
                   </tr>
                 </thead>
@@ -1962,13 +1610,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             <span className="ml-2 text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-black uppercase">
                               Troca de senha pendente
                             </span>
-                          )}
-                        </td>
-                        <td className="p-3 text-center">
-                          {u.mfaEnabled ? (
-                            <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-bold text-[10px]">ATIVO</span>
-                          ) : (
-                            <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded text-[10px]">Desativo</span>
                           )}
                         </td>
                         <td className="p-3 text-center space-x-1">
@@ -2079,15 +1720,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 py-2">
-                <input
-                  type="checkbox"
-                  id="mfa"
-                  checked={usrMfa}
-                  onChange={(e) => setUsrMfa(e.target.checked)}
-                />
-                <label htmlFor="mfa" className="font-bold text-gray-700">Ativar Autenticação de Dois Fatores (MFA)</label>
-              </div>
 
               <div className="flex items-center gap-2 py-2">
                 <input
@@ -2117,7 +1749,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       setUsrUsername('');
                       setUsrPassword('');
                       setUsrRoles(['Operador']);
-                      setUsrMfa(false);
                     }}
                     className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold rounded uppercase text-[10px]"
                   >
@@ -2360,185 +1991,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       )}
 
       {/* --- NUVEM & firebase MANAGEMENT VIEW --- */}
-      {activeTab === 'cloud_firebase' && (
-        <div className="space-y-6">
-          {/* Status Header Card */}
-          <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 text-white p-6 rounded-2xl shadow-xl border border-slate-700/60 relative overflow-hidden">
-            <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-emerald-400 text-2xl">cloud_sync</span>
-                  <h4 className="text-xl font-bold tracking-tight">Gestão da Nuvem & Firebase PostgreSQL</h4>
-                </div>
-                <p className="text-slate-300 text-xs max-w-2xl">
-                  Sincronização bidirecional em tempo real para inventários, vendas, colaboradores, presenças e auditoria comercial com o banco PostgreSQL.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                {dbService.isConfigured() ? (
-                  <div className="bg-emerald-500/20 border border-emerald-500/40 px-4 py-2 rounded-xl flex items-center gap-2 text-emerald-300">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span className="text-xs font-bold uppercase tracking-wider">Conectado à Nuvem</span>
-                  </div>
-                ) : (
-                  <div className="bg-amber-500/20 border border-amber-500/40 px-4 py-2 rounded-xl flex items-center gap-2 text-amber-300">
-                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
-                    <span className="text-xs font-bold uppercase tracking-wider">Modo Local (IndexedDB)</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Firebase Configuration Form */}
-            <div className="bg-white border border-gray-200 p-6 rounded-2xl shadow-sm space-y-4">
-              <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
-                <span className="material-symbols-outlined text-emerald-600">settings_remote</span>
-                <h5 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Parâmetros do Servidor Firebase</h5>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    URL do Servidor Firebase (Project URL)
-                  </label>
-                  <input
-                    type="text"
-                    value={firebaseUrlInput}
-                    onChange={(e) => setFirebaseUrlInput(e.target.value)}
-                    placeholder="https://xyzcompany.firebase.co"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  />
-                  <p className="text-[10px] text-gray-500 mt-0.5">Encontrado em Settings -&gt; API no seu dashboard do Firebase.</p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    Chave de API Anon / Public (anon key)
-                  </label>
-                  <input
-                    type="password"
-                    value={firebaseKeyInput}
-                    onChange={(e) => setFirebaseKeyInput(e.target.value)}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  />
-                  <p className="text-[10px] text-gray-500 mt-0.5">Chave pública de acesso com regras de segurança de linha (RLS).</p>
-                </div>
-
-                {/* Connection Test Diagnostic Message */}
-                {firebaseTestResult && (
-                  <div className={`p-3 rounded-lg border text-xs font-medium ${
-                    firebaseTestResult.success ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
-                  }`}>
-                    <div className="flex items-center gap-1.5 font-bold mb-1">
-                      <span className="material-symbols-outlined text-[16px]">
-                        {firebaseTestResult.success ? 'check_circle' : 'error'}
-                      </span>
-                      <span>{firebaseTestResult.success ? 'Diagnóstico Positivo' : 'Erro de Conexão'}</span>
-                      {firebaseTestResult.latencyMs !== undefined && (
-                        <span className="ml-auto text-[10px] bg-white/80 px-1.5 py-0.5 rounded font-mono">
-                          {firebaseTestResult.latencyMs}ms
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] leading-relaxed">{firebaseTestResult.message}</p>
-                  </div>
-                )}
-
-                {/* Action Buttons */}
-                <div className="pt-2 flex flex-wrap gap-2">
-                  <button
-                    onClick={handleTestFirebaseConnection}
-                    disabled={testingFirebase}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold uppercase transition-all shadow-sm active:scale-95 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">network_ping</span>
-                    {testingFirebase ? 'A Testar...' : 'Testar Conexão'}
-                  </button>
-
-                  <button
-                    onClick={handleSaveFirebaseConfig}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold uppercase transition-all shadow-sm active:scale-95 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">save</span>
-                    Guardar & Ativar
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Sync Command & Summary */}
-            <div className="bg-white border border-gray-200 p-6 rounded-2xl shadow-sm space-y-4 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
-                  <span className="material-symbols-outlined text-indigo-600">sync_alt</span>
-                  <h5 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Sincronização em Massa (11 Tabelas)</h5>
-                </div>
-
-                <p className="text-xs text-gray-600 my-3 leading-relaxed">
-                  Garante que todos os registos guardados no navegador (IndexedDB) sejam enviados para o Firebase PostgreSQL e vice-versa.
-                </p>
-
-                {firebaseSyncSummary && (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 my-3 max-h-48 overflow-y-auto pr-1">
-                    {Object.entries(firebaseSyncSummary).map(([tbl, stats]: [string, any]) => (
-                      <div key={tbl} className="bg-slate-50 border border-slate-200 p-2 rounded-lg text-[11px]">
-                        <p className="font-bold text-slate-800 capitalize truncate">{tbl}</p>
-                        <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                          <span>Local: {stats?.local ?? 0}</span>
-                          <span>Nuvem: {stats?.cloud ?? 0}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <button
-                  onClick={handleSyncAllWithFirebase}
-                  disabled={syncingFirebase || !dbService.isConfigured()}
-                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold uppercase transition-all shadow-md active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <span className={`material-symbols-outlined text-[18px] ${syncingFirebase ? 'animate-spin' : ''}`}>
-                    {syncingFirebase ? 'sync' : 'published_with_changes'}
-                  </span>
-                  {syncingFirebase ? 'A Sincronizar Tabelas...' : 'Sincronizar Todas as Tabelas Agora'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Sync Operations Live Log Box */}
-          {firebaseSyncLogs.length > 0 && (
-            <div className="bg-slate-900 text-slate-100 p-4 rounded-2xl border border-slate-800 font-mono text-xs shadow-inner space-y-2">
-              <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                <span className="font-bold text-emerald-400 flex items-center gap-1 text-[11px]">
-                  <span className="material-symbols-outlined text-[14px]">terminal</span>
-                  Log de Operações de Sincronização
-                </span>
-                <button
-                  onClick={() => setFirebaseSyncLogs([])}
-                  className="text-[10px] text-slate-400 hover:text-slate-200 underline cursor-pointer"
-                >
-                  Limpar Log
-                </button>
-              </div>
-              <div className="max-h-60 overflow-y-auto space-y-1 text-[11px] pr-2">
-                {firebaseSyncLogs.map((log, idx) => (
-                  <div key={idx} className="leading-tight text-slate-300">
-                    {log}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Confirmation Modal for User Deletion */}
       {userToDelete && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
