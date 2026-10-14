@@ -6,7 +6,7 @@ import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { dbService } from '../utils/firebaseDB';
-import Toast from './Toast';
+import Toast, { type ToastKind } from './Toast';
 import { describeError } from '../utils/errorHelper';
 import { Employee, Attendance, ContractType, PayrollPayment, DisciplinaryAction, EmployeeDamage, SystemSettings } from '../types';
 import EmployeeDetailModal from './EmployeeDetailModal';
@@ -70,6 +70,7 @@ export default function HRModule() {
 
   // UI States
   const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
   const [showEmpModal, setShowEmpModal] = useState(false);
   const [showPontoModal, setShowPontoModal] = useState(false);
   const [showDiscModal, setShowDiscModal] = useState(false);
@@ -339,15 +340,16 @@ export default function HRModule() {
     } catch (error) {
       console.error('Erro ao carregar dados de Recursos Humanos:', error);
       if (notifyOnError) {
-        showToast(`${describeError(error, 'Não foi possível carregar os dados do sistema.').title} ${describeError(error).hint}`.trim());
+        showToast(`${describeError(error, 'Não foi possível carregar os dados do sistema.').title} ${describeError(error).hint}`.trim(), 'error');
       }
     } finally {
       setIsLoading(false);
     }
   };
 
-  const showToast = (message: string) => {
+  const showToast = (message: string, type: ToastKind = 'success') => {
     setToastMessage(message);
+    setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
   };
 
@@ -357,12 +359,12 @@ export default function HRModule() {
     if (isSubmitting) return;
 
     if (!empName.trim() || !empNuit.trim() || !empInss.trim() || !empIban.trim() || !empSalary) {
-      showToast('Por favor, preencha todos os campos obrigatórios.');
+      showToast('Por favor, preencha todos os campos obrigatórios.', 'error');
       return;
     }
     const nuitClean = empNuit.replace(/\D/g, '');
     if (nuitClean.length !== 9) {
-      showToast('O NUIT deve conter exatamente 9 dígitos.');
+      showToast('O NUIT deve conter exatamente 9 dígitos.', 'error');
       return;
     }
 
@@ -394,7 +396,7 @@ export default function HRModule() {
       loadData(false);
     } catch (err) {
       console.error(err);
-      showToast('Erro ao gravar os dados.');
+      showToast('Erro ao gravar os dados.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -456,7 +458,7 @@ export default function HRModule() {
     e.preventDefault();
     if (isSubmitting) return;
     if (!pontoEmployeeId) {
-      showToast('Selecione um funcionário.');
+      showToast('Selecione um funcionário.', 'error');
       return;
     }
     const emp = employees.find(x => x.id === pontoEmployeeId);
@@ -501,7 +503,7 @@ export default function HRModule() {
     e.preventDefault();
     if (isSubmitting) return;
     if (!discEmployeeId) {
-      showToast('Selecione um colaborador.');
+      showToast('Selecione um colaborador.', 'error');
       return;
     }
     const emp = employees.find(x => x.id === discEmployeeId);
@@ -531,7 +533,7 @@ export default function HRModule() {
     e.preventDefault();
     if (isSubmitting) return;
     if (!dmgEmployeeId || !dmgItem || !dmgTotalValue || !dmgDeduction) {
-      showToast('Preencha os dados obrigatórios.');
+      showToast('Preencha os dados obrigatórios.', 'error');
       return;
     }
     const emp = employees.find(x => x.id === dmgEmployeeId);
@@ -590,7 +592,7 @@ export default function HRModule() {
       loadData(false);
     } catch (err) {
       console.error(err);
-      showToast('Erro ao processar o pagamento.');
+      showToast('Erro ao processar o pagamento.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -967,7 +969,7 @@ export default function HRModule() {
   return (
     <div className="space-y-6" id="hr_module_main">
       {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMessage} type={/erro|falha|inválid|não foi/i.test(toastMessage) ? 'error' : 'success'} onDismiss={() => setToastMessage('')} />
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
 
       {/* Header and Brand */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">

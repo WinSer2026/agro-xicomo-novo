@@ -25,6 +25,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
 import { dbService } from '../utils/firebaseDB';
+import Toast, { type ToastKind } from './Toast';
 import { Product, Sale, SystemSettings } from '../types';
 import { formatDateToISO, formatDatePT } from '../utils/dateRangeHelper';
 import {
@@ -82,6 +83,7 @@ export default function InventoryCutoffTool({
   const [error, setError] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [toast, setToast] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
   const [result, setResult] = useState<{
     mode: CutoffMode;
     salesCount: number;
@@ -160,9 +162,9 @@ export default function InventoryCutoffTool({
     setExcluded(all);
   };
 
-  const showToast = (message: string) => {
+  const showToast = (message: string, type: ToastKind = 'success') => {
     setToast(message);
-    setTimeout(() => setToast(''), 4000);
+    setToastType(type);
   };
 
   /* --------------------------------------------------------------- */
@@ -171,7 +173,7 @@ export default function InventoryCutoffTool({
 
   const handleExportExcel = () => {
     if (selectedSales.length === 0) {
-      showToast('Não há vendas seleccionadas para exportar.');
+      showToast('Não há vendas seleccionadas para exportar.', 'warning');
       return;
     }
     const wb = XLSX.utils.book_new();
@@ -187,7 +189,7 @@ export default function InventoryCutoffTool({
 
   const handleExportPDF = () => {
     if (selectedSales.length === 0) {
-      showToast('Não há vendas seleccionadas para exportar.');
+      showToast('Não há vendas seleccionadas para exportar.', 'warning');
       return;
     }
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -874,12 +876,7 @@ export default function InventoryCutoffTool({
         </div>
       )}
 
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-[60] p-3.5 rounded-xl shadow-2xl bg-slate-900 text-white text-xs font-semibold flex items-center gap-2">
-          <span className="material-symbols-outlined text-[18px]">info</span>
-          {toast}
-        </div>
-      )}
+      <Toast message={toast} type={toastType} onDismiss={() => setToast('')} />
     </div>
   );
 }

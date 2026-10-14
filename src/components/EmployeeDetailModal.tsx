@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { uid } from '../utils/idHelper';
-import Toast from './Toast';
+import Toast, { type ToastKind } from './Toast';
 import { Employee, PerformanceRecord, ContractType } from '../types';
 import { describeError } from '../utils/errorHelper';
 
@@ -52,9 +52,11 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
 
   // Notification Toast State
   const [toastMsg, setToastMsg] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
 
-  const triggerToast = (msg: string) => {
+  const triggerToast = (msg: string, type: ToastKind = 'success') => {
     setToastMsg(msg);
+    setToastType(type);
     setTimeout(() => setToastMsg(''), 3000);
   };
 
@@ -147,7 +149,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
   const handleAddPerformanceRecord = (e: React.FormEvent) => {
     e.preventDefault();
     if (!perfEvaluator.trim() || !perfFeedback.trim()) {
-      triggerToast('Preencha o avaliador e o feedback de desempenho.');
+      triggerToast('Preencha o avaliador e o feedback de desempenho.', 'error');
       return;
     }
 
@@ -182,7 +184,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
   const handleSaveAll = async () => {
     const nuitClean = nuit.replace(/\D/g, '');
     if (nuitClean.length !== 9) {
-      triggerToast('O NUIT deve conter exatamente 9 dígitos.');
+      triggerToast('O NUIT deve conter exatamente 9 dígitos.', 'error');
       return;
     }
 
@@ -215,7 +217,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
       }, 500);
     } catch (err) {
       console.error(err);
-      triggerToast(`${describeError(err, 'Não foi possível guardar as alterações.').title} ${describeError(err).hint}`.trim());
+      triggerToast(`${describeError(err, 'Não foi possível guardar as alterações.').title} ${describeError(err).hint}`.trim(), 'error');
     }
   };
 
@@ -234,7 +236,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
   return (
     <div className="fixed inset-0 bg-slate-900/70 z-50 flex items-center justify-center p-4 backdrop-blur-sm transition-all animate-fade-in" id="employee_detail_modal">
       {/* Toast global (portal z-[9999]) */}
-      <Toast message={toastMsg} type="success" onDismiss={() => setToastMsg('')} />
+      <Toast message={toastMsg} type={toastType} onDismiss={() => setToastMsg('')} />
 
       {/* Expandable/Collapsible Content Panel */}
       <div className={`bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200 transition-all duration-300 flex flex-col ${
