@@ -9,8 +9,8 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "vitest run && tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts",
-    "test:unit": "tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts",
+    "test": "vitest run && tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts && tsx test/session_management_test.ts",
+    "test:unit": "tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts && tsx test/session_management_test.ts",
     "test:ui": "vitest run",
     "deploy:hosting": "npm run build && npx firebase-tools deploy --only hosting"
   },

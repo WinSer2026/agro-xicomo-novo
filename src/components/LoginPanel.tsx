@@ -6,6 +6,7 @@ import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } fro
 import { getUserRoles } from '../utils/roleHelper';
 import { validateAccessPassword, verifyPassword, needsPasswordRehash, hashPassword } from '../utils/securityHelper';
 import { applyNewPassword } from '../utils/credentialsReset';
+import { getOrCreateDeviceId, fetchClientIp } from '../utils/deviceHelper';
 
 interface LoginPanelProps {
   onLoginSuccess: (user: { username: string; role: string; roles?: AppRole[] }) => void;
@@ -71,6 +72,8 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     const loadSessionStatsAndSettings = async () => {
       try {
         await dbService.init();
+        // Limpar em segundo plano sessões órfãs antigas (> 12h) no arranque da tela de login
+        void dbService.terminatePreviousSessions({}).catch(() => {});
         const sessions = await dbService.getActiveSessions();
         const ops = sessions.filter(s => s.role !== 'Técnico').length;
         const techs = sessions.filter(s => s.role === 'Técnico').length;
@@ -142,8 +145,8 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       const cleanUser = username.trim();
       const cleanPass = password.trim();
       const lower = cleanUser.toLowerCase();
-      // Auditoria honesta: sem servidor, o IP real do cliente não é conhecido.
-      const ipAddress = 'N/D';
+      // Obter IP real do cliente com fallback seguro
+      const ipAddress = await fetchClientIp();
 
       // Credenciais apenas da base de dados (sem chaves mestre nem lista de
       // contingência hardcoded — Auditoria FASE 1, S-02/S-04).
@@ -273,7 +276,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      const ipAddress = 'N/D';
+      const ipAddress = await fetchClientIp();
       await finalizeSession({ ...pendingUser, passwordHash: '', mustChangePassword: false }, ipAddress);
       setShowPasswordChange(false);
       setPendingUser(null);
@@ -290,11 +293,37 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
   const finalizeSession = async (user: UserCredentials, ip: string) => {
     const userRoles = getUserRoles(user);
     const roleStr = userRoles.join(', ') || user.role;
+    const deviceId = getOrCreateDeviceId();
     const sessionId = 'sess-' + user.username.toLowerCase() + '-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
 
     safeSessionStorage.setItem('agro_session_id', sessionId);
 
-    // Run active session registration and audit logging in parallel without blocking user login transition
+    // 1. Terminar automaticamente sessões anteriores deste utilizador (ex.: Almira),
+    // ou deste mesmo computador (IP / deviceId)
+    try {
+      const terminated = await dbService.terminatePreviousSessions({
+        username: user.username,
+        ipAddress: ip,
+        deviceId: deviceId,
+        excludeSessionId: sessionId
+      });
+      if (terminated.length > 0) {
+        void dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: user.username,
+          ipAddress: ip,
+          action: 'Sessão Anterior Encerrada',
+          status: 'INFO',
+          level: 'INFO',
+          details: `${terminated.length} sessão(ões) anterior(es) órfã(s) de "${user.username}" ou deste computador foram encerradas automaticamente para manter sessão única.`
+        }).catch(() => {});
+      }
+    } catch (cleanErr) {
+      console.warn('Erro ao limpar sessões antigas durante o login:', cleanErr);
+    }
+
+    // 2. Registar a nova sessão
     Promise.allSettled([
       dbService.saveActiveSession({
         id: sessionId,
@@ -302,7 +331,9 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         role: roleStr,
         roles: userRoles,
         loginTime: new Date().toISOString(),
-        ipAddress: ip
+        ipAddress: ip,
+        deviceId: deviceId,
+        lastHeartbeat: new Date().toISOString()
       }),
       dbService.addAuditLog({
         id: uid('log-'),

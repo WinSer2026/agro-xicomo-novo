@@ -280,6 +280,8 @@ export interface ActiveSession {
   roles?: AppRole[];
   loginTime: string;
   ipAddress: string;
+  deviceId?: string;
+  lastHeartbeat?: string;
 }
 
 export interface PaymentInfo {

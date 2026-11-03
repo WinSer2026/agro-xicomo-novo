@@ -241,6 +241,31 @@ export default function App() {
     initDB();
   }, []);
 
+  // Heartbeat de presença e remoção de sessão ao fechar navegador/aba
+  useEffect(() => {
+    if (!currentUser) return;
+    const activeSessionId = safeSessionStorage.getItem('agro_session_id');
+    if (!activeSessionId) return;
+
+    const interval = setInterval(() => {
+      void dbService.updateSessionHeartbeat(activeSessionId);
+    }, 2 * 60 * 1000);
+
+    const handleBeforeUnload = () => {
+      const sessId = safeSessionStorage.getItem('agro_session_id');
+      if (sessId) {
+        void dbService.removeActiveSession(sessId);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [currentUser]);
+
   const handleVerifyGate = async (e: React.FormEvent) => {
     e.preventDefault();
     setGateError('');

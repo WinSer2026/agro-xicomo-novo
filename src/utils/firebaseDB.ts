@@ -1350,13 +1350,88 @@ export class FirebaseDBService {
 
   // --- Active Sessions ---
   public async getActiveSessions(): Promise<ActiveSession[]> {
+    let list: ActiveSession[] = [];
     if (this.activeSessionsCache && this.activeSessionsCache.length > 0) {
-      return this.activeSessionsCache;
+      list = this.activeSessionsCache;
+    } else {
+      list = await this.getAll<ActiveSession>('active_sessions');
     }
-    const list = await this.getAll<ActiveSession>('active_sessions');
-    this.activeSessionsCache = list.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
+    // Filtrar sessões órfãs com mais de 12 horas (ex.: de dias anteriores)
+    const now = Date.now();
+    const MAX_SESSION_AGE_MS = 12 * 60 * 60 * 1000;
+    const valid = (list || []).filter(s => {
+      const t = new Date(s.loginTime).getTime();
+      return !isNaN(t) && (now - t <= MAX_SESSION_AGE_MS);
+    });
+
+    this.activeSessionsCache = valid.sort((a, b) => safeStr(b.loginTime).localeCompare(safeStr(a.loginTime)));
     return this.activeSessionsCache;
   }
+
+  /**
+   * Termina automaticamente sessões anteriores para o mesmo utilizador,
+   * mesmo IP ou mesmo dispositivo, ou sessões órfãs com mais de 12 horas.
+   */
+  public async terminatePreviousSessions(params: {
+    username?: string;
+    ipAddress?: string;
+    deviceId?: string;
+    excludeSessionId?: string;
+  }): Promise<string[]> {
+    const list = await this.getAll<ActiveSession>('active_sessions');
+    const now = Date.now();
+    const MAX_SESSION_AGE_MS = 12 * 60 * 60 * 1000;
+    const terminatedIds: string[] = [];
+
+    const normUser = params.username ? params.username.toLowerCase().trim() : '';
+    const normIp = params.ipAddress && params.ipAddress !== 'N/D' && params.ipAddress !== 'Local / N/D' ? params.ipAddress.trim() : '';
+    const normDev = params.deviceId ? params.deviceId.trim() : '';
+
+    for (const sess of list) {
+      if (params.excludeSessionId && sess.id === params.excludeSessionId) {
+        continue;
+      }
+
+      const sessUser = (sess.username || '').toLowerCase().trim();
+      const sessIp = (sess.ipAddress || '').trim();
+      const sessDev = (sess.deviceId || '').trim();
+      const sessTime = new Date(sess.loginTime).getTime();
+      const isStale = isNaN(sessTime) || (now - sessTime > MAX_SESSION_AGE_MS);
+
+      // Critérios de terminação automática:
+      // 1. Mesmo utilizador (ex.: Almira que já tinha sessões de ontem ou de horas antes)
+      const isSameUser = Boolean(normUser && sessUser === normUser);
+      // 2. Mesmo endereço IP (quando válido)
+      const isSameIp = Boolean(normIp && sessIp && sessIp !== 'N/D' && sessIp !== 'Local / N/D' && sessIp === normIp);
+      // 3. Mesmo computador/dispositivo
+      const isSameDevice = Boolean(normDev && sessDev && sessDev === normDev);
+
+      if (isSameUser || isSameIp || isSameDevice || isStale) {
+        try {
+          await this.removeActiveSession(sess.id);
+          terminatedIds.push(sess.id);
+        } catch (e) {
+          console.warn('[SessionCleanup] Erro ao remover sessão antiga:', sess.id, e);
+        }
+      }
+    }
+
+    return terminatedIds;
+  }
+
+  public async updateSessionHeartbeat(sessionId: string): Promise<void> {
+    if (!sessionId) return;
+    try {
+      const nowIso = new Date().toISOString();
+      if (this.activeSessionsCache) {
+        const item = this.activeSessionsCache.find(x => x.id === sessionId);
+        if (item) item.lastHeartbeat = nowIso;
+      }
+    } catch {
+      // Ignorar falhas silenciosas de heartbeat
+    }
+  }
+
   public async saveActiveSession(s: ActiveSession): Promise<void> { 
     await this.upsert('active_sessions', s.id, s);
     if (!this.activeSessionsCache) this.activeSessionsCache = [];
