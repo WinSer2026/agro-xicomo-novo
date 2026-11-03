@@ -98,17 +98,32 @@ export default function App() {
   const [criticalProducts, setCriticalProducts] = useState<any[]>([]);
   const [showAlertsDropdown, setShowAlertsDropdown] = useState(false);
 
-  // 5-Minute Inactivity Lock States
-  const [isSessionLocked, setIsSessionLocked] = useState(false);
-  const [lastActivity, setLastActivity] = useState(Date.now());
+  // Inactivity Lock States com persistência (sobrevive a F5 / recarregamento)
+  const [isSessionLocked, setIsSessionLocked] = useState(() => {
+    return safeSessionStorage.getItem('agro_session_locked') === 'true' ||
+           safeStorage.getItem('agro_session_locked') === 'true';
+  });
+  const [lastActivity, setLastActivity] = useState(() => {
+    const saved = safeSessionStorage.getItem('agro_last_activity') || safeStorage.getItem('agro_last_activity');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return !isNaN(parsed) && parsed > 0 ? parsed : Date.now();
+  });
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState('');
 
   useEffect(() => {
     if (!currentUser || isSessionLocked) return;
 
+    let lastSave = 0;
     const resetTimer = () => {
-      setLastActivity(Date.now());
+      const now = Date.now();
+      setLastActivity(now);
+      // Salva em storage com throttle de 5 segundos para não impactar performance
+      if (now - lastSave > 5000) {
+        lastSave = now;
+        safeSessionStorage.setItem('agro_last_activity', String(now));
+        safeStorage.setItem('agro_last_activity', String(now));
+      }
     };
 
     window.addEventListener('mousemove', resetTimer);
@@ -140,6 +155,8 @@ export default function App() {
       const diff = now - lastActivity;
       if (diff >= lockMs) {
         setIsSessionLocked(true);
+        safeSessionStorage.setItem('agro_session_locked', 'true');
+        safeStorage.setItem('agro_session_locked', 'true');
         dbService.addAuditLog({
           id: uid('log-'),
           timestamp: new Date().toISOString(),
@@ -150,7 +167,7 @@ export default function App() {
           details: `A sessão de balcão foi bloqueada devido a ${lockMinutes} minutos de inatividade.`
         }).catch(err => console.warn('Audit log lock error:', err));
       }
-    }, 10000); // Check every 10 seconds
+    }, 5000); // Check every 5 seconds
 
     return () => clearInterval(interval);
   }, [currentUser, lastActivity, isSessionLocked, settings]);
@@ -201,6 +218,21 @@ export default function App() {
           try {
             const userObj = JSON.parse(savedUserJson);
             setCurrentUser(userObj);
+
+            // Verificar se a sessão estava previamente bloqueada por inatividade antes do F5
+            const wasLocked = safeSessionStorage.getItem('agro_session_locked') === 'true' ||
+                              safeStorage.getItem('agro_session_locked') === 'true';
+            const savedLast = parseInt(safeSessionStorage.getItem('agro_last_activity') || safeStorage.getItem('agro_last_activity') || '0', 10);
+            const lockMinutes = Math.max(1, globalSettings?.sessionLockMinutes || 15);
+            const lockMs = lockMinutes * 60 * 1000;
+            const now = Date.now();
+            const isTimeExpired = savedLast > 0 && (now - savedLast >= lockMs);
+
+            if (wasLocked || isTimeExpired) {
+              setIsSessionLocked(true);
+              safeSessionStorage.setItem('agro_session_locked', 'true');
+              safeStorage.setItem('agro_session_locked', 'true');
+            }
 
             const userRoles = getUserRoles(userObj);
             if (userRoles.includes('Técnico') || userRoles.includes('Gestor Geral') || userRoles.includes('Operador')) {
@@ -307,6 +339,13 @@ export default function App() {
   const handleLoginSuccess = (user: { username: string; role: string; roles?: AppRole[] }) => {
     safeSessionStorage.setItem('agro_session_active', 'true');
     safeSessionStorage.setItem('agro_current_user', JSON.stringify(user));
+    safeSessionStorage.removeItem('agro_session_locked');
+    safeStorage.removeItem('agro_session_locked');
+    const now = Date.now();
+    setLastActivity(now);
+    safeSessionStorage.setItem('agro_last_activity', String(now));
+    safeStorage.setItem('agro_last_activity', String(now));
+    setIsSessionLocked(false);
     setCurrentUser(user);
     
     const userRoles = getUserRoles(user);
@@ -339,6 +378,10 @@ export default function App() {
     const activeSessionId = safeSessionStorage.getItem('agro_session_id');
     safeSessionStorage.removeItem('agro_session_active');
     safeSessionStorage.removeItem('agro_session_id');
+    safeSessionStorage.removeItem('agro_session_locked');
+    safeSessionStorage.removeItem('agro_last_activity');
+    safeStorage.removeItem('agro_session_locked');
+    safeStorage.removeItem('agro_last_activity');
     safeSessionStorage.clear();
     if (currentUser) {
       // Remove specific device session without terminating other sessions. The
@@ -407,7 +450,7 @@ export default function App() {
             
             <h2 className="text-xl font-extrabold text-white uppercase tracking-tight">Sessão Bloqueada</h2>
             <p className="text-slate-400 text-xs mt-2 leading-relaxed">
-              Esta sessão foi bloqueada automaticamente por motivos de segurança após 5 minutos de inatividade de balcão.
+              Esta sessão foi bloqueada automaticamente por motivos de segurança após {Math.max(1, settings?.sessionLockMinutes || 15)} minutos de inatividade de balcão.
             </p>
 
             <div className="mt-6 text-left">
@@ -432,8 +475,14 @@ export default function App() {
                   const isMatch = user ? await verifyPassword(cleanUnlock, user.passwordHash) : false;
                   if (isMatch) {
                     setIsSessionLocked(false);
+                    safeSessionStorage.removeItem('agro_session_locked');
+                    safeStorage.removeItem('agro_session_locked');
+                    const now = Date.now();
+                    setLastActivity(now);
+                    safeSessionStorage.setItem('agro_last_activity', String(now));
+                    safeStorage.setItem('agro_last_activity', String(now));
                     setUnlockPassword('');
-                    setLastActivity(Date.now());
+                    setUnlockError('');
                   } else {
                     setUnlockError('Palavra-passe incorreta.');
                   }
@@ -473,6 +522,8 @@ export default function App() {
             <button
               onClick={() => {
                 setIsSessionLocked(false);
+                safeSessionStorage.removeItem('agro_session_locked');
+                safeStorage.removeItem('agro_session_locked');
                 setUnlockPassword('');
                 handleLogout();
               }}
