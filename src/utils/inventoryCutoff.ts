@@ -154,9 +154,6 @@ export function selectSalesForCutoff(sales: Sale[], options: SaleSelectionOption
   const { day, fromTime, toTime, includeCancelled = false, includeNonDefinitive = false } = options;
   if (!day) return [];
 
-  const fromTs = fromTime ? new Date(`${day}T${fromTime}:00`).getTime() : null;
-  const toTs = toTime ? new Date(`${day}T${toTime}:59`).getTime() : null;
-
   return (sales || [])
     .filter(sale => {
       if (!sale) return false;
@@ -164,14 +161,12 @@ export function selectSalesForCutoff(sales: Sale[], options: SaleSelectionOption
       if (!includeCancelled && sale.status === 'Cancelada') return false;
       if (!includeNonDefinitive && !(!sale.documentType || sale.documentType === 'FaturaDefinitiva')) return false;
 
-      if (fromTs !== null || toTs !== null) {
-        const ts = getSaleTimestamp(sale);
-        // Registos sem hora (apenas YYYY-MM-DD) entram sempre: não há como excluí-los com rigor.
-        const hasTime = String(sale.date || '').includes('T');
-        if (hasTime) {
-          if (fromTs !== null && ts < fromTs) return false;
-          if (toTs !== null && ts > toTs) return false;
-        }
+      const rawDate = String(sale.date || sale.createdAt || '');
+      const timeMatch = rawDate.match(/T(\d{2}:\d{2})/);
+      if (timeMatch) {
+        const timeStr = timeMatch[1];
+        if (fromTime && timeStr < fromTime) return false;
+        if (toTime && timeStr > toTime) return false;
       }
       return true;
     })

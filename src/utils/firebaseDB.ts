@@ -562,19 +562,30 @@ export class FirebaseDBService {
         if (Array.isArray(parsed) && parsed.length > 0) {
           const cleaned = parsed.map(p => this.sanitizeProduct(p));
           this.productsCache = cleaned;
+          // Se o listener em tempo real não estiver a correr, atualizar em background para
+          // sincronizar alterações de preços feitas por outros postos sem bloquear a UI
+          if (!this.largeCollectionListenersStarted) {
+            this.getAllOrFail<Product>('products').then(fresh => {
+              if (fresh && fresh.length > 0) {
+                const freshCleaned = fresh.map(p => this.sanitizeProduct(p)).sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
+                this.productsCache = freshCleaned;
+                safeStorage.setItem('agro_products_cache', JSON.stringify(freshCleaned));
+                window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', count: freshCleaned.length } }));
+              }
+            }).catch(() => {});
+          }
           return cleaned.map(p => ({ ...p }));
         }
       } catch (e) {}
     }
     // Leitura estrita: se a ligação falhar, NÃO interpretar como "catálogo
-    // vazio" (isso re-injetava produtos de demonstração na base real). Em caso
-    // de erro, propagar e deixar o cache local servir de fallback.
+    // vazio". Em caso de erro, propagar e deixar o cache local servir de fallback.
     const rawProducts = await this.getAllOrFail<Product>('products');
     if (rawProducts.length === 0) {
-      const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
-      await this.upsertBatch('products', seeded);
-      this.productsCache = seeded;
-      return seeded.map(p => ({ ...p }));
+      // NUNCA fazer seeding automático destrutivo aqui: isso sobrescrevia preços alterados
+      // pelo gestor de stock para os valores de fábrica (INITIAL_PRODUCTS).
+      this.productsCache = [];
+      return [];
     }
     const products = rawProducts.map(p => this.sanitizeProduct(p));
     this.productsCache = products.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
@@ -627,7 +638,18 @@ export class FirebaseDBService {
   public async saveProduct(p: Product): Promise<void> {
     const cleaned = this.sanitizeProduct(p);
     await this.upsert('products', cleaned.id, cleaned);
-    this.productsCache = null; // Invalidate cache so next fetch re-syncs
+    if (this.productsCache) {
+      const idx = this.productsCache.findIndex(item => item.id === cleaned.id);
+      if (idx >= 0) {
+        this.productsCache[idx] = cleaned;
+      } else {
+        this.productsCache.push(cleaned);
+      }
+      this.productsCache.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
+      safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
+    } else {
+      safeStorage.removeItem('agro_products_cache');
+    }
   }
 
   public async deductProductStock(cartItems: any[]): Promise<void> {
@@ -648,6 +670,7 @@ export class FirebaseDBService {
       }
       await batch.commit();
       this.productsCache = null;
+      safeStorage.removeItem('agro_products_cache');
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
     } catch (e) {
       console.error("[FirebaseDBService] Error deducting stock:", e);
@@ -657,13 +680,31 @@ export class FirebaseDBService {
   }
 
   public async saveProducts(list: Product[]): Promise<void> {
-    await this.upsertBatch('products', list);
-    this.productsCache = null;
+    const cleanedList = list.map(p => this.sanitizeProduct(p));
+    await this.upsertBatch('products', cleanedList);
+    if (this.productsCache) {
+      const map = new Map(cleanedList.map(item => [item.id, item]));
+      this.productsCache = this.productsCache.map(p => map.get(p.id) || p);
+      for (const item of cleanedList) {
+        if (!this.productsCache.some(p => p.id === item.id)) {
+          this.productsCache.push(item);
+        }
+      }
+      this.productsCache.sort((a, b) => safeStr(a.name).localeCompare(safeStr(b.name)));
+      safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
+    } else {
+      safeStorage.removeItem('agro_products_cache');
+    }
   }
 
   public async deleteProduct(id: string): Promise<void> {
     await this.deleteRow('products', id);
-    this.productsCache = null;
+    if (this.productsCache) {
+      this.productsCache = this.productsCache.filter(p => p.id !== id);
+      safeStorage.setItem('agro_products_cache', JSON.stringify(this.productsCache));
+    } else {
+      safeStorage.removeItem('agro_products_cache');
+    }
   }
 
   // --- Sales ---
@@ -1372,16 +1413,13 @@ export class FirebaseDBService {
         safeStorage.setItem('agro_settings_cache', JSON.stringify(s));
         return s;
       }
-    } catch(e) {}
-    const def = this.getDefaultSettings();
-    // As configurações por omissão mantêm a aplicação utilizável mesmo quando
-    // a primeira escrita falha (offline / permission-denied). Persistir o valor
-    // é secundário e não pode transformar o arranque numa rejeição não tratada.
-    try {
-      await this.saveSettings(def);
-    } catch (error) {
-      console.warn('[FirebaseDBService] Não foi possível persistir as configurações por omissão:', error);
+    } catch (e) {
+      console.warn('[FirebaseDBService] Falha ao obter definições do Firestore (rede/offline). Usando cache/padrão sem sobrescrever a nuvem:', e);
     }
+    const def = this.getDefaultSettings();
+    // NUNCA salvar def automaticamente na nuvem: isso apagava o stockPasswordHash (código do gestor)
+    // sempre que um dispositivo arrancava com falha de conexão. O valor é devolvido apenas em memória.
+    this.settingsCache = def;
     return def;
   }
 

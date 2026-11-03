@@ -1615,37 +1615,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
 
 
-  const handleResetOfficialCatalog = async () => {
-    if (isSubmitting) return;
-    askConfirmation(
-      'RESTAURAR INVENTÁRIO OFICIAL',
-      'ATENÇÃO: Esta ação irá substituir os produtos atuais pelo catálogo oficial do documento (Químicos, Sementes, Insumos, Fertilizantes e Máquinas) com preços e quantidades exatas. Deseja continuar?',
-      async () => {
-        if (isSubmitting) return;
-        setIsSubmitting(true);
-        let catalogRestored = false;
-        try {
-          await dbService.resetProductsToInitial();
-          catalogRestored = true;
-          try {
-            await loadInventoryData();
-          } catch (refreshError) {
-            // The catalogue is already persisted. A later refresh must not
-            // turn that completed action into an apparent failure.
-            console.warn('Catálogo restaurado, mas a atualização visual falhou:', refreshError);
-          }
-          triggerToast('Inventário oficial restaurado com sucesso!');
-        } catch (err) {
-          console.error('Erro ao restaurar catálogo:', err);
-          triggerToast(catalogRestored
-            ? 'Inventário oficial restaurado. A atualização visual será tentada novamente.'
-            : 'Erro ao restaurar catálogo oficial.');
-        } finally {
-          setIsSubmitting(false);
-        }
-      }
-    );
-  };
+
 
 
 
@@ -1890,17 +1860,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
           {/* Os blocos da gestão de stock moved here */}
           <div className="flex items-center gap-1 shrink-0">
-            {/* 1. Restaurar Lista Anexo */}
-            <button
-              onClick={handleResetOfficialCatalog}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-[10px] font-bold transition-all shadow-xs cursor-pointer shrink-0"
-              title="Recarregar a lista oficial de produtos, preços e quantidades em anexo"
-            >
-              <span className="material-symbols-outlined text-[13px]">inventory_2</span>
-              Restaurar Lista
-            </button>
-
-            {/* 2. Dropdown de Códigos e Etiquetas */}
+            {/* 1. Dropdown de Códigos e Etiquetas */}
             <div className="relative inline-block text-left shrink-0">
               <button
                 ref={codesButtonRef}

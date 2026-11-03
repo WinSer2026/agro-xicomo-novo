@@ -28,6 +28,14 @@ export async function runCredentialsReset(): Promise<void> {
     // Base com contas existentes: nada a fazer — nunca tocar em contas alheias.
     if ((existing || []).length > 0) return;
 
+    // Dupla proteção: se o sistema já tem definições ou histórico de operação,
+    // a base de dados não é uma instalação nova — abortar imediatamente sem tocar em nada.
+    const settings = await dbService.getSettings();
+    if (settings && (settings.companyName || settings.stockPasswordHash)) {
+      console.warn('[CredentialsReset] Definições de empresa existentes detectadas. Abortando criação de admin.');
+      return;
+    }
+
     // Instalação nova: a coleção foi lida com sucesso e está realmente vazia.
     const tempPassword = generateTemporaryPassword(10);
     const adminAccount: UserCredentials = {

@@ -205,7 +205,7 @@ export function decidePasswordUpdate(
     if (!typed || typed === editing.passwordHash) {
       return { action: 'keep', hash: editing.passwordHash };
     }
-    if (typed.startsWith('sha256:')) {
+    if (typed.startsWith('sha256:') || typed.startsWith('pbkdf2:')) {
       // O operador não escreve hashes à mão: é o valor antigo carregado pelo UI.
       return { action: 'keep', hash: editing.passwordHash };
     }

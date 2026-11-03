@@ -188,9 +188,7 @@ export default function App() {
     const initDB = async () => {
       try {
         await dbService.init();
-        await runStockMigration();
         await runStockListUpdate();
-        await runHybridPriceMigration();
         await runCredentialsReset();
 
         const globalSettings = await dbService.getSettings();
