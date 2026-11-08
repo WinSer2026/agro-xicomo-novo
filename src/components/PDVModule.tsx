@@ -398,6 +398,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       };
 
       if (retroactiveDeductStock) {
+        for (const item of retroactiveCart) {
+          const prod = products.find(product => product.id === item.productId);
+          if (!prod || prod.isService || item.isService) continue;
+          if (prod.stockQty < item.quantity) {
+            setRetroactiveError(`Stock insuficiente para "${prod.name}" (disponível: ${prod.stockQty}, solicitado: ${item.quantity}). Desmarque "Descontar do Stock Actual" se o inventário físico já reflecte esta saída.`);
+            setIsFinalizingRetroactive(false);
+            return;
+          }
+        }
         // Mesma regra do PDV normal: saco desconta grosso + equivalente em unidade base;
         // retalho desconta retalho + unidade base.
         const deductionItems = retroactiveCart.flatMap(item => {
@@ -1314,7 +1323,44 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const tot = getTotal();
       const iva = cartTotals.ivaAmount;
 
-      // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
+      if (paymentMethod === 'Crédito' && (!customerName || customerName.trim().toLowerCase() === 'cliente geral')) {
+        showToast('Venda a Crédito exige cliente identificado (não pode ser "Cliente Geral").', 'error');
+        setIsFinalizing(false);
+        return;
+      }
+
+      if (sub > 0 && (disc / sub) > 0.30) {
+        showToast('Descontos superiores a 30% exigem autorização prévia da gerência.', 'error');
+        setIsFinalizing(false);
+        return;
+      }
+
+      // Determine document type from print option
+      const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
+
+      if (effectiveDocType === 'FaturaDefinitiva') {
+        for (const item of cart) {
+          const prod = products.find(p => p.id === item.productId);
+          if (prod && !prod.isService) {
+            const hasConversion = !!(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              const availableBulk = prod.stockQtyBulk ?? Math.floor(prod.stockQty / (prod.conversionRate || 1));
+              if (item.quantity > availableBulk) {
+                showToast(`Stock insuficiente de "${prod.name}" (${prod.parentUnit}): disponível ${availableBulk}, solicitado ${item.quantity}.`, 'error');
+                setIsFinalizing(false);
+                return;
+              }
+            } else {
+              const availableRetail = hasConversion ? (prod.stockQtyRetail ?? prod.stockQty) : prod.stockQty;
+              if (item.quantity > availableRetail) {
+                showToast(`Stock insuficiente de "${prod.name}": disponível ${availableRetail} ${prod.baseUnit}, solicitado ${item.quantity}.`, 'error');
+                setIsFinalizing(false);
+                return;
+              }
+            }
+          }
+        }
+      }
       const finalizedItems = cart.map(item => {
         const prod = products.find(p => p.id === item.productId);
         const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? (item.unitPrice * 0.6);
@@ -1327,9 +1373,6 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           totalPrice: Math.round(((item.unitPrice * item.quantity) - getItemDiscount(item)) * 100) / 100
         };
       });
-
-      // Determine document type from print option
-      const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
 
       // Determine default status: A4 definitive invoices and proformas are saved as Pendente
       let finalStatus: Sale['status'] = 'Paga';

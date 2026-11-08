@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import Toast from './Toast';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
-import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
+import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, Customer } from '../types';
+import MasterReportModal from './MasterReportModal';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
@@ -25,6 +26,8 @@ export default function FinanceModule() {
   const [transformations, setTransformations] = useState<ProductTransformation[]>([]);
   const [payrollPayments, setPayrollPayments] = useState<PayrollPayment[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [showMasterReportModal, setShowMasterReportModal] = useState(false);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [toastMessage, setToastMessage] = useState('');
   const [isLoadingSales, setIsLoadingSales] = useState(true);
@@ -96,6 +99,7 @@ export default function FinanceModule() {
         if (part.settings) setSettings(part.settings);
         if (part.transformations) setTransformations(part.transformations);
         if (part.payrollPayments) setPayrollPayments(part.payrollPayments);
+        void dbService.getCustomers().then(c => setCustomers(c)).catch(() => {});
       }, failedSection => {
         if (request !== loadRequestRef.current) return;
         setLoadFailures(previous => previous.includes(failedSection) ? previous : [...previous, failedSection]);
@@ -1038,12 +1042,20 @@ export default function FinanceModule() {
 
   return (
     <div className="space-y-6" id="finance_module">
-      {/* Title */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+      {/* Title & Master Actions */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <h3 className="text-xl font-black text-slate-800 tracking-tight flex items-center gap-2">
           <span className="material-symbols-outlined text-emerald-600">account_balance_wallet</span>
           Contabilidade & Finanças
         </h3>
+        <button
+          type="button"
+          onClick={() => setShowMasterReportModal(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+        >
+          <span className="material-symbols-outlined text-[18px]">assessment</span>
+          <span>Relatório Completo do Sistema</span>
+        </button>
       </div>
 
       {isLoadingSales && !hasLoadedSales && (
@@ -2315,6 +2327,21 @@ export default function FinanceModule() {
             </table>
           </div>
         </div>
+      )}
+
+      {showMasterReportModal && (
+        <MasterReportModal
+          isOpen={showMasterReportModal}
+          onClose={() => setShowMasterReportModal(false)}
+          sales={sales}
+          losses={losses}
+          products={products}
+          transformations={transformations}
+          payrollPayments={payrollPayments}
+          auditLogs={auditLogs}
+          customers={customers}
+          settings={settings}
+        />
       )}
 
       {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}

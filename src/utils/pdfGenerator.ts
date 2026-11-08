@@ -54,14 +54,21 @@ async function getLogoBase64(url: string): Promise<string | null> {
 }
 
 function getCompanyDefaults(settings: SystemSettings) {
+  const vodacomList = [settings.vodacom1, settings.vodacom2, settings.vodacom3].filter(Boolean);
+  const movitelList = [settings.movitel1, settings.movitel2, settings.movitel3].filter(Boolean);
+  const vodaStr = vodacomList.length > 0 ? vodacomList.join(' / ') : '845197072 / 84 94 23 241';
+  const moviStr = movitelList.length > 0 ? movitelList.join(' / ') : '86 36 99900';
+
   return {
     name: settings.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA',
     nuit: settings.companyNuit || '401976590',
     address: settings.companyAddress || 'Maputo, Bairro do Zimpeto, Av. de Moçambique, Parcela: 654 R/C',
     email: settings.email || 'agroxicomo1@gmail.com',
-    phone1: settings.vodacom1 || '84 94 23 241',
-    phone2: settings.vodacom2 || '86 36 99900',
-    phone3: settings.movitel1 || '8451970702',
+    phone1: settings.vodacom1 || '845197072',
+    phone2: settings.vodacom2 || '84 94 23 241',
+    phone3: settings.movitel1 || '86 36 99900',
+    vodaStr,
+    moviStr,
     mpesa: settings.mpesa || '',
     emola: settings.emola || '',
     bank1: settings.banco || 'First Capital Bank, S.A.',
@@ -147,7 +154,7 @@ export async function downloadInvoiceA4(invoice: Sale, settings: SystemSettings,
       doc.setTextColor(80, 80, 80);
       doc.text(`${co.address.split(',')[0]}, Moçambique • NUIT: ${co.nuit}`, 15, 56);
       
-      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} | Contacto: ${contacts || '+258 84 123 4567'}`, 15, 60);
 
       // Document title and info (right side)
@@ -461,7 +468,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(80, 80, 80);
       doc.text(`${co.address.split(',')[0]}, Moçambique • NUIT: ${co.nuit}`, 15, 56);
       
-      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} | Contacto: ${contacts || '+258 84 123 4567'}`, 15, 60);
 
       // Document title and info (right side)
@@ -652,7 +659,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFontSize(7);
       doc.setTextColor(100, 100, 100);
       doc.text(`Maputo, Moçambique • NUIT: ${co.nuit}`, 105, bLineY + 9, { align: 'center' });
-      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} • Tel: ${contacts || '+258 84 123 4567'}`, 105, bLineY + 13, { align: 'center' });
       
       doc.setFont('helvetica', 'bold');
@@ -749,14 +756,10 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.text(`Email: ${co.email}`, 40, y, { align: 'center' });
   y += 4.5;
 
-  const phoneVoda = co.phone3 && co.phone3.length > 5 
-    ? `${co.phone3} / ${co.phone1}` 
-    : '845197072 / 84 94 23 241';
-  doc.text(`Vodacom: ${phoneVoda}`, 40, y, { align: 'center' });
+  doc.text(`Vodacom: ${co.vodaStr}`, 40, y, { align: 'center' });
   y += 4.5;
 
-  const phoneMovi = co.phone2 || '86 36 99900';
-  doc.text(`Movitel: ${phoneMovi}`, 40, y, { align: 'center' });
+  doc.text(`Movitel: ${co.moviStr}`, 40, y, { align: 'center' });
   y += 6;
 
   // ── Banner Box: RECIBO DE PAGAMENTO POS ──

@@ -314,7 +314,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
           username: user.username,
           ipAddress: ip,
           action: 'Sessão Anterior Encerrada',
-          status: 'INFO',
+          status: 'Alerta',
           level: 'INFO',
           details: `${terminated.length} sessão(ões) anterior(es) órfã(s) de "${user.username}" ou deste computador foram encerradas automaticamente para manter sessão única.`
         }).catch(() => {});

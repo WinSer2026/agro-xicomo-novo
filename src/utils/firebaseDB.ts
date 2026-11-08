@@ -1163,14 +1163,16 @@ export class FirebaseDBService {
     // 1. Restore Original Product Stock
     const origDocRef = doc(db, 'products', transformation.originalProductId);
     batch.update(origDocRef, {
-      stockQty: increment(transformation.originalQuantity)
+      stockQty: increment(transformation.originalQuantity),
+      stockQtyRetail: increment(transformation.originalQuantity)
     });
 
     // 2. Deduct Resulting Products Stock
     for (const item of transformation.items) {
       const itemDocRef = doc(db, 'products', item.resultingProductId);
       batch.update(itemDocRef, {
-        stockQty: increment(-item.quantity)
+        stockQty: increment(-item.quantity),
+        stockQtyRetail: increment(-item.quantity)
       });
     }
 
@@ -1239,14 +1241,27 @@ export class FirebaseDBService {
   /** Query active or archived audit history by period, one bounded page at a time. */
   public async getAuditLogsPage(options: AuditLogPageOptions = {}): Promise<PaginatedResult<AuditLog>> {
     const collectionName = options.source === 'archive' ? 'audit_logs_archive' : 'audit_logs';
-    return this.getOrderedPage<AuditLog>(
-      collectionName,
-      'timestamp',
-      'desc',
-      options.pageSize,
-      options.cursor,
-      this.getDateRangeConstraints('timestamp', options)
-    );
+    try {
+      return await this.getOrderedPage<AuditLog>(
+        collectionName,
+        'timestamp',
+        'desc',
+        options.pageSize,
+        options.cursor,
+        this.getDateRangeConstraints('timestamp', options)
+      );
+    } catch (err: any) {
+      console.warn(`[FirebaseDBService] getAuditLogsPage falhou para ${collectionName}:`, err?.message);
+      try {
+        const snap = await getDocs(query(collection(db, collectionName), limit(options.pageSize || 100)));
+        const items = snap.docs.map(d => this.recordFromSnapshot<AuditLog>(d));
+        items.sort((a, b) => safeStr(b.timestamp).localeCompare(safeStr(a.timestamp)));
+        return { items, nextCursor: null, hasMore: false };
+      } catch (innerErr) {
+        console.warn(`[FirebaseDBService] Leitura simples de auditoria também falhou:`, innerErr);
+        return { items: [], nextCursor: null, hasMore: false };
+      }
+    }
   }
 
   /**
@@ -1499,6 +1514,10 @@ export class FirebaseDBService {
   }
 
   public async saveSettings(s: SystemSettings): Promise<void> {
+    // Preservar hash da palavra-passe de stock se não for fornecida na atualização
+    if (!s.stockPasswordHash && this.settingsCache?.stockPasswordHash) {
+      s.stockPasswordHash = this.settingsCache.stockPasswordHash;
+    }
     this.settingsCache = s;
     safeStorage.setItem('agro_settings_cache', JSON.stringify(s));
     await this.upsert('settings', 'global', s);

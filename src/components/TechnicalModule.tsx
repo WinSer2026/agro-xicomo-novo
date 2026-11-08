@@ -8,7 +8,6 @@ import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
 import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
-import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, formatDatePT } from '../utils/dateRangeHelper';
 import { hashPassword, validateAccessPassword, decidePasswordUpdate } from '../utils/securityHelper';
@@ -34,7 +33,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [users, setUsers] = useState<UserCredentials[]>([]);
 
   // Active Technical Panel Tab
-  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'sessions'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'sessions'>('settings');
   const [settingsSubTab, setSettingsSubTab] = useState<'empresa' | 'bancos' | 'impressoras' | 'backups' | 'sistema'>('empresa');
 
   // Logs Date Range Filter
@@ -787,19 +786,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               {activeSessions.length}
             </span>
           )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('schema')}
-          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
-            activeTab === 'schema'
-              ? 'bg-slate-800 text-white border-slate-900 shadow-md ring-2 ring-slate-700/20'
-              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
-          }`}
-        >
-          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'schema' ? 'text-white' : 'text-slate-700'}`}>database</span>
-          <span>Tabelas BD</span>
         </button>
       </div>
 
@@ -1593,11 +1579,11 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   <div className="pt-1">
                     <button
                       type="button"
-                      onClick={handleBackupTotal}
-                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      onClick={() => setSettingsSubTab('backups')}
+                      className="w-full py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                     >
-                      <span className="material-symbols-outlined text-[16px]">download</span>
-                      Descarregar Backup Completo Agora
+                      <span className="material-symbols-outlined text-[16px]">backup</span>
+                      Gerir Backups em Backups & Restauração
                     </button>
                   </div>
                 </div>
@@ -2041,10 +2027,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
             </table>
           </div>
         </div>
-      )}
-
-      {activeTab === 'schema' && (
-        <DatabaseSchemaViewer />
       )}
 
       {/* --- NUVEM & firebase MANAGEMENT VIEW --- */}

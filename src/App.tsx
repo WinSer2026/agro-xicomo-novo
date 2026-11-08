@@ -19,7 +19,7 @@ const TechnicalModule = lazy(() => import('./components/TechnicalModule'));
 import { SystemSettings, AppRole } from './types';
 import { getUserRoles } from './utils/roleHelper';
 
-type ERPModule = 'vendas' | 'faturas' | 'stock' | 'rh' | 'financas' | 'tecnico';
+type ERPModule = 'vendas' | 'faturas' | 'stock' | 'armazem' | 'rh' | 'financas' | 'tecnico';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<{ username: string; role: string; roles?: AppRole[] } | null>(null);
@@ -52,6 +52,7 @@ export default function App() {
     if (mod === 'vendas') return roles.includes('Operador');
     if (mod === 'faturas') return roles.includes('Operador') || roles.includes('Gestor de Stock');
     if (mod === 'stock') return roles.includes('Gestor de Stock');
+    if (mod === 'armazem') return roles.includes('Gestor de Stock') || roles.includes('Gestor Geral') || roles.includes('Técnico');
     if (mod === 'rh') return roles.includes('Gestor de RH');
     if (mod === 'financas') return roles.includes('Contabilista');
     if (mod === 'tecnico') return roles.includes('Técnico');
@@ -70,6 +71,7 @@ export default function App() {
     vendas: false,
     faturas: false,
     stock: false,
+    armazem: false,
     rh: false,
     financas: false,
     tecnico: false
@@ -639,6 +641,20 @@ export default function App() {
               </button>
             )}
 
+            {isModuleAccessible('armazem') && (
+              <button
+                onClick={() => selectModule('armazem')}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all whitespace-nowrap ${
+                  activeModule === 'armazem'
+                    ? 'bg-emerald-600 text-white font-medium shadow-sm'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <span className="material-symbols-outlined text-[16px]">warehouse</span>
+                Gestão de Armazém
+              </button>
+            )}
+
             {isModuleAccessible('rh') && (
               <button
                 onClick={() => selectModule('rh')}
@@ -824,6 +840,7 @@ export default function App() {
                     Módulo de <span className="text-emerald-400 font-bold uppercase">{
                       activeModule === 'vendas' ? 'Ponto de Venda (PDV)' :
                       activeModule === 'stock' ? 'Stock & Inventário' :
+                      activeModule === 'armazem' ? 'Gestão de Armazém' :
                       activeModule === 'rh' ? 'Recursos Humanos (RH)' :
                       activeModule === 'financas' ? 'Contabilidade & Finanças' :
                       activeModule === 'tecnico' ? 'Painel Técnico' :
@@ -869,6 +886,26 @@ export default function App() {
               {activeModule === 'vendas' && <PDVModule currentUser={currentUser} />}
               {activeModule === 'faturas' && <FaturasModule currentUser={currentUser} />}
               {activeModule === 'stock' && <StockModule />}
+              {activeModule === 'armazem' && (
+                <div className="p-8 max-w-4xl mx-auto space-y-6">
+                  <div className="bg-white rounded-2xl p-8 border border-slate-200 shadow-sm text-center space-y-4">
+                    <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                      <span className="material-symbols-outlined text-3xl">warehouse</span>
+                    </div>
+                    <div className="space-y-1">
+                      <h2 className="text-xl font-black text-slate-800 uppercase tracking-wide">Gestão de Armazém</h2>
+                      <p className="text-sm text-slate-500 font-medium">Módulo Estrutural de Logística e Separação de Stock Físico</p>
+                    </div>
+                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-full border border-amber-200">
+                      <span className="material-symbols-outlined text-sm">construction</span>
+                      Módulo em Estruturação — Fase Estática
+                    </div>
+                    <p className="text-xs text-slate-600 max-w-xl mx-auto leading-relaxed">
+                      Este espaço reservado centralizará o registo de localizações físicas, separação de corredores, prateleiras e lotes de receção de fornecedores, mantendo a logística desacoplada da frente de venda do PDV.
+                    </p>
+                  </div>
+                </div>
+              )}
               {activeModule === 'rh' && <HRModule />}
               {activeModule === 'financas' && <FinanceModule />}
               {currentUser.role === 'Técnico' && activeModule === 'tecnico' && (

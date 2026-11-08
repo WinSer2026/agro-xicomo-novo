@@ -667,6 +667,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     try {
       const codeToUse = newProdCode.trim() || generateBarcodeValue();
 
+      const existingWithCode = products.find(p => p.code?.trim().toLowerCase() === codeToUse.toLowerCase());
+      if (existingWithCode) {
+        setNewProdError(`O código de barras "${codeToUse}" já está atribuído ao produto "${existingWithCode.name}".`);
+        triggerToast(`Código de barras "${codeToUse}" já existe!`, 'error');
+        setIsSubmitting(false);
+        return;
+      }
+
       const cat = newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory;
       const finalProdName = newProdName.trim().toUpperCase();
 
@@ -1664,6 +1672,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const prevQty = selectedProduct.stockQty;
       
       const codeToUse = editCode.trim() || selectedProduct.code || generateBarcodeValue();
+
+      const existingOther = products.find(p => p.id !== selectedProduct.id && p.code?.trim().toLowerCase() === codeToUse.toLowerCase());
+      if (existingOther) {
+        setAdjustError(`O código de barras "${codeToUse}" já pertence ao produto "${existingOther.name}".`);
+        triggerToast(`Código de barras "${codeToUse}" já em uso!`, 'error');
+        setIsSubmitting(false);
+        return;
+      }
 
       // Update all properties
       selectedProduct.name = editName;

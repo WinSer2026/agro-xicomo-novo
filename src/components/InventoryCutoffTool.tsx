@@ -284,10 +284,10 @@ export default function InventoryCutoffTool({
     event.preventDefault();
     if (isRunning) return;
 
-    const expected = (settings?.stockPasswordHash || '05082').trim();
+    const expected = (settings?.stockPasswordHash || '').trim();
     const typed = password.trim();
-    if (typed !== expected && typed !== '05082' && typed !== '0147') {
-      setError('Palavra-passe de autorização incorrecta.');
+    if (!expected || typed !== expected) {
+      setError('Palavra-passe de autorização incorrecta ou não configurada.');
       return;
     }
     if (selectedSales.length === 0) {

@@ -114,7 +114,19 @@ service cloud.firestore {
     }
 
     // ------------------------------------------------------------------
+    // CONTADORES E CORTES DE INVENTÁRIO.
+    // ------------------------------------------------------------------
+    match /counters/{counterId} {
+      allow read, write: if true;
+    }
+
+    match /inventory_cutoffs/{cutoffId} {
+      allow read, write: if true;
+    }
+
+    // ------------------------------------------------------------------
     // Qualquer outra coleção/documento: NEGADO por omissão.
     // ------------------------------------------------------------------
   }
 }
+
