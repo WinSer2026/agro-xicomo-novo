@@ -2,9 +2,10 @@ import { companyNuit, companyName } from '../utils/companyInfo';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
-import { isFinancialSale, isDebtSale } from '../utils/saleStatus';
+import { isFinancialSale, isDebtSale, isCancelledSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
 import { cashBalance, sumRefunds } from '../utils/cashBox';
+import { splitSalesForReport } from '../utils/reporting';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
@@ -161,7 +162,17 @@ export default function FinanceModule() {
     });
   };
 
-  const reportSales = getFilteredSalesForReport(compiledPeriod);
+  /**
+   * O relatório somava cancelados e proformas: a "Faturação Bruta" do documento
+   * oficial declarava mais do que existe. Agora soma só documentos válidos e
+   * declara os cancelados numa linha própria que nunca entra nos totais.
+   */
+  const reportSplit = splitSalesForReport(getFilteredSalesForReport(compiledPeriod));
+  const reportSales = reportSplit.valid;
+  const reportCancelledValue = reportSplit.totals.cancelled;
+  const reportCancelledCount = reportSplit.totals.cancelledCount;
+  const reportProformaValue = reportSplit.totals.proforma;
+  const reportProformaCount = reportSplit.totals.proformaCount;
   const reportGrossSales = reportSales.reduce((acc, s) => acc + s.total, 0);
   const reportCost = reportSales.reduce((acc, sale) => {
     return acc + sale.items.reduce((sum, item) => {
@@ -190,6 +201,8 @@ export default function FinanceModule() {
       { Métrica: 'Lucro Estimado', Valor: `${reportProfit.toLocaleString('pt-MZ')} MT` },
       { Métrica: 'Total de Transações', Valor: reportTransCount },
       { Métrica: 'Margem Operacional', Valor: `${reportMargin.toFixed(1)}%` },
+      { Métrica: 'Cancelado no período (não soma)', Valor: `${reportCancelledValue.toLocaleString('pt-MZ')} MT em ${reportCancelledCount} documento(s)` },
+      { Métrica: 'Proformas no período (não soma)', Valor: `${reportProformaValue.toLocaleString('pt-MZ')} MT em ${reportProformaCount} documento(s)` },
       { Métrica: 'Data de Emissão', Valor: new Date().toLocaleString('pt-MZ') }
     ];
     const wsSummary = XLSX.utils.json_to_sheet(summaryData);
@@ -357,13 +370,30 @@ export default function FinanceModule() {
     doc.setTextColor(180, 83, 9);
     doc.text(`${reportMargin.toFixed(1)}%`, 155, 51);
 
+    // Documentos que NÃO entram nos totais — declarados, não somados.
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(190, 18, 60);
+    doc.text(
+      `Documentos CANCELADOS no período (não somados): ${reportCancelledValue.toLocaleString('pt-MZ')} MT em ${reportCancelledCount} documento(s)`,
+      15,
+      60
+    );
+    doc.setTextColor(120, 53, 15);
+    doc.text(
+      `Proformas/cotações (não são receita): ${reportProformaValue.toLocaleString('pt-MZ')} MT em ${reportProformaCount} documento(s)`,
+      15,
+      64
+    );
+    doc.setTextColor(51, 65, 85);
+
     // Table: Product Performance
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
     doc.setTextColor(0, 106, 78);
-    doc.text('DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO', 15, 65);
+    doc.text('DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO', 15, 70);
 
-    let currentY = 70;
+    let currentY = 75;
     doc.saveGraphicsState();
     doc.setFillColor(0, 106, 78);
     doc.rect(15, currentY, 180, 7, 'F');
@@ -609,12 +639,15 @@ export default function FinanceModule() {
         { header: 'Fatura Nº', dataKey: 'invoiceNumber' },
         { header: 'Data', dataKey: 'date' },
         { header: 'Cliente', dataKey: 'customerName' },
+        { header: 'Estado', dataKey: 'estado' },
         { header: 'Subtotal (MT)', dataKey: 'subtotal' },
         { header: 'Desconto (MT)', dataKey: 'discount' },
         { header: 'Total (MT)', dataKey: 'total' },
         { header: 'Método Pagamento', dataKey: 'paymentMethod' }
       ],
-      rows: sales.map(s => ({
+      // Só documentos válidos: uma factura anulada não é uma venda.
+      rows: sales.filter(isFinancialSale).map(s => ({
+        estado: s.status,
         ...s,
         date: new Date(s.date).toLocaleDateString(),
         subtotal: s.subtotal.toLocaleString('pt-MZ'),
@@ -629,7 +662,10 @@ export default function FinanceModule() {
   const handleExportPDFLedger = async () => {
     const data: ReportData = {
       title: 'Livro de Vendas Detalhado (Ledger)',
-      subtitle: `Total Transações: ${sales.length}`,
+      subtitle:
+        `Transações válidas: ${sales.filter(isFinancialSale).length} · ` +
+        `Faturação: ${sales.filter(isFinancialSale).reduce((a, s) => a + (Number(s.total) || 0), 0).toLocaleString('pt-MZ')} MT · ` +
+        `Canceladas (não somadas): ${sales.filter(isCancelledSale).reduce((a, s) => a + (Number(s.total) || 0), 0).toLocaleString('pt-MZ')} MT`,
       fileName: `Vendas_PDF_${Date.now()}`,
       columns: [
         { header: 'Fatura Nº', dataKey: 'invoiceNumber' },
@@ -638,7 +674,7 @@ export default function FinanceModule() {
         { header: 'Método', dataKey: 'paymentMethod' },
         { header: 'Total (MT)', dataKey: 'total' }
       ],
-      rows: sales.map(s => ({
+      rows: sales.filter(isFinancialSale).map(s => ({
         ...s,
         date: new Date(s.date).toLocaleDateString(),
         total: s.total.toLocaleString('pt-MZ')
@@ -1341,7 +1377,7 @@ export default function FinanceModule() {
               <div className="space-y-1">
                 <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Faturas Pendentes</span>
                 <p className="text-2xl font-black text-slate-800 font-mono">
-                  {sales.filter(s => s.paymentMethod?.toLowerCase().includes('crédit') || s.paymentMethod?.toLowerCase().includes('credit')).length} Clientes
+                  {sales.filter(s => isFinancialSale(s) && (s.paymentMethod?.toLowerCase().includes('crédit') || s.paymentMethod?.toLowerCase().includes('credit'))).length} Clientes
                 </p>
                 <div className="text-[10px] text-gray-400 font-medium">Faturas à espera de liquidação.</div>
               </div>
@@ -1386,6 +1422,7 @@ export default function FinanceModule() {
                       const dayName = days[d.getDay()];
                       
                       const daySales = sales.filter(s => {
+                        if (!isFinancialSale(s)) return false;
                         const saleDate = new Date(s.date);
                         return saleDate.getDate() === d.getDate() &&
                                saleDate.getMonth() === d.getMonth() &&
@@ -1763,6 +1800,26 @@ export default function FinanceModule() {
               </div>
             </div>
 
+            {/* Documentos fora dos totais: declarados, nunca somados */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className={`rounded-xl border p-3 ${reportCancelledCount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'}`}>
+                <p className="text-[10px] uppercase font-extrabold text-rose-600 tracking-wider">Cancelado — não soma</p>
+                <p className="text-lg font-mono font-black text-rose-700">
+                  {reportCancelledValue.toLocaleString('pt-MZ')} MT
+                  <span className="text-[11px] font-bold text-rose-500 ml-1.5">· {reportCancelledCount} doc.</span>
+                </p>
+                <p className="text-[9px] text-rose-600">Facturas anuladas no período. Já estão fora da faturação, do lucro e das transações acima.</p>
+              </div>
+              <div className={`rounded-xl border p-3 ${reportProformaCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                <p className="text-[10px] uppercase font-extrabold text-amber-600 tracking-wider">Proformas — não é receita</p>
+                <p className="text-lg font-mono font-black text-amber-700">
+                  {reportProformaValue.toLocaleString('pt-MZ')} MT
+                  <span className="text-[11px] font-bold text-amber-500 ml-1.5">· {reportProformaCount} doc.</span>
+                </p>
+                <p className="text-[9px] text-amber-600">Documentos comerciais sem efeito fiscal. Fora dos totais até serem convertidos em factura.</p>
+              </div>
+            </div>
+
             {/* Document and Sheet Export action buttons */}
             <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
               <button
@@ -1845,28 +1902,28 @@ export default function FinanceModule() {
                     <tr>
                       <td className="p-2.5 font-bold text-slate-700">Trienal (3 Anos)</td>
                       <td className="p-2.5 text-right font-mono text-slate-900">
-                        {sales.filter(s => {
+                        {sales.filter(s => isFinancialSale(s) && (() => {
                           const diff = Date.now() - new Date(s.date).getTime();
                           return diff <= 3 * 365 * 24 * 3600 * 1000;
-                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                        })()).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
                       </td>
                     </tr>
                     <tr>
                       <td className="p-2.5 font-bold text-slate-700">Quinquenal (5 Anos)</td>
                       <td className="p-2.5 text-right font-mono text-slate-900">
-                        {sales.filter(s => {
+                        {sales.filter(s => isFinancialSale(s) && (() => {
                           const diff = Date.now() - new Date(s.date).getTime();
                           return diff <= 5 * 365 * 24 * 3600 * 1000;
-                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                        })()).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
                       </td>
                     </tr>
                     <tr className="bg-slate-50">
                       <td className="p-2.5 font-extrabold text-[#006A4E]">Decenal (10 Anos)</td>
                       <td className="p-2.5 text-right font-mono font-black text-[#006A4E]">
-                        {sales.filter(s => {
+                        {sales.filter(s => isFinancialSale(s) && (() => {
                           const diff = Date.now() - new Date(s.date).getTime();
                           return diff <= 10 * 365 * 24 * 3600 * 1000;
-                        }).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
+                        })()).reduce((acc, s) => acc + s.total, 0).toLocaleString('pt-MZ')} MT
                       </td>
                     </tr>
                   </tbody>
