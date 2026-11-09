@@ -1,44 +1,59 @@
-════════════════════════════════════════════════════════════════
-  COMO PUBLICAR AS REGRAS — VERSÃO SIMPLES
-  (faça só isto, pela ordem; são 6 passos)
-════════════════════════════════════════════════════════════════
-
-PASSO 1
-  Clique no botão azul "Desenvolver e testar"
-  (está em cima, do lado direito).
-
-PASSO 2
-  Vai aparecer uma caixa com texto.
-  Clique dentro do texto.
-  Aperte Ctrl+A  e depois Ctrl+C   (isto copia o texto que lá está).
-
-PASSO 3
-  Abra o Bloco de Notas.
-  Cole com Ctrl+V  e grave com o nome:  regras-antigas
-  (É só uma cópia de segurança. Não mexa mais nela.)
-
-PASSO 4
-  Abra o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt  (está na pasta do sistema).
-  Aperte Ctrl+A  e depois Ctrl+C.
-
-PASSO 5
-  Volte à consola do Firebase.
-  Clique dentro do texto e aperte Ctrl+A   (isto apaga o texto antigo).
-  Aperte Ctrl+V                            (isto coloca o texto novo).
-
-PASSO 6
-  Olhe para a última linha do texto. Tem de ser:   }
-  Se for, clique em "Publicar".
+════════════════════════════════════════════════════════════
+  COMO PUBLICAR AS REGRAS — VERSÃO SIMPLES (v2)
+  O botão "Desenvolver e testar" era o errado: abre uma janela
+  sobre emuladores. Feche essa janela no X e faça assim:
+════════════════════════════════════════════════════════════
 
 
-DEPOIS
+PASSO 1 — Abrir outra consola (a do Google Cloud)
+  Cole este endereço no navegador:
+
+      https://console.cloud.google.com/databases?project=gen-lang-client-0896153566
+
+  Se pedir para escolher projeto, escolha:  gen-lang-client-0896153566
+
+
+PASSO 2 — Escolher a base de dados
+  Clique no nome comprido que começa por:
+
+      ai-studio-remixagroxicomoe-5bee6408-...
+
+
+PASSO 3 — Abrir as regras
+  No menu do lado esquerdo, clique em "Segurança" (Security).
+  Depois clique no separador "Firestore Rules".
+
+
+PASSO 4 — Criar uma versão nova para editar
+  Clique no botão "Novo conjunto de regras" (New ruleset).
+  Se aparecer a opção "Clonar conjunto de regras" (Clone ruleset), também
+  serve — clone, e siga igual.
+
+
+PASSO 5 — Colocar o nosso texto
+  a) Abra o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt  (na pasta do sistema).
+     Aperte Ctrl+A  e depois Ctrl+C.
+  b) Volte à consola. Clique dentro do editor de texto.
+     Aperte Ctrl+A  (apaga o que lá está) e depois Ctrl+V (cola o novo).
+
+
+PASSO 6 — Publicar
+  Clique em "Publicar" (Publish).
   Espere a mensagem a dizer que publicou.
-  Abra o programa, aperte Ctrl+Shift+R (para atualizar).
+
+
+PASSO 7 — Ver se funcionou
+  Abra o programa.
+  Aperte Ctrl+Shift+R (atualiza a página).
   Clique no botão do turno e abra um turno.
   Se abrir, está feito.
 
 
-SE DER ERRO
-  Copie a mensagem de erro e envie-me.
-  Se não encontrar o botão "Publicar", tire uma foto do ecrã e envie.
-════════════════════════════════════════════════════════════════
+SE ALGO CORRER MAL
+  Na mesma página "Firestore Rules" há uma lista/timeline das versões
+  anteriores. Escolha a versão de 24/08/2026 e publique-a de novo.
+  Depois envie-me uma mensagem a dizer o que aconteceu.
+
+SE NÃO ENCONTRAR ALGUM BOTÃO
+  Tire uma foto do ecrã e envie. Diga em que passo parou.
+════════════════════════════════════════════════════════════
