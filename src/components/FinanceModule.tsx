@@ -4,7 +4,9 @@ import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { isFinancialSale, isDebtSale, isCancelledSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
-import { cashBalance, sumRefunds } from '../utils/cashBox';
+import { cashBalance, sumRefunds, CASH_METHODS, toCashDay } from '../utils/cashBox';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { getClientIp } from '../utils/clientInfo';
 import { splitSalesForReport, periodDayRange, stockBeforePeriod, buildProductPerformance, formatMT, type ReportPeriod } from '../utils/reporting';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
@@ -15,7 +17,11 @@ import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { REPORT_CATEGORIES, matchCategory } from '../utils/categoryHelper';
 
-export default function FinanceModule() {
+interface FinanceModuleProps {
+  currentUser?: { username: string; role: string } | null;
+}
+
+export default function FinanceModule({ currentUser }: FinanceModuleProps = {}) {
   const [sales, setSales] = useState<Sale[]>([]);
   const [losses, setLosses] = useState<LossRecord[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -26,6 +32,17 @@ export default function FinanceModule() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [toastMessage, setToastMessage] = useState('');
+  /** Registo de saída/entrada de dinheiro na gaveta (sangria, entrada). */
+  const [cashForm, setCashForm] = useState<{
+    open: boolean;
+    type: 'Sangria' | 'Entrada';
+    amount: string;
+    reason: string;
+    method: string;
+    password: string;
+    error: string;
+    saving: boolean;
+  }>({ open: false, type: 'Sangria', amount: '', reason: '', method: 'Dinheiro', password: '', error: '', saving: false });
   const [selectedRange, setSelectedRange] = useState<'Day' | 'Week' | 'Month' | 'Year' | '3Y' | '5Y' | '10Y'>('Month');
 
   // Universal Date Range States (Parte 5)
@@ -99,6 +116,76 @@ export default function FinanceModule() {
     setCashMovements(cashList);
   };
 
+  /**
+   * Regista uma saída (sangria) ou entrada de dinheiro na gaveta.
+   *
+   * Sem isto, o único dinheiro que saía do caixa sem venda era invisível: a
+   * gaveta fechava com falta e não havia nada que explicasse o valor.
+   * Exige palavra-passe de gestor porque é dinheiro a sair.
+   */
+  const handleRegisterCashMovement = async () => {
+    if (cashForm.saving) return;
+    const valor = Number(String(cashForm.amount).replace(',', '.'));
+    if (!Number.isFinite(valor) || valor <= 0) {
+      setCashForm(prev => ({ ...prev, error: 'Indique um valor maior que zero.' }));
+      return;
+    }
+    if (cashForm.reason.trim().length < 5) {
+      setCashForm(prev => ({ ...prev, error: 'Indique o motivo (mínimo 5 caracteres).' }));
+      return;
+    }
+    if (!(await verifyAuthorizationPassword(cashForm.password, settings))) {
+      setCashForm(prev => ({ ...prev, error: 'Palavra-passe de gestor incorrecta.' }));
+      return;
+    }
+
+    const caixa = cashBalance(sales, cashMovements, startDate, endDate);
+    if (cashForm.type === 'Sangria' && valor > caixa.balance + 0.01) {
+      setCashForm(prev => ({
+        ...prev,
+        error: `A gaveta tem ${caixa.balance.toFixed(2)} MT no período. Não pode retirar ${valor.toFixed(2)} MT.`
+      }));
+      return;
+    }
+
+    setCashForm(prev => ({ ...prev, saving: true, error: '' }));
+    try {
+      const agora = new Date().toISOString();
+      const operador = currentUser?.username || 'Gestor';
+      await dbService.addCashMovement({
+        id: `cx-${cashForm.type.toLowerCase()}-${Date.now()}`,
+        date: agora,
+        day: toCashDay(agora),
+        type: cashForm.type,
+        amount: cashForm.type === 'Sangria' ? -Math.abs(valor) : Math.abs(valor),
+        method: cashForm.method,
+        operator: operador,
+        authorizedBy: operador,
+        notes: cashForm.reason.trim()
+      });
+
+      const ipAddress = await getClientIp().catch(() => 'desconhecido');
+      void dbService.addAuditLog({
+        id: 'log-caixa-' + Date.now(),
+        timestamp: agora,
+        username: operador,
+        ipAddress,
+        action: cashForm.type === 'Sangria' ? 'Sangria de Caixa' : 'Entrada de Caixa',
+        status: 'Sucesso',
+        level: 'WARNING',
+        entity: 'cash_movements',
+        details: `${cashForm.type} de ${valor.toFixed(2)} MT (${cashForm.method}). Motivo: ${cashForm.reason.trim()}`
+      });
+
+      showToast(`${cashForm.type} de ${valor.toFixed(2)} MT registada.`);
+      setCashForm({ open: false, type: 'Sangria', amount: '', reason: '', method: 'Dinheiro', password: '', error: '', saving: false });
+      await loadFinancials();
+    } catch (erro) {
+      console.error('[Financeiro] Falha ao registar movimento de caixa:', erro);
+      setCashForm(prev => ({ ...prev, saving: false, error: 'Não foi possível gravar. Tente novamente.' }));
+    }
+  };
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
@@ -118,7 +205,8 @@ export default function FinanceModule() {
   const totalCost = filteredSales.reduce((acc, sale) => {
     return acc + (sale.items || []).reduce((sum, item) => {
       const prod = products.find(p => p.id === item.productId);
-      const buyPrice = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
+      // Custo congelado na venda (snapshot); só se faltar se usa o preço actual.
+      const buyPrice = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? item.unitPrice;
       return sum + (buyPrice * item.quantity);
     }, 0);
   }, 0);
@@ -194,6 +282,12 @@ export default function FinanceModule() {
     return acc + (sale.items || []).reduce((sum, item) => {
       const prod = products.find(p => String(p.id) === String(item.productId));
       const valorLinha = (Number(item.unitPrice) || 0) * (Number(item.quantity) || 0);
+
+      // 1.º o custo congelado no momento da venda; só depois o preço actual.
+      const congelado = Number((item as any).costPrice ?? (item as any).buyingPrice);
+      if (Number.isFinite(congelado) && congelado > 0) {
+        return sum + congelado * (Number(item.quantity) || 0);
+      }
       if (!prod) {
         reportUnknownCostValue += valorLinha;
         return sum + valorLinha;
@@ -217,7 +311,11 @@ export default function FinanceModule() {
   const productPerformance = buildProductPerformance(products, reportSales, {
     qtyOf: (_sale, item, product) => getBaseUnitQuantity(product, item.quantity, item.sellingUnit),
     lineTotal: (_sale, item) => (Number(item.unitPrice) || 0) * (Number(item.quantity) || 0),
-    lineCost: (_sale, item, product) => getUnitCost(product, item.sellingUnit) * getBaseUnitQuantity(product, item.quantity, item.sellingUnit)
+    lineCost: (_sale, item, product) => {
+      const congelado = Number((item as any).costPrice ?? (item as any).buyingPrice);
+      if (Number.isFinite(congelado) && congelado > 0) return congelado * (Number(item.quantity) || 0);
+      return getUnitCost(product, item.sellingUnit) * getBaseUnitQuantity(product, item.quantity, item.sellingUnit);
+    }
   });
 
   const handleCompileReport = () => {
@@ -2292,6 +2390,94 @@ export default function FinanceModule() {
                   <p className={`text-lg font-black font-mono ${caixa.balance < 0 ? 'text-rose-700' : 'text-slate-800'}`}>{caixa.balance.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</p>
                   <p className="text-[9px] text-slate-500">Deve coincidir com a gaveta ao fechar o dia</p>
                 </div>
+                <div className="md:col-span-3 bg-white border border-slate-200 rounded-xl p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-[10px] font-black uppercase text-slate-500">Sangria / Entrada de dinheiro</p>
+                      <p className="text-[9px] text-slate-500">
+                        Retirada do operador ou reposição de fundo. Exige palavra-passe de gestor e entra no Livro de Caixa.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCashForm(prev => ({ ...prev, open: !prev.open, error: '' }))}
+                      className="shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 text-white hover:bg-slate-700"
+                    >
+                      {cashForm.open ? 'Fechar' : 'Registar'}
+                    </button>
+                  </div>
+
+                  {cashForm.open && (
+                    <form
+                      onSubmit={(e) => { e.preventDefault(); handleRegisterCashMovement(); }}
+                      className="mt-2 grid grid-cols-2 md:grid-cols-6 gap-1.5 items-end"
+                    >
+                      <label className="text-[9px] font-bold text-slate-600 col-span-1">
+                        Tipo
+                        <select
+                          value={cashForm.type}
+                          onChange={e => setCashForm(prev => ({ ...prev, type: e.target.value as 'Sangria' | 'Entrada', error: '' }))}
+                          className="w-full mt-0.5 border border-slate-300 rounded-md px-1 py-1 text-[11px] bg-white"
+                        >
+                          <option value="Sangria">Sangria (sai)</option>
+                          <option value="Entrada">Entrada (entra)</option>
+                        </select>
+                      </label>
+                      <label className="text-[9px] font-bold text-slate-600">
+                        Valor (MT)
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={cashForm.amount}
+                          onChange={e => setCashForm(prev => ({ ...prev, amount: e.target.value, error: '' }))}
+                          className="w-full mt-0.5 border border-slate-300 rounded-md px-1.5 py-1 text-[11px] text-right font-mono"
+                          placeholder="0,00"
+                        />
+                      </label>
+                      <label className="text-[9px] font-bold text-slate-600">
+                        Meio
+                        <select
+                          value={cashForm.method}
+                          onChange={e => setCashForm(prev => ({ ...prev, method: e.target.value }))}
+                          className="w-full mt-0.5 border border-slate-300 rounded-md px-1 py-1 text-[11px] bg-white"
+                        >
+                          {CASH_METHODS.map(m => <option key={m}>{m}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-[9px] font-bold text-slate-600 col-span-2">
+                        Motivo
+                        <input
+                          type="text"
+                          value={cashForm.reason}
+                          onChange={e => setCashForm(prev => ({ ...prev, reason: e.target.value, error: '' }))}
+                          className="w-full mt-0.5 border border-slate-300 rounded-md px-1.5 py-1 text-[11px]"
+                          placeholder="Ex.: depósito no banco"
+                        />
+                      </label>
+                      <label className="text-[9px] font-bold text-slate-600">
+                        Senha gestor
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={cashForm.password}
+                          onChange={e => setCashForm(prev => ({ ...prev, password: e.target.value, error: '' }))}
+                          className="w-full mt-0.5 border border-slate-300 rounded-md px-1.5 py-1 text-[11px]"
+                        />
+                      </label>
+                      <div className="col-span-2 md:col-span-6 flex items-center gap-2">
+                        <button
+                          type="submit"
+                          disabled={cashForm.saving}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
+                        >
+                          {cashForm.saving ? 'A gravar…' : 'Gravar movimento'}
+                        </button>
+                        {cashForm.error && <span className="text-[10px] font-bold text-rose-700">{cashForm.error}</span>}
+                      </div>
+                    </form>
+                  )}
+                </div>
+
                 {movimentos.length > 0 && (
                   <div className="md:col-span-3 bg-white border border-slate-200 rounded-xl p-3">
                     <p className="text-[9px] uppercase font-black text-slate-500 mb-1">Últimas saídas de caixa</p>

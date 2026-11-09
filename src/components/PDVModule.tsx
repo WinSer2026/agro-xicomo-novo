@@ -15,8 +15,9 @@ import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, t
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
 import { isFinancialSale, isCancelledSale, settlementDisclaimer } from '../utils/saleStatus';
 import { lineTaxAmount, normalizeTaxRate } from '../utils/taxHelper';
-import { appAlert, appPrompt } from '../utils/confirmDialog';
+import { appAlert, appPrompt, appConfirm } from '../utils/confirmDialog';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { findDuplicateSale, describeDuplicateRisk } from '../utils/saleDuplicates';
 import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
 
@@ -1585,7 +1586,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
       const finalizedItems = cart.map(item => {
         const prod = products.find(p => p.id === item.productId);
-        const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? (item.unitPrice * 0.6);
+        const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? item.unitPrice;
         const cat = item.category || prod?.category || 'Outro';
         return {
           ...item,
@@ -1639,6 +1640,36 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           numberYear,
           lastPartOf(generateNextReceiptNumber(existingSales, printFormat))
         );
+      }
+
+      /**
+       * V-C11: antes de gravar, verifica se já existe hoje uma venda igual.
+       * O corte de inventário anula vendas para serem relançadas; sem esta
+       * guarda, um segundo relançamento passava em silêncio e o stock saía
+       * duas vezes.
+       */
+      const conflito = findDuplicateSale(existingSales, {
+        customerName,
+        total: tot,
+        items: finalizedItems.map(item => ({
+          productId: item.productId,
+          quantity: item.quantity,
+          sellingUnit: item.sellingUnit
+        }))
+      }, toLocalDateKey(new Date().toISOString()));
+
+      if (conflito.duplicate || conflito.cancelledTwin) {
+        const confirmar = await appConfirm(
+          'VENDA POSSIVELMENTE DUPLICADA\n\n' +
+            `${describeDuplicateRisk(conflito)}\n\n` +
+            'Gravar mesmo assim? Se for engano, cancele e verifique as facturas do dia.',
+          { confirmLabel: 'Gravar assim mesmo', danger: true }
+        );
+        if (!confirmar) {
+          showToast('Venda não gravada: possível duplicação.', 'error');
+          setIsFinalizing(false);
+          return;
+        }
       }
 
       const newSale: Sale = {

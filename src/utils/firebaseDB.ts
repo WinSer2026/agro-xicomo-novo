@@ -1020,7 +1020,7 @@ export class FirebaseDBService {
       const prod = prods.find(p => p.id === item.productId);
       // Produtos vendidos em saco e em quilo: o quilo não tem preço de compra próprio,
       // o seu custo é derivado do preço de compra do saco ÷ fator de conversão.
-      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
+      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? item.unitPrice;
       return {
         ...item,
         costPrice: cost,
@@ -1056,7 +1056,7 @@ export class FirebaseDBService {
     const prods = await this.getProducts();
     const enrichedItems = (sale.items || []).map(item => {
       const prod = prods.find(p => String(p.id) === String(item.productId));
-      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? (item.unitPrice * 0.6);
+      const cost = item.costPrice ?? item.buyingPrice ?? (prod ? getUnitCost(prod, item.sellingUnit) : undefined) ?? item.unitPrice;
       return {
         ...item,
         costPrice: cost,

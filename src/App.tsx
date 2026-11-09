@@ -824,7 +824,7 @@ export default function App() {
               {activeModule === 'faturas' && <FaturasModule currentUser={currentUser} />}
               {activeModule === 'stock' && <StockModule />}
               {activeModule === 'rh' && <HRModule />}
-              {activeModule === 'financas' && <FinanceModule />}
+              {activeModule === 'financas' && <FinanceModule currentUser={currentUser} />}
               {currentUser.role === 'Técnico' && activeModule === 'tecnico' && (
                 <TechnicalModule onSettingsUpdated={async () => {
                   const globalSettings = await dbService.getSettings();
