@@ -65,7 +65,9 @@ conseguir ler e escrever no Firestore.
 ### Passo 1 — Ativar o login anónimo
 
 1. Abra <https://console.firebase.google.com> e escolha o projecto **gen-lang-client-0896153566**.
-2. No menu lateral: **Authentication** (criar utilizadores e sessões).
+2. No menu lateral: **Segurança → Authentication**.
+   *(A consola nova mudou os nomes: o Firestore passou para **Bancos de dados e armazenamento**.
+   Atalho direto: `https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers`)*
 3. Separador **Sign-in method** (método de início de sessão).
 4. Na lista de fornecedores, clique em **Anónimo**.
 5. Ligue o interruptor **Ativar** e clique em **Guardar**.
@@ -117,6 +119,9 @@ Na aplicação, faça o teste completo:
 3. Stock → **Movimentos** num artigo → deve aparecer a linha da venda (livro de movimentos).
 4. Módulo técnico → **Verificar numeração** (deve abrir sem erro) e **Arquivar lote seguro**
    de auditoria (usa permissão de eliminação em `audit_logs`).
+5. **Dinheiro:** Faturas → anular uma factura paga com devolução → o Livro de Caixa tem de
+   mostrar a saída. Contabilidade → **Livro de Caixa** → registar uma sangria de 100 MT.
+   Se estas duas falharem com `permission-denied`, a colecção `cash_movements` não ficou publicada.
 
 ### Passo 5 — Se algo falhar (reverter)
 
@@ -136,7 +141,17 @@ Qualquer coleção nova usada pela aplicação tem de ser acrescentada a `firest
 escritas passam a ser recusadas. Já estão cobertas: `products`, `sales`, `losses`,
 `transformations`, `employees`, `attendance`, `customers`, `paused_sales`, `active_cart`,
 `settings`, `counters`, `deletions`, `payroll_payments`, `active_sessions`, `credentials`,
-`audit_logs`, `audit_logs_archive`, `stock_movements`.
+`audit_logs`, `audit_logs_archive`, `stock_movements`, `cash_movements`.
+
+**Há um teste para isto:** `npm run test:all` inclui `test/rules_coverage_test.ts`, que varre o
+código à procura de nomes de colecção e falha se alguma não estiver nas regras. Também recusa o
+regresso de `allow read, write: if true`. Corra-o antes de cada publicação.
+
+### Colecções que não se corrigem nem se apagam
+
+`stock_movements` e `cash_movements` são **só de leitura e criação**. Um movimento de dinheiro
+errado corrige-se com outro movimento contrário — nunca editando o original. É isso que torna o
+livro de caixa utilizável como prova numa inspecção.
 
 ## 4. Ainda por fazer
 

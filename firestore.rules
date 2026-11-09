@@ -69,5 +69,15 @@ service cloud.firestore {
       allow read, create: if request.auth != null;
       allow update, delete: if false;
     }
+
+    // --- Livro de caixa (reembolsos e sangrias) ------------------------------
+    // Cada linha é dinheiro que saiu (ou entrou) da gaveta sem venda. É prova
+    // para a inspecção e para o fecho do dia: uma vez escrita, não se corrige
+    // nem se apaga. Um erro corrige-se com um movimento contrário, que fica
+    // também registado.
+    match /cash_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
   }
 }
