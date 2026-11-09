@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
+import { getClientIp } from '../utils/clientInfo';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { appConfirm, appPrompt, appAlert } from '../utils/confirmDialog';
 import { Product, LossRecord, SystemSettings } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
@@ -179,7 +181,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: 'Gestor de Stock',
-        ipAddress: '197.218.10.1',
+        ipAddress: await getClientIp(),
         action: 'Eliminação de Produto',
         status: 'Sucesso',
         details: `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}) foi eliminado com autorização de gestor.`
@@ -262,7 +264,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser?.username || 'Gestor de Stock',
-        ipAddress: '197.218.10.1',
+        ipAddress: await getClientIp(),
         action: 'Ajuste de Contagem Física',
         status: 'Sucesso',
         level: 'WARNING',
@@ -358,7 +360,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   const handleRegenerateReferencesAll = async () => {
     if (isSubmitting) return;
-    if (!window.confirm("Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?")) return;
+    if (!(await appConfirm("Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?"))) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -380,7 +382,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (isSubmitting) return;
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`)) return;
+    if (!(await appConfirm(`Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`))) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -1442,7 +1444,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
-    const pw = window.prompt('Introduza a Palavra-passe de Autorização do Stock:');
+    const pw = await appPrompt('Introduza a Palavra-passe de Autorização do Stock para alterar o stock deste produto.');
     if (!pw) {
       triggerToast('Operação cancelada: é necessária a palavra-passe de autorização do stock.');
       return;

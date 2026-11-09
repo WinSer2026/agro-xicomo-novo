@@ -5,6 +5,7 @@ import { dbService } from './utils/firebaseDB';
 import { runStockMigration, runHybridPriceMigration, runStockListUpdate } from './utils/migrateStock';
 import { runCredentialsReset } from './utils/credentialsReset';
 import LoginPanel from './components/LoginPanel';
+import { DialogHost } from './components/DialogHost';
 import { InlineHeaderSearch } from './components/InlineHeaderSearch';
 import { verifyPassword } from './utils/securityHelper';
 import './index.css';
@@ -358,7 +359,12 @@ export default function App() {
 
   // If no logged in user, force login screen
   if (!currentUser) {
-    return <LoginPanel onLoginSuccess={handleLoginSuccess} />;
+    return (
+      <>
+        <LoginPanel onLoginSuccess={handleLoginSuccess} />
+        <DialogHost />
+      </>
+    );
   }
 
   return (
@@ -816,6 +822,7 @@ export default function App() {
           </div>
         </div>
       )}
+      <DialogHost />
     </div>
   );
 }

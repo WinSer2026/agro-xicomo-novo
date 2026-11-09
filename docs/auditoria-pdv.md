@@ -1059,6 +1059,11 @@ Registo do que já foi corrigido no código, fase a fase. Cada fase foi verifica
 | 10 | Fim das palavras‑passe universais | `authorization.ts` (novo), `LoginPanel.tsx`, `App.tsx`, `StockModule.tsx`, `FaturasModule.tsx`, `DatabaseSchemaViewer.tsx`, `scripts/hash-password.mjs` | L‑01, L‑02 | ✔ |
 | 11 | Autorização da API local; whitelist de coleções | `server.ts`, `indexedDB.ts` | L‑04, M‑06 (parcial) | ✔ |
 | 11b | Regras do Firestore com autenticação | `firestore.rules`, `firebaseDB.ts` | L‑03 | ⧗ escrito, publicação pendente |
+| 12 | Funcionalidades mortas: canal em tempo real e assistente de IA | `server.ts`, `indexedDB.ts`, `StockAIEntry.tsx` | M‑01, M‑02 | ✔ |
+| 13 | Vendas retroactivas: stock, duplicados, datas futuras, estado | `PDVModule.tsx` | H‑01, H‑02, H‑03, H‑05 | ✔ |
+| 14 | Balancete e gráficos deixam de ser inventados | `FinanceModule.tsx` | N‑01, N‑03 | ✔ |
+| 15 | Fim das confirmações invisíveis | `confirmDialog.ts`, `DialogHost.tsx` (novos), 6 módulos | K‑01 | ✔ |
+| 16 | IP real nos registos de auditoria | `clientInfo.ts` (novo), `server.ts`, `LoginPanel.tsx`, `StockModule.tsx` | L‑05 | ✔ |
 
 ### Correções a este anexo
 
@@ -1073,12 +1078,21 @@ Registo do que já foi corrigido no código, fase a fase. Cada fase foi verifica
   defeituoso (limites em meia‑noite UTC). Foi reescrito para os limites do dia de Maputo
   (`2026-09-30T22:00:00.000Z` … `2026-10-07T21:59:59.999Z`) e acrescentado o caso 21:30Z/22:30Z.
 
-### Ainda por corrigir (por ordem)
+### Ainda por corrigir
 
-1. **K‑01** — `window.prompt()` nas confirmações destrutivas (ajuste directo de stock, limpeza
-   técnica); em ambiente embebido devolve `null` e a operação desaparece sem aviso.
-2. **N‑01** — valores fixos no balancete do `FinanceModule`.
-3. **H‑01…H‑04** — vendas retroactivas (a data passa a ser gravada, falta a validação de período e
-   o bloqueio de datas futuras).
-4. **I‑01/I‑02** — navegação de administração vs. caixa.
-5. **K‑03** — bloqueio persistente de conta após N tentativas.
+- **Fase 12** — `M‑01`/`M‑02`: o canal SSE passou a existir no servidor (com *broadcast* em cada
+  escrita) e a rota `/api/gemini/technician-ai` responde com um erro claro quando não há
+  `GEMINI_API_KEY`; com chave, faz ponte para o Gemini (só texto — anexos devolvem 501).
+- **Fase 13** — vendas retroactivas: por omissão já não descontam stock actual, recibo manuscrito
+  duplicado é recusado, datas futuras bloqueadas e o estado segue o método de pagamento.
+- **Fase 14** — o "Balancete" era fabricado (40/60 caixa-banco, fornecedores e capital social
+  inventados a partir do stock). Passou a **Mapa de Conferência** com valores reais; os gráficos
+  deixaram de desenhar barras fictícias quando não há vendas.
+- **Fase 15** — `window.confirm/prompt/alert` substituídos por `appConfirm/appPrompt/appAlert`
+  com `DialogHost` (funcionam dentro de iframes).
+- **Fase 16** — IP aleatório substituído pelo IP real do posto (`/api/client-info`).
+
+**Continua aberto:** I‑01/I‑02 (sessão e rascunho por aba), K‑03 (desconto ilimitado), K‑04
+(erros escondidos em toasts), L‑06…L‑12 (política de palavras‑passe, permissões, validação no
+servidor), M‑03…M‑06, N‑02/N‑04/N‑06/N‑07, E‑02/E‑03/E‑04/E‑06, F‑05 (livro de movimentos),
+F‑07/F‑08, O‑01…O‑03, e a publicação das regras do Firestore.

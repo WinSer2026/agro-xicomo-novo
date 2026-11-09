@@ -1,4 +1,5 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+﻿import { appConfirm } from '../utils/confirmDialog';
+import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { Employee, PerformanceRecord, ContractType } from '../types';
 
@@ -168,8 +169,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
     triggerToast('Avaliação de desempenho adicionada!');
   };
 
-  const handleDeletePerformanceRecord = (id: string) => {
-    if (confirm('Deseja realmente eliminar este registo de avaliação?')) {
+  const handleDeletePerformanceRecord = async (id: string) => {
+    if (await appConfirm('Deseja realmente eliminar este registo de avaliação?')) {
       const filtered = performanceHistory.filter(x => x.id !== id);
       setPerformanceHistory(filtered);
       triggerToast('Avaliação eliminada do histórico temporário.');
@@ -470,8 +471,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
                           referrerPolicy="no-referrer"
                         />
                         <button
-                          onClick={() => {
-                            if (confirm('Remover esta fotografia?')) setPhotoUrl('');
+                          onClick={async () => {
+                            if (await appConfirm('Remover esta fotografia?')) setPhotoUrl('');
                           }}
                           className="absolute -top-2 -right-2 bg-red-600 hover:bg-red-700 text-white rounded-full p-1.5 shadow-lg transition-all"
                           title="Remover foto"

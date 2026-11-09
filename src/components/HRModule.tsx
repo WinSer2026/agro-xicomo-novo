@@ -4,6 +4,7 @@ import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter'
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import { appConfirm } from '../utils/confirmDialog';
 import { dbService } from '../utils/firebaseDB';
 import { Employee, Attendance, ContractType, PayrollPayment, DisciplinaryAction, EmployeeDamage, SystemSettings } from '../types';
 import EmployeeDetailModal from './EmployeeDetailModal';
@@ -417,7 +418,7 @@ export default function HRModule() {
 
   const handleDeleteEmployee = async (id: string) => {
     if (isSubmitting) return;
-    if (confirm('Deseja realmente eliminar este colaborador?')) {
+    if (await appConfirm('Deseja realmente eliminar este colaborador?')) {
       setIsSubmitting(true);
       try {
         await dbService.deleteEmployee(id);

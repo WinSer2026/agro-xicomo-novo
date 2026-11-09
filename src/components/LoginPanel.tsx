@@ -1,6 +1,7 @@
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import { getClientIp } from '../utils/clientInfo';
 import { UserCredentials, AuditLog, ActiveSession, SystemSettings, AppRole } from '../types';
 import { getUserRoles } from '../utils/roleHelper';
 import { validateAccessPassword, verifyPassword } from '../utils/securityHelper';
@@ -158,7 +159,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       const cleanUser = username.trim();
       const cleanPass = password.trim();
       const lower = cleanUser.toLowerCase();
-      const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+      const ipAddress = await getClientIp();
 
       // (A antiga "chave mestra de emergência" — utilizador mazive/admin com as
       // palavras-passe 0147/admin/05082 — foi REMOVIDA. Era um backdoor em texto
@@ -276,7 +277,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
         return;
       }
 
-      const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+      const ipAddress = await getClientIp();
       await finalizeSession({ ...pendingUser, passwordHash: '', mustChangePassword: false }, ipAddress);
       setShowPasswordChange(false);
       setPendingUser(null);
@@ -301,7 +302,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       return;
     }
 
-    const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
+    const ipAddress = await getClientIp();
 
     // Accept "123456", "000000" or valid simulated TOTP code
     if (mfaCode === '123456' || mfaCode === '000000' || true) {

@@ -255,6 +255,7 @@ async function startServer() {
       db[storeName].push(item);
     }
     writeDb(db);
+    broadcastEvent({ type: "db-update", table: storeName, action: "save", item });
     res.json({ success: true });
   });
 
@@ -278,6 +279,7 @@ async function startServer() {
       }
     }
     writeDb(db);
+    broadcastEvent({ type: "db-update", table: storeName, action: "save-batch", items });
     res.json({ success: true, count: items.length });
   });
 
@@ -296,7 +298,108 @@ async function startServer() {
     if (!Array.isArray(db.deletions)) db.deletions = [];
     db.deletions.push({ storeName, targetId: id, timestamp: new Date().toISOString() });
     writeDb(db);
+    broadcastEvent({ type: "db-update", table: storeName, action: "delete", item: { id } });
     res.json({ success: true });
+  });
+
+  // IP do posto, para o registo de auditoria (achado L-05). Devolve apenas o
+  // endereço de quem pergunta; não expõe nada da base.
+  app.get("/api/client-info", (req: Request, res: Response) => {
+    const forwarded = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim();
+    const ip = (req.ip || forwarded || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+    res.json({ ip: ip || "desconhecido" });
+  });
+
+  // --- Canal de eventos em tempo real (SSE) ---
+  // O cliente já abria `EventSource('/api/sync/events')`, rota que não existia:
+  // cada abertura dava 404 e o browser repetia a ligação indefinidamente.
+  const sseClients = new Set<Response>();
+
+  function broadcastEvent(payload: Record<string, unknown>) {
+    const message = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(message);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  }
+
+  app.get("/api/sync/events", requireTrustedRequest, (req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
+    sseClients.add(res);
+
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(": ping\n\n");
+      } catch {
+        /* ignorado */
+      }
+    }, 25000);
+
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+    });
+  });
+
+  // --- Assistente de IA (técnico) ---
+  // O frontend chamava /api/gemini/technician-ai, que não existia: o botão
+  // falhava sempre. A rota existe agora e responde com um erro claro quando o
+  // servidor não tem chave, em vez de deixar o cliente à espera de um 404.
+  app.post("/api/gemini/technician-ai", requireTrustedRequest, rateLimiter(20, 60000), async (req: Request, res: Response) => {
+    const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+    if (!apiKey) {
+      return res.status(503).json({
+        error:
+          "Assistente de IA não configurado neste servidor. Defina GEMINI_API_KEY no .env para o activar."
+      });
+    }
+
+    const prompt = typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+    if (!prompt) {
+      return res.status(400).json({ error: "Escreva um pedido para o assistente." });
+    }
+    if (files.length > 0) {
+      return res.status(501).json({
+        error: "O envio de ficheiros para o assistente ainda não está disponível. Descreva o pedido por texto."
+      });
+    }
+
+    try {
+      const response = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        }
+      );
+
+      if (!response.ok) {
+        const detail = await response.text();
+        console.error("[IA] Resposta do fornecedor:", response.status, detail.slice(0, 300));
+        return res.status(502).json({ error: "O serviço de IA recusou o pedido. Tente novamente." });
+      }
+
+      const data = await response.json();
+      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("") || "";
+      if (!text) {
+        return res.status(502).json({ error: "O serviço de IA não devolveu texto." });
+      }
+      return res.json({ result: text });
+    } catch (err) {
+      console.error("[IA] Falha de rede:", err);
+      return res.status(502).json({ error: "Não foi possível contactar o serviço de IA." });
+    }
   });
 
   // Vite middleware for development vs static build

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ProductTransformation, Product, SystemSettings } from '../types';
+import { appConfirm, appAlert } from '../utils/confirmDialog';
 import { dbService } from '../utils/firebaseDB';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
@@ -287,7 +288,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   const handleCancelTransformation = async (trf: ProductTransformation) => {
     if (trf.status === 'Cancelada') return;
 
-    const confirmed = window.confirm(`Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`);
+    const confirmed = await appConfirm(`Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`);
     if (!confirmed) return;
 
     setIsReversing(trf.id);
@@ -308,7 +309,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       loadTransformations();
     } catch (err: any) {
       console.error('Error reversing transformation:', err);
-      alert('Erro ao anular transformação: ' + err.message);
+      void appAlert('Erro ao anular transformação: ' + err.message);
     } finally {
       setIsReversing(null);
     }

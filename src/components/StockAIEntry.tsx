@@ -1,3 +1,4 @@
+import { appAlert } from '../utils/confirmDialog';
 import React, { useState, useRef, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
@@ -27,6 +28,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
   const [files, setFiles] = useState<{ name: string; base64: string; mime: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [aiResponse, setAiResponse] = useState<AIResponse | null>(null);
+  const [error, setError] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -98,7 +100,7 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
       setIsRecording(true);
     } catch (err) {
       console.error('Erro ao acessar microfone:', err);
-      alert('Não foi possível acessar o microfone.');
+      void appAlert('Não foi possível acessar o microfone.');
     }
   };
 
@@ -111,12 +113,13 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
   const processWithAI = async () => {
     if (!prompt && files.length === 0) {
-      alert('Por favor, insira um comando de voz, texto ou anexe um documento.');
+      setError('Insira um comando de voz, texto ou anexe um documento.');
       return;
     }
 
     setLoading(true);
     setAiResponse(null);
+    setError('');
 
     try {
       const response = await fetch('/api/gemini/technician-ai', {
@@ -125,13 +128,27 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
         body: JSON.stringify({ prompt, files })
       });
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
+      let data: any = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
 
-      setAiResponse(data);
+      if (!response.ok || data?.error) {
+        throw new Error(data?.error || `O servidor recusou o pedido (código ${response.status}).`);
+      }
+
+      // O servidor devolve texto livre; a pré-visualização estruturada só
+      // existe quando vierem alterações de stock.
+      if (data?.result && !data?.changes) {
+        setAiResponse({ explanation: data.result, changes: {} } as AIResponse);
+      } else {
+        setAiResponse(data as AIResponse);
+      }
     } catch (err: any) {
       console.error('Erro IA:', err);
-      alert('Erro ao processar com IA: ' + err.message);
+      setError(err?.message || 'Não foi possível contactar o assistente.');
     } finally {
       setLoading(false);
     }
@@ -198,15 +215,15 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
           details: `Atualizado stock de ${updatedCount} produtos via processamento inteligente.`
         });
 
-        alert(`${updatedCount} produtos atualizados com sucesso!`);
+        void appAlert(`${updatedCount} produtos atualizados com sucesso!`);
         onSuccess();
         onClose();
       } else {
-        alert('Nenhum produto correspondente foi encontrado no sistema para as atualizações sugeridas.');
+        void appAlert('Nenhum produto correspondente foi encontrado no sistema para as atualizações sugeridas.');
       }
     } catch (err) {
       console.error('Erro ao aplicar alterações:', err);
-      alert('Erro ao salvar alterações no banco de dados.');
+      void appAlert('Erro ao salvar alterações no banco de dados.');
     } finally {
       setLoading(false);
     }
@@ -314,6 +331,13 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
               </>
             )}
           </button>
+
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+              <span className="material-symbols-outlined text-base">error</span>
+              <span>{error}</span>
+            </div>
+          )}
 
           {/* AI Response Preview */}
           {aiResponse && (

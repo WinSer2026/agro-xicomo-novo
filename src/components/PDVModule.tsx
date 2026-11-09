@@ -12,7 +12,7 @@ import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
-import { isFinancialSale } from '../utils/saleStatus';
+import { isFinancialSale, isCancelledSale } from '../utils/saleStatus';
 import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
 
@@ -290,7 +290,10 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const [retroactiveCustomerAddress, setRetroactiveCustomerAddress] = useState('');
   const [retroactiveSaveCustomer, setRetroactiveSaveCustomer] = useState(false);
   const [retroactivePaymentMethod, setRetroactivePaymentMethod] = useState<'Dinheiro' | 'Transferência' | 'M-Pesa' | 'E-Mola' | 'Crédito'>('Dinheiro');
-  const [retroactiveDeductStock, setRetroactiveDeductStock] = useState(true);
+  // H-01: por omissão uma venda histórica NÃO desconta stock. Descontar hoje o
+  // que saiu há semanas estraga o inventário actual; o operador tem de optar
+  // conscientemente por o fazer.
+  const [retroactiveDeductStock, setRetroactiveDeductStock] = useState(false);
   const [retroactiveCart, setRetroactiveCart] = useState<SaleItem[]>([]);
   const [retroactiveProductQuery, setRetroactiveProductQuery] = useState('');
   const [selectedRegisteredCustomer, setSelectedRegisteredCustomer] = useState<string>('');
@@ -392,10 +395,41 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       const existingSales = await dbService.getSales();
-      const invoiceNum = generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva');
       const manualRec = retroactiveReceiptNo.trim() || undefined;
+
+      // H-05: uma "venda antiga" não pode ter data futura.
+      const saleMoment = retroactiveDateTime ? new Date(retroactiveDateTime) : new Date();
+      if (Number.isNaN(saleMoment.getTime())) {
+        showToast('A data indicada para a venda antiga não é válida.', 'error');
+        return;
+      }
+      if (saleMoment.getTime() > Date.now() + 60_000) {
+        showToast('A data da venda antiga não pode estar no futuro.', 'error');
+        return;
+      }
+
+      // H-02: o mesmo recibo manuscrito não pode entrar duas vezes. Sem isto,
+      // um duplo clique lançava a mesma venda velha e duplicava a receita.
+      if (manualRec) {
+        const recKey = manualRec.toLowerCase();
+        const duplicada = existingSales.find(venda => {
+          if (isCancelledSale(venda)) return false;
+          const referencia = String(venda.manualReceiptReference || '').trim().toLowerCase();
+          const recibo = String(venda.receiptNumber || '').trim().toLowerCase();
+          return referencia === recKey || recibo === recKey;
+        });
+        if (duplicada) {
+          showToast(
+            `O recibo «${manualRec}» já foi lançado na venda ${duplicada.invoiceNumber || duplicada.id}. Confirme antes de repetir.`,
+            'error'
+          );
+          return;
+        }
+      }
+
+      const invoiceNum = generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva');
       const receiptNum = manualRec || generateNextReceiptNumber(existingSales, 'Thermal');
-      const saleDateISO = retroactiveDateTime ? new Date(retroactiveDateTime).toISOString() : new Date().toISOString();
+      const saleDateISO = saleMoment.toISOString();
 
       const newSale: Sale = {
         id: newSaleId('sale-retro'),
@@ -412,7 +446,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         discount: disc,
         total: tot,
         paymentMethod: retroactivePaymentMethod,
-        status: 'Paga',
+        // H-03: o estado segue o pagamento, não é fixado em 'Paga'.
+        status: retroactivePaymentMethod === 'Crédito' ? 'Crédito' : 'Paga',
         documentType: 'FaturaDefinitiva',
         operatorId: currentUser.username,
         operatorName: currentUser.username,

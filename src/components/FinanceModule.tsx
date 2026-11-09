@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
-import { isFinancialSale } from '../utils/saleStatus';
+import { isFinancialSale, isDebtSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
@@ -495,42 +495,76 @@ export default function FinanceModule() {
   };
 
   const handleExportBalancetePDF = async () => {
-    const totalCOGS = reportCost; // CMV
-    const totalQuebras = reportSales.length > 0 ? (totalLossesVal * (reportSales.length / Math.max(sales.length, 1))) : 0;
-    const activeProductsVal = products.reduce((acc, p) => acc + (p.stockQty * p.buyingPrice), 0);
+    // N-01: o balancete era FABRICADO. Dividia as vendas em 40% caixa / 60%
+    // banco e inventava "Fornecedores" e "Capital Social" como metade do valor
+    // do stock. Nada disso existe na contabilidade. Agora só entram valores
+    // que o sistema conhece de facto, e o documento identifica-se como mapa de
+    // conferência — não como balancete contabilístico.
+    const vendasDoPeriodo = reportSales.filter(isFinancialSale); // sem proformas nem canceladas
+    const vendasBrutas = vendasDoPeriodo.reduce((acc, venda) => acc + Number(venda.total || 0), 0);
+    const ivaLiquidado = vendasDoPeriodo.reduce((acc, venda) => acc + Number(venda.ivaAmount || 0), 0);
+    const baseTributavel = vendasBrutas - ivaLiquidado;
+    const cmv = reportCost;
+    const quebras = totalLossesVal;
+    const valorStock = products.reduce(
+      (acc, produto) => acc + (Number(produto.stockQty) || 0) * (Number(produto.buyingPrice) || 0),
+      0
+    );
 
-    const accounts = [
-      { code: '1.1.1.01', name: 'Caixa Geral (Dinheiro em POS)', debit: reportGrossSales * 0.4, credit: totalCOGS * 0.2 },
-      { code: '1.1.2.01', name: 'Bancos Moçambique C/C', debit: reportGrossSales * 0.6, credit: totalCOGS * 0.8 + totalQuebras },
-      { code: '1.2.1.01', name: 'Inventário de Mercadorias (Stock)', debit: activeProductsVal, credit: totalCOGS },
-      { code: '2.1.1.01', name: 'Fornecedores de Insumos', debit: 0, credit: activeProductsVal * 0.5 },
-      { code: '5.1.1.01', name: 'Capital Social Registado', debit: 0, credit: activeProductsVal * 0.5 },
-      { code: '6.1.1.01', name: 'Custo das Mercadorias Vendidas (CMV)', debit: totalCOGS, credit: 0 },
-      { code: '6.2.1.01', name: 'Perdas por Quebras e Reclamações', debit: totalQuebras, credit: 0 },
-      { code: '7.1.1.01', name: 'Proveitos / Vendas de Insumos', debit: 0, credit: reportGrossSales }
+    // Recebimentos por meio de pagamento, tal como ficaram registados.
+    const porMetodo = new Map<string, number>();
+    let dividaClientes = 0;
+    vendasDoPeriodo.forEach(venda => {
+      if (isDebtSale(venda)) {
+        dividaClientes += Number(venda.total || 0);
+        return;
+      }
+      const metodo = (venda.paymentMethod || 'Não especificado').trim() || 'Não especificado';
+      porMetodo.set(metodo, (porMetodo.get(metodo) || 0) + Number(venda.total || 0));
+    });
+
+    const accounts: { code: string; name: string; debit: number; credit: number }[] = [
+      ...Array.from(porMetodo.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([metodo, valor], idx) => ({
+          code: `1.1.${String(idx + 1).padStart(2, '0')}.01`,
+          name: `Recebimentos — ${metodo}`,
+          debit: valor,
+          credit: 0
+        })),
+      { code: '1.2.1.01', name: 'Inventário de Mercadorias (valor a custo)', debit: valorStock, credit: 0 },
+      { code: '2.1.2.01', name: 'Clientes — dívida por cobrar', debit: dividaClientes, credit: 0 },
+      { code: '6.1.1.01', name: 'Custo das Mercadorias Vendidas (CMV)', debit: cmv, credit: 0 },
+      { code: '6.2.1.01', name: 'Quebras e perdas do período', debit: quebras, credit: 0 },
+      { code: '7.1.1.01', name: 'Vendas — base tributável', debit: 0, credit: baseTributavel },
+      { code: '3.4.1.01', name: 'IVA liquidado', debit: 0, credit: ivaLiquidado }
     ];
 
+    const semDados = vendasDoPeriodo.length === 0;
+
     const data: ReportData = {
-      title: 'Balancete de Verificação Comercial',
-      subtitle: `Período Fiscal: ${compiledPeriod}`,
-      fileName: `Balancete_${compiledPeriod}_${Date.now()}`,
+      title: 'Mapa de Conferência Comercial',
+      subtitle: semDados
+        ? `Período: ${compiledPeriod} — sem vendas registadas.`
+        : `Período: ${compiledPeriod} · ${vendasDoPeriodo.length} venda(s). Documento de conferência interna: não é um balancete contabilístico (o sistema não mantém partidas dobradas).`,
+      fileName: `Mapa_Conferencia_${compiledPeriod}_${Date.now()}`,
       columns: [
         { header: 'Código', dataKey: 'code' },
-        { header: 'Conta Razão', dataKey: 'name' },
+        { header: 'Conta / Rubrica', dataKey: 'name' },
         { header: 'Débito (MT)', dataKey: 'debit' },
         { header: 'Crédito (MT)', dataKey: 'credit' },
         { header: 'Saldo Líquido', dataKey: 'balance' }
       ],
       rows: accounts.map(acc => ({
         ...acc,
-        debit: acc.debit.toLocaleString(),
-        credit: acc.credit.toLocaleString(),
-        balance: (acc.debit - acc.credit).toLocaleString()
+        debit: acc.debit.toLocaleString('pt-MZ'),
+        credit: acc.credit.toLocaleString('pt-MZ'),
+        balance: (acc.debit - acc.credit).toLocaleString('pt-MZ')
       }))
     };
 
     await exportToPDF(data, settings);
-    showToast('Balancete PDF descarregado!');
+    showToast('Mapa de conferência descarregado.');
   };
 
   // --- REPORT EXPORT ENGINE ---
@@ -1297,16 +1331,16 @@ export default function FinanceModule() {
                   const maxAmt = Math.max(...actualValues.map(v => v.amount), 1);
                   const hasSalesData = sales.length > 0;
                   
-                  // Default visual Heights matching the screenshot when no sales data exists
-                  const visualHeights = [25, 55, 35, 75, 100, 60, 30];
-
-                  return actualValues.map((val, idx) => {
-                    const heightPct = hasSalesData ? Math.max(8, (val.amount / maxAmt) * 100) : visualHeights[idx];
+                  // N-03: sem vendas, o gráfico desenhava barras inventadas
+                  // (25/55/35/75/100/60/30%) que pareciam dados reais. Sem
+                  // dados, as barras ficam a zero e o valor é "Sem Vendas".
+                  return actualValues.map((val) => {
+                    const heightPct = val.amount > 0 ? Math.max(8, (val.amount / maxAmt) * 100) : 0;
                     return (
                       <div key={val.name} className="flex flex-col items-center group relative w-12 h-full justify-end">
                         {/* Hover Tooltip */}
                         <div className="absolute -top-8 bg-slate-800 text-white text-[9px] px-2 py-1 rounded shadow opacity-0 group-hover:opacity-100 transition-opacity z-10 font-mono">
-                          {hasSalesData ? `${val.amount.toLocaleString('pt-MZ')} MT` : 'Sem Vendas'}
+                          {val.amount > 0 ? `${val.amount.toLocaleString('pt-MZ')} MT` : 'Sem Vendas'}
                         </div>
                         
                         {/* Filled Capsule */}
@@ -1359,8 +1393,9 @@ export default function FinanceModule() {
                 const totalCatAmt = Object.values(catData).reduce((a, b) => a + b, 0);
                 const hasSalesData = sales.length > 0 && totalCatAmt > 0;
 
-                const getCatPercent = (key: string, defaultVal: number) => {
-                  if (!hasSalesData) return defaultVal;
+                // N-03: sem vendas as percentagens eram inventadas; agora são 0.
+                const getCatPercent = (key: string, _defaultVal: number) => {
+                  if (!hasSalesData) return 0;
                   return Math.round(((catData[key] || 0) / totalCatAmt) * 100);
                 };
 
@@ -1554,23 +1589,23 @@ export default function FinanceModule() {
 
                 const topProds = getTopProducts();
                 const hasSalesData = topProds.length > 0;
-                
-                // Fallback products matching screenshot if no sales recorded
-                const fallbackProducts = [
-                  { name: 'Semente de Milho Híbrido PAN 53', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Semente de Feijão Nhemba IT82D', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Semente de Tomate Cal J Graúdo', total: 0, qty: 0, unit: 'Lata' },
-                  { name: 'Adubo NPK 12-24-12 Basal', total: 0, qty: 0, unit: 'Saco' },
-                  { name: 'Ureia 46% Cobertura Especial', total: 0, qty: 0, unit: 'Saco' }
-                ];
 
-                const finalProds = hasSalesData ? topProds : fallbackProducts;
+                // N-03: existia uma lista de produtos de demonstração com barras
+                // proporcionais inventadas (85/65/45/30/15%). Sem vendas, a lista
+                // fica vazia e é mostrado um estado vazio — não dados fictícios.
+                if (!hasSalesData) {
+                  return (
+                    <div className="py-8 text-center text-xs text-slate-500">
+                      Sem vendas registadas no período seleccionado.
+                    </div>
+                  );
+                }
+
+                const finalProds = topProds;
                 const maxVal = Math.max(...finalProds.map(p => p.total), 1);
-                // Fake proportional heights for preview when no sales
-                const fakeShares = [85, 65, 45, 30, 15];
 
-                return finalProds.map((prod, idx) => {
-                  const widthPct = hasSalesData ? Math.max(5, (prod.total / maxVal) * 100) : fakeShares[idx];
+                return finalProds.map((prod) => {
+                  const widthPct = Math.max(5, (prod.total / maxVal) * 100);
                   return (
                     <div key={prod.name} className="space-y-1.5">
                       <div className="flex justify-between text-xs">
@@ -1675,7 +1710,7 @@ export default function FinanceModule() {
                 className="flex items-center gap-1.5 px-3 py-2 bg-indigo-900 hover:bg-indigo-950 text-white text-xs font-bold rounded-lg shadow-sm transition-colors"
               >
                 <span className="material-symbols-outlined text-[18px]">receipt_long</span>
-                Imprimir Balancete (PDF)
+                Mapa de Conferência (PDF)
               </button>
             </div>
           </div>
@@ -2140,7 +2175,10 @@ export default function FinanceModule() {
                 return (
                   <div key={m.month} className="flex-1 flex flex-col items-center gap-2">
                     <div className="text-[10px] font-mono font-bold text-gray-400">{Math.round(m.amount).toLocaleString()} MT</div>
-                    <div className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700" style={{ height: `${Math.max(10, percent)}px` }}></div>
+                    <div
+                      className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700"
+                      style={{ height: `${m.amount > 0 ? Math.max(10, percent) : 0}px` }}
+                    ></div>
                     <div className="text-xs font-black text-gray-600 border-t border-gray-100 pt-2 w-full text-center bg-gray-50">{m.month}</div>
                   </div>
                 );

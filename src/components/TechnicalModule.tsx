@@ -2,6 +2,7 @@ import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
+import { appConfirm } from '../utils/confirmDialog';
 import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
@@ -270,7 +271,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   const handleClearAllSessions = async () => {
-    if (!window.confirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.')) return;
+    if (!(await appConfirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.'))) return;
     await dbService.clearActiveSessions();
     void dbService.addAuditLog({
       id: 'log-' + Date.now(),
@@ -292,7 +293,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   const handleArchiveAuditLogs = async () => {
     if (isArchivingAuditLogs) return;
-    const confirmation = window.confirm(
+    const confirmation = await appConfirm(
       `Arquivar registos de auditoria anteriores a ${formatDatePT(archiveBeforeDate)}? ` +
       'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.'
     );
@@ -921,7 +922,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   // --- MAINTENANCE & SYSTEM PROCESSORS ---
   const handleEliminarHistoricoTeste = async () => {
     if (isSubmitting) return;
-    const conf = window.confirm(
+    const conf = await appConfirm(
       'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.'
     );
     if (!conf) return;
@@ -952,7 +953,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   const handleZerarSistema = async () => {
     if (isSubmitting) return;
-    const conf = window.confirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
+    const conf = await appConfirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
     if (!conf) return;
 
     setIsSubmitting(true);
@@ -980,7 +981,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   const handleFecharAno = async () => {
-    const conf = window.confirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
+    const conf = await appConfirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
     if (!conf) return;
 
     void dbService.addAuditLog({
@@ -997,7 +998,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   const handleNovoAno = async () => {
-    const conf = window.confirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
+    const conf = await appConfirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
     if (!conf) return;
 
     await dbService.clearSystemData();
@@ -1820,7 +1821,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           <button
                             type="button"
                             onClick={async () => {
-                              const conf = window.confirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
+                              const conf = await appConfirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
                               if (!conf) return;
                               try {
                                 const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
