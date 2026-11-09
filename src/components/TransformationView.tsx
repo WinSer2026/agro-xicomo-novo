@@ -1,14 +1,14 @@
+import { companyNuit } from '../utils/companyInfo';
 import React, { useState, useEffect } from 'react';
-import { uid } from '../utils/idHelper';
 import { ProductTransformation, Product, SystemSettings } from '../types';
+import { appConfirm, appAlert } from '../utils/confirmDialog';
 import { dbService } from '../utils/firebaseDB';
 import { DateRangeFilter } from './DateRangeFilter';
+import { getClientIp } from '../utils/clientInfo';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
-import { useConfirmDialog } from './ConfirmDialog';
-import Toast from './Toast';
 
 interface TransformationViewProps {
   products: Product[];
@@ -121,7 +121,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   const handlePrintVoucher = (trf: ProductTransformation) => {
     const doc = new jsPDF({ format: 'a4', unit: 'mm' });
     const compName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-    const compNuit = settings?.companyNuit || '401976590';
+    const compNuit = companyNuit(settings?.companyNuit);
 
     // Header Banner
     doc.setFillColor(6, 78, 59);
@@ -156,8 +156,8 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
         [
           trf.originalProductName,
           `${trf.originalQuantity} ${trf.originalUnit}`,
-          `${trf.originalUnitCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-          `${trf.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`
+          `${trf.originalUnitCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+          `${trf.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`
         ]
       ],
       headStyles: { fillColor: [15, 118, 110], textColor: [255, 255, 255], fontStyle: 'bold' },
@@ -173,9 +173,9 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       `${it.quantity} ${it.unit}`,
       `${it.unitWeight} ${trf.originalUnit}`,
       `${(it.quantity * it.unitWeight)} ${trf.originalUnit}`,
-      `${it.calculatedUnitCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-      `${(it.sellingPrice || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-      `${(it.quantity * it.calculatedUnitCost).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`
+      `${it.calculatedUnitCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+      `${(it.sellingPrice || 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+      `${(it.quantity * it.calculatedUnitCost).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`
     ]);
 
     autoTable(doc, {
@@ -194,9 +194,9 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
       startY: finalTableY + 16,
       head: [['Indicador', 'Quantidade', 'Valor Monetário (MT)', 'Impacto Financeiro']],
       body: [
-        ['Saída de Stock Original', `${trf.originalQuantity} ${trf.originalUnit}`, `${trf.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 'Crédito de Stock Original'],
-        ['Entrada de Stock Resultante', `${trf.items.reduce((s, x) => s + x.quantity, 0)} unidades`, `${trf.items.reduce((s, x) => s + (x.quantity * x.calculatedUnitCost), 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 'Débito em Stock Fracionado'],
-        ['Perda no Processo', `${trf.lossQuantity} ${trf.originalUnit}`, `${trf.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, trf.lossQuantity > 0 ? 'Custo Operacional de Quebra' : 'Sem Perdas (100% Eficiente)'],
+        ['Saída de Stock Original', `${trf.originalQuantity} ${trf.originalUnit}`, `${trf.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 'Crédito de Stock Original'],
+        ['Entrada de Stock Resultante', `${trf.items.reduce((s, x) => s + x.quantity, 0)} unidades`, `${trf.items.reduce((s, x) => s + (x.quantity * x.calculatedUnitCost), 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 'Débito em Stock Fracionado'],
+        ['Perda no Processo', `${trf.lossQuantity} ${trf.originalUnit}`, `${trf.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, trf.lossQuantity > 0 ? 'Custo Operacional de Quebra' : 'Sem Perdas (100% Eficiente)'],
         ['Balanço Líquido de Custo', 'Equilíbrio Perfeito', '0.00 MT', 'NEUTRALIDADE FINANCEIRA ✓']
       ],
       headStyles: { fillColor: [51, 65, 85], textColor: [255, 255, 255], fontStyle: 'bold' },
@@ -231,22 +231,22 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
 
     doc.setFontSize(9);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Período de Análise: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Emitido em: ${new Date().toLocaleString()}`, 14, 20);
+    doc.text(`Período de Análise: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Emitido em: ${new Date().toLocaleString('pt-MZ')}`, 14, 20);
 
     // Summary Box
     doc.setTextColor(30, 41, 59);
     doc.setFontSize(10);
     doc.setFont('helvetica', 'bold');
-    doc.text(`Total de Transformações: ${totalTransformationsCount} | Consumido: ${totalOriginalQty} unidades | Pacotes Criados: ${totalPackagesCreated} | Perda Total: ${totalLossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 14, 36);
+    doc.text(`Total de Transformações: ${totalTransformationsCount} | Consumido: ${totalOriginalQty} unidades | Pacotes Criados: ${totalPackagesCreated} | Perda Total: ${totalLossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 14, 36);
 
     const rows = filteredTransformations.map(t => [
       t.code,
       formatDatePT(t.date),
       t.originalProductName,
       `${t.originalQuantity} ${t.originalUnit}`,
-      `${t.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
+      `${t.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
       `${t.items.reduce((s, it) => s + it.quantity, 0)} pacotes (${t.items.length} tipos)`,
-      `${t.lossQuantity} ${t.originalUnit} (${t.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT)`,
+      `${t.lossQuantity} ${t.originalUnit} (${t.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT)`,
       t.operatorName,
       t.status
     ]);
@@ -287,39 +287,26 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
     showToast('Exportação para Excel concluída com sucesso!');
   };
 
-  const { askConfirm, dialog: confirmDialog } = useConfirmDialog();
-
-  const handleCancelTransformation = (trf: ProductTransformation) => {
+  const handleCancelTransformation = async (trf: ProductTransformation) => {
     if (trf.status === 'Cancelada') return;
 
-    askConfirm(
-      'Anular transformação',
-      `Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`,
-      () => doCancelTransformation(trf),
-      { danger: true, confirmLabel: 'Anular transformação' }
-    );
-  };
+    const confirmed = await appConfirm(`Deseja mesmo anular a transformação ${trf.code}? O stock original (${trf.originalQuantity} ${trf.originalUnit}) será restaurado e os artigos fracionados gerados serão subtraídos do inventário.`);
+    if (!confirmed) return;
 
-  const doCancelTransformation = async (trf: ProductTransformation) => {
     setIsReversing(trf.id);
     try {
-      await dbService.cancelTransformationWithStockReversal(trf);
-
-      void dbService.addAuditLog({
-        id: uid('log-'),
-        timestamp: new Date().toISOString(),
-        username: currentUser.username,
-        ipAddress: '127.0.0.1',
-        action: 'Transformação de Produto Anulada',
-        status: 'Alerta',
-        details: `Anulação da transformação ${trf.code}. Stock original restaurado com sucesso.`
+      // A anulação grava stock, movimentos e auditoria numa só transacção —
+      // incluindo a perda, que passa a «anulada» em vez de desaparecer.
+      await dbService.cancelTransformationWithStockReversal(trf, {
+        operator: currentUser.username,
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
       showToast(`Transformação ${trf.code} anulada e stock reposto com sucesso!`);
       loadTransformations();
     } catch (err: any) {
       console.error('Error reversing transformation:', err);
-      alert('Erro ao anular transformação: ' + err.message);
+      void appAlert('Erro ao anular transformação: ' + err.message);
     } finally {
       setIsReversing(null);
     }
@@ -328,8 +315,13 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
   return (
     <div className="space-y-6">
       
-      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMsg} type="success" onDismiss={() => setToastMsg('')} />
+      {/* Toast */}
+      {toastMsg && (
+        <div className="fixed bottom-5 right-5 z-50 bg-emerald-800 text-white px-4 py-2.5 rounded-xl shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-bottom-2">
+          <span className="material-symbols-outlined text-[18px]">check_circle</span>
+          <span>{toastMsg}</span>
+        </div>
+      )}
 
       {/* Top Banner & Action */}
       <div className="bg-linear-to-r from-emerald-800 to-teal-900 rounded-2xl p-5 sm:p-6 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -389,7 +381,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
           <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Custo Original</span>
           <p className="text-lg font-black text-emerald-900 mt-1 font-mono">
-            {totalOriginalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+            {totalOriginalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
           </p>
           <p className="text-[10px] text-gray-400">transferido para pacotes</p>
         </div>
@@ -403,7 +395,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-xs">
           <span className="text-[10px] font-black text-amber-800 uppercase tracking-wider">Perdas Totais</span>
           <p className="text-lg font-black text-amber-900 mt-1 font-mono">
-            {totalLossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+            {totalLossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
           </p>
           <p className="text-[10px] text-amber-700">({totalLossQty} unidades/kg)</p>
         </div>
@@ -575,7 +567,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
                       <div className="text-right mr-2 hidden sm:block">
                         <span className="text-[9px] font-black uppercase text-gray-400">Custo Total</span>
                         <p className="font-mono font-black text-gray-800 text-xs">
-                          {t.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                          {t.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                         </p>
                       </div>
 
@@ -642,13 +634,13 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
                                 <td className="p-2 text-center font-mono">{it.unitWeight} {t.originalUnit}</td>
                                 <td className="p-2 text-center font-mono font-bold">{(it.quantity * it.unitWeight)} {t.originalUnit}</td>
                                 <td className="p-2 text-right font-mono font-bold text-emerald-900">
-                                  {it.calculatedUnitCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                                  {it.calculatedUnitCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                                 </td>
                                 <td className="p-2 text-right font-mono text-gray-700">
-                                  {(it.sellingPrice || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                                  {(it.sellingPrice || 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                                 </td>
                                 <td className="p-2 text-right font-mono font-black text-emerald-950">
-                                  {(it.quantity * it.calculatedUnitCost).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                                  {(it.quantity * it.calculatedUnitCost).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                                 </td>
                               </tr>
                             ))}
@@ -661,7 +653,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
                         <div className="p-2.5 bg-white rounded-lg border border-gray-200 space-y-0.5">
                           <span className="font-black text-gray-500 uppercase text-[9px]">Perda na Transformação</span>
                           <p className="font-black text-amber-900">
-                            {t.lossQuantity} {t.originalUnit} ({t.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT)
+                            {t.lossQuantity} {t.originalUnit} ({t.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT)
                           </p>
                         </div>
 
@@ -680,8 +672,6 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
           </div>
         )}
       </div>
-
-      {confirmDialog}
     </div>
   );
 };

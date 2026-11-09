@@ -96,13 +96,48 @@ export type CutoffDirection = 'deduct' | 'restore';
 /* ------------------------------------------------------------------ */
 
 /** Converte qualquer data (ISO completo ou YYYY-MM-DD) na chave do dia YYYY-MM-DD. */
+/** Fuso da operação. Foi decidido que o dia de trabalho é sempre Maputo. */
+const OPERATIONAL_TIME_ZONE = 'Africa/Maputo';
+
+const dayKeyFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: OPERATIONAL_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+const timeFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: OPERATIONAL_TIME_ZONE,
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false
+});
+
+/**
+ * Dia de calendário em Maputo (YYYY-MM-DD).
+ *
+ * A versão anterior fazia `substring(0, 10)` em strings ISO — ou seja, usava a
+ * data **UTC** — e só convertia para local quando o formato era outro. Em
+ * Maputo (UTC+2) uma venda às 23:30 pertence ao dia seguinte em UTC: aparecia
+ * na lista do dia errado e ficava fora da janela do corte. Duas moedas iguais
+ * para o mesmo instante é a pior espécie de erro num corte de inventário.
+ */
 export function toDayKey(value?: string | null): string {
   if (!value) return '';
   const raw = String(value).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.substring(0, 10);
+  // Data pura (sem hora) já está no calendário local por construção.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
   const parsed = new Date(raw);
   if (isNaN(parsed.getTime())) return '';
-  return formatDateToISO(parsed);
+  return dayKeyFormatter.format(parsed);
+}
+
+/** Hora HH:MM em Maputo, para comparar janelas horárias do corte. */
+export function saleTimeHHMM(value?: string | null): string {
+  if (!value) return '';
+  const parsed = new Date(String(value));
+  if (isNaN(parsed.getTime())) return '';
+  return timeFormatter.format(parsed);
 }
 
 /** Timestamp (ms) de uma venda: usa a data real e, em último caso, a data de criação. */
@@ -120,9 +155,8 @@ export function getSaleTimestamp(sale: Sale): number {
 export function getSaleTimeLabel(sale: Sale): string {
   const raw = sale?.date || sale?.createdAt || '';
   if (!raw || !String(raw).includes('T')) return '--:--';
-  const parsed = new Date(raw);
-  if (isNaN(parsed.getTime())) return '--:--';
-  return parsed.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
+  const hora = saleTimeHHMM(raw);
+  return hora || '--:--';
 }
 
 /**
@@ -131,7 +165,9 @@ export function getSaleTimeLabel(sale: Sale): string {
  */
 export function isStockImpactingSale(sale: Sale): boolean {
   if (!sale) return false;
-  if (sale.status === 'Cancelada') return false;
+  // Inclui o estado legado em inglês: sem isto, uma venda antiga anulada
+  // voltava a contar como stock vendido.
+  if (sale.status === 'Cancelada' || String(sale.status) === 'canceled') return false;
   const type = sale.documentType;
   return !type || type === 'FaturaDefinitiva';
 }
@@ -158,15 +194,16 @@ export function selectSalesForCutoff(sales: Sale[], options: SaleSelectionOption
     .filter(sale => {
       if (!sale) return false;
       if (toDayKey(sale.date) !== day) return false;
-      if (!includeCancelled && sale.status === 'Cancelada') return false;
+      if (!includeCancelled && (sale.status === 'Cancelada' || String(sale.status) === 'canceled')) return false;
       if (!includeNonDefinitive && !(!sale.documentType || sale.documentType === 'FaturaDefinitiva')) return false;
 
-      const rawDate = String(sale.date || sale.createdAt || '');
-      const timeMatch = rawDate.match(/T(\d{2}:\d{2})/);
-      if (timeMatch) {
-        const timeStr = timeMatch[1];
-        if (fromTime && timeStr < fromTime) return false;
-        if (toTime && timeStr > toTime) return false;
+      // Janela horária comparada em hora LOCAL de Maputo. Comparar o texto
+      // UTC do ISO colocava a janela duas horas à frente.
+      if (fromTime || toTime) {
+        const hora = saleTimeHHMM(sale.date || sale.createdAt);
+        if (!hora) return false;
+        if (fromTime && hora < fromTime) return false;
+        if (toTime && hora > toTime) return false;
       }
       return true;
     })
@@ -293,14 +330,34 @@ export function analyzeSalesStockImpact(sales: Sale[], products: Product[]): Sal
 /** Saldo que um produto passa a ter depois da correcção (valor absoluto, nunca negativo). */
 export function projectStock(movement: ProductMovement, direction: CutoffDirection) {
   const sign = direction === 'deduct' ? -1 : 1;
-  const stockQty = Math.max(0, movement.currentStockQty + sign * movement.soldBase);
+
+  // V-C12: a pré-visualização mostrava `Math.max(0, …)` e escondia o problema.
+  // Um saldo que ficaria negativo é um aviso — não um zero. O valor é
+  // apresentado tal como sairia e a gravação trava em zero, dizendo o nome do
+  // artigo (ver `applyCutoff` em firebaseDB).
+  const stockQty = movement.currentStockQty + sign * movement.soldBase;
   const stockQtyBulk = movement.hasConversion
-    ? Math.max(0, movement.currentStockBulk + sign * movement.soldBulk)
+    ? movement.currentStockBulk + sign * movement.soldBulk
     : undefined;
   const stockQtyRetail = movement.hasConversion
-    ? Math.max(0, movement.currentStockRetail + sign * movement.soldRetail)
+    ? movement.currentStockRetail + sign * movement.soldRetail
     : undefined;
-  return { stockQty, stockQtyBulk, stockQtyRetail };
+
+  const maisBaixo = Math.min(
+    stockQty,
+    stockQtyBulk === undefined ? stockQty : stockQtyBulk,
+    stockQtyRetail === undefined ? stockQty : stockQtyRetail
+  );
+
+  return {
+    stockQty,
+    stockQtyBulk,
+    stockQtyRetail,
+    /** true quando alguma das contagens ficaria abaixo de zero. */
+    insufficient: maisBaixo < 0,
+    /** Quanto falta, em unidade base (0 quando há stock suficiente). */
+    shortfallQty: maisBaixo < 0 ? Math.abs(maisBaixo) : 0
+  };
 }
 
 /**
@@ -316,13 +373,15 @@ export function buildStockSnapshots(
     .filter(m => m.soldBase > 0 || m.soldBulk > 0 || m.soldRetail > 0)
     .map(m => {
       const projected = projectStock(m, direction);
+      // Escrita de saldo absoluto nunca grava negativo: o stock físico não é
+      // negativo, e um valor negativo em base corromperia somas e relatórios.
       const snapshot: StockCorrectionSnapshot = {
         productId: m.productId,
         productName: m.productName,
-        stockQty: projected.stockQty
+        stockQty: Math.max(0, projected.stockQty)
       };
-      if (projected.stockQtyBulk !== undefined) snapshot.stockQtyBulk = projected.stockQtyBulk;
-      if (projected.stockQtyRetail !== undefined) snapshot.stockQtyRetail = projected.stockQtyRetail;
+      if (projected.stockQtyBulk !== undefined) snapshot.stockQtyBulk = Math.max(0, projected.stockQtyBulk);
+      if (projected.stockQtyRetail !== undefined) snapshot.stockQtyRetail = Math.max(0, projected.stockQtyRetail);
       return snapshot;
     });
 }

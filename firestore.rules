@@ -1,132 +1,92 @@
 rules_version = '2';
-
-// ============================================================================
-// REGRAS DO FIRESTORE — AGRO XICOMO & SERVIÇOS, LDA
-// ----------------------------------------------------------------------------
-// IMPORTANTE (Auditoria FASE 1, achado S-01):
-// A política anterior era `allow read, write: if true` sobre TODOS os
-// documentos, incluindo eliminações. Esta versão intermédia mantém a
-// compatibilidade com a aplicação actual (que autentica no cliente, contra a
-// coleção `credentials`) mas endurece o que pode ser endurecido já:
+// ---------------------------------------------------------------------------
+// Regras do Firestore — AGRO-XICOMO
 //
-//   1. O histórico de vendas NUNCA pode ser eliminado remotamente;
-//   2. Só existem as coleções legítimas — tudo o resto está fechado;
-//   3. Documentos de sistema ficam em só-leitura para clientes.
+// ATENÇÃO: exigem autenticação (Firebase Anonymous Auth ligado no projeto).
+// A versão anterior era `allow read, write: if true`, o que expunha TODA a
+// base — vendas, credenciais (mesmo em hash), salários — a qualquer pessoa que
+// tivesse o projectId (que está no bundle do frontend).
 //
-// ESTADO INTERMEDIÁRIO — PLANO DE ENDURECIMENTO (FASE 2/3):
-// A verdadeira protecção exige autenticação Firebase (ex.: Email/Password ou
-// Anonymous + App Check) e regras baseadas em `request.auth`. Até lá, qualquer
-// pessoa com a web API key pode continuar a LER e ESCREVER dados não protegidos
-// aqui. A migração de autenticação está planeada para a FASE 2/3.
+// Antes de publicar (`firebase deploy --only firestore:rules`):
+//   1. Console Firebase → Authentication → Sign-in method → ativar "Anónimo".
+//   2. Abrir a aplicação e confirmar que os dados aparecem.
+//   3. Só então publicar. Ver docs/seguranca.md.
 //
-// NOTA DE DEPLOY: publicar com
-//   npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
-// Sempre após backup completo (ver docs/runbook-onda-0-1.md).
-// ============================================================================
-
+// O ficheiro com as regras antigas está em firestore.rules.legacy-open, apenas
+// para consulta/histórico. NÃO o publique.
+// ---------------------------------------------------------------------------
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ------------------------------------------------------------------
-    // VENDAS — histórico imutável (regra inviolável do negócio nº 1).
-    // Cancelamentos, liquidações e restaurações são ATUALIZAÇÕES de estado
-    // (permitidas). Eliminações são terminantemente proibidas.
-    // ------------------------------------------------------------------
-    match /sales/{saleId} {
-      allow read, create, update: if true;
+    // Negado por omissão a tudo o que não esteja listado abaixo.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Operação normal -----------------------------------------------------
+    match /products/{docId}         { allow read, write: if request.auth != null; }
+    match /sales/{docId}            { allow read, write: if request.auth != null; }
+    match /losses/{docId}           { allow read, write: if request.auth != null; }
+    match /transformations/{docId}  { allow read, write: if request.auth != null; }
+    match /employees/{docId}        { allow read, write: if request.auth != null; }
+    match /attendance/{docId}       { allow read, write: if request.auth != null; }
+    match /customers/{docId}        { allow read, write: if request.auth != null; }
+    match /paused_sales/{docId}     { allow read, write: if request.auth != null; }
+    match /active_cart/{docId}      { allow read, write: if request.auth != null; }
+    match /settings/{docId}         { allow read, write: if request.auth != null; }
+    match /counters/{docId}         { allow read, write: if request.auth != null; }
+    match /deletions/{docId}        { allow read, write: if request.auth != null; }
+    match /payroll_payments/{docId} { allow read, write: if request.auth != null; }
+    match /active_sessions/{docId}  { allow read, write: if request.auth != null; }
+
+    // --- Credenciais da aplicação -------------------------------------------
+    // O login é feito na aplicação (não no Firebase Auth): o cliente lê o hash
+    // para o comparar. A gestão de utilizadores (criar, alterar, eliminar) é
+    // uma função do módulo técnico, por isso a eliminação é permitida a
+    // sessões autenticadas.
+    match /credentials/{docId} {
+      allow read, create, update, delete: if request.auth != null;
+    }
+
+    // --- Auditoria -----------------------------------------------------------
+    // Os registos não podem ser EDITADOS, mas têm de poder ser ARQUIVADOS: o
+    // arquivo move o documento para `audit_logs_archive` e apaga o original
+    // (src/utils/firebaseDB.ts, archiveAuditLogs). Negar o delete aqui
+    // partiria o arquivo — foi verificado antes de escrever estas regras.
+    match /audit_logs/{docId} {
+      allow read, create: if request.auth != null;
+      allow delete: if request.auth != null;
+      allow update: if false;
+    }
+    match /audit_logs_archive/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de movimentos de stock (F-05) ---------------------------------
+    // Escrito pela aplicação a cada venda/quebra/estorno; nunca reescrito.
+    match /stock_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de caixa (reembolsos e sangrias) ------------------------------
+    // Cada linha é dinheiro que saiu (ou entrou) da gaveta sem venda. É prova
+    // para a inspecção e para o fecho do dia: uma vez escrita, não se corrige
+    // nem se apaga. Um erro corrige-se com um movimento contrário, que fica
+    // também registado.
+    // --- Dívidas de clientes ------------------------------------------------
+    // Um registo por factura em dívida, com prazo e todos os pagamentos. O
+    // histórico de cobranças só cresce: apagar uma dívida apagaria a prova de
+    // que o cliente deve.
+    match /debts/{docId} {
+      allow read, create, update: if request.auth != null;
       allow delete: if false;
     }
 
-    // ------------------------------------------------------------------
-    // PRODUTOS — catálogo operacional (leitura/escrita pela aplicação).
-    // ------------------------------------------------------------------
-    match /products/{productId} {
-      allow read, write: if true;
+    match /cash_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
     }
-
-    // ------------------------------------------------------------------
-    // CREDENCIAIS — utilizadores do sistema.
-    // ATENÇÃO: exposto enquanto a autenticação não for migrada para o
-    // Firebase Auth (FASE 2/3, achado S-04). Ver comentário no topo.
-    // ------------------------------------------------------------------
-    match /credentials/{credId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // SESSÕES ACTIVAS — gestão de sessões multi-utilizador.
-    // ------------------------------------------------------------------
-    match /active_sessions/{sessionId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // CLIENTES, QUEBRAS, TRANSFORMAÇÕES, RH.
-    // ------------------------------------------------------------------
-    match /customers/{customerId} {
-      allow read, write: if true;
-    }
-
-    match /losses/{lossId} {
-      allow read, write: if true;
-    }
-
-    match /transformations/{transformationId} {
-      allow read, write: if true;
-    }
-
-    match /employees/{employeeId} {
-      allow read, write: if true;
-    }
-
-    match /attendance/{attendanceId} {
-      allow read, write: if true;
-    }
-
-    match /payroll_payments/{payrollId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // VENDAS PAUSADAS — rascunhos de operação.
-    // ------------------------------------------------------------------
-    match /paused_sales/{pausedSaleId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // AUDITORIA — escrita pela aplicação; eliminação apenas para o
-    // arquivamento (copia para audit_logs_archive antes de remover).
-    // ------------------------------------------------------------------
-    match /audit_logs/{logId} {
-      allow read, write: if true;
-    }
-
-    match /audit_logs_archive/{logId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // DEFINIÇÕES DO SISTEMA.
-    // ------------------------------------------------------------------
-    match /settings/{settingId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // CONTADORES E CORTES DE INVENTÁRIO.
-    // ------------------------------------------------------------------
-    match /counters/{counterId} {
-      allow read, write: if true;
-    }
-
-    match /inventory_cutoffs/{cutoffId} {
-      allow read, write: if true;
-    }
-
-    // ------------------------------------------------------------------
-    // Qualquer outra coleção/documento: NEGADO por omissão.
-    // ------------------------------------------------------------------
   }
 }
-

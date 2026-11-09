@@ -1,11 +1,30 @@
+import { companyNuit, MISSING_NUIT_LABEL } from '../utils/companyInfo';
 import React, { useState, useEffect, useRef } from 'react';
-import { uid } from '../utils/idHelper';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
-import Toast from './Toast';
+import {
+  isFinancialSale,
+  isCancelledSale,
+  isProformaSale,
+  isDebtSale,
+  isSettledSale,
+  saleStatusLabel,
+  settlementDisclaimer
+} from '../utils/saleStatus';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
+import { describeDebt, summarizeDebts } from '../utils/debts';
+import type { Debt } from '../types';
 import { Sale, SystemSettings } from '../types';
-import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
-import { generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
+import {
+  downloadInvoiceA4,
+  downloadDuplicatedInvoiceA4,
+  downloadThermalReceipt,
+  downloadReceiptA4,
+  downloadCreditNoteA4
+} from '../utils/pdfGenerator';
+import { sumTaxAmount } from '../utils/taxHelper';
 import { DateRangeFilter } from './DateRangeFilter';
 import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
@@ -20,7 +39,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   const [sales, setSales] = useState<Sale[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [faturasSearch, setFaturasSearch] = useState('');
-  const [faturasFilter, setFaturasFilter] = useState<'Todas' | 'Pendente' | 'Paga' | 'Cancelada'>('Todas');
+  const [faturasFilter, setFaturasFilter] = useState<'Todas' | 'Pendente' | 'Crédito' | 'Paga' | 'Proforma' | 'Cancelada'>('Todas');
 
   // Date Range Filter states
   const defaultRange = getDateRangeFromPreset('Este Mês');
@@ -40,6 +59,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   // Preview / Print state
   const [invoiceToPrint, setInvoiceToPrint] = useState<Sale | null>(null);
+  /** Dívidas por id de venda: prazo, pagamentos e atraso. */
+  const [debtsById, setDebtsById] = useState<Record<string, Debt>>({});
+  const [debtSummary, setDebtSummary] = useState({ openCount: 0, openValue: 0, overdueCount: 0, overdueValue: 0 });
+  const [showCutoffTool, setShowCutoffTool] = useState(false);
   const [printType, setPrintType] = useState<'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'Proforma' | null>(null);
 
   // Toast notification state
@@ -55,16 +78,40 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     onConfirm: () => void;
   } | null>(null);
 
-  // Ferramenta de corte de inventário (anulação em massa / correcção de stock)
-  const [showCutoffTool, setShowCutoffTool] = useState(false);
-
   const [securityModal, setSecurityModal] = useState<{
     show: boolean;
-    action: 'cancel' | 'restore';
+    // 'pay' = liquidação (não pede palavra-passe); 'cancel'/'restore' = acções
+    // destrutivas, essas sim protegidas por palavra-passe de gestor.
+    action: 'cancel' | 'restore' | 'pay';
     sale: Sale | null;
     password: string;
     error: string;
+    /** Meio de pagamento escolhido na liquidação (só usado com action 'pay'). */
+    paymentMethod?: string;
+    /** Houve devolução de dinheiro ao cliente? (só usado com action 'cancel'). */
+    refund?: boolean;
+    /** Valor devolvido, em texto para o operador poder corrigir. */
+    refundAmount?: string;
+    /** Valor a cobrar agora (pode ser parcial), em texto. */
+    payAmount?: string;
+    refundMethod?: string;
   }>({ show: false, action: 'cancel', sale: null, password: '', error: '' });
+
+  const PAYMENT_METHODS = ['Dinheiro', 'Transferência', 'M-Pesa', 'E-Mola'] as const;
+
+  /** Definições para documentos; nunca inventa NUIT se ainda não estiverem carregadas. */
+  const resolveSettings = (): SystemSettings =>
+    settings ||
+    ({ companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings);
+
+  /**
+   * Abre a pré-visualização garantindo que `items` existe. Sem esta guarda, uma
+   * venda antiga sem linhas rebentava o modal (FT-58).
+   */
+  const openPreview = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'Proforma') => {
+    setInvoiceToPrint({ ...sale, items: sale.items || [] });
+    setPrintType(format);
+  };
 
   const askConfirmation = (title: string, message: string, onConfirm: () => void) => {
     setConfirmModal({
@@ -86,10 +133,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     }, 4000);
   };
 
+  /**
+   * Estados que podem ser filtrados pelo Firestore tal e qual.
+   *
+   * 'Cancelada' fica de fora de propósito: existem registos antigos com o
+   * estado legado `'canceled'` que uma consulta `status == 'Cancelada'` nunca
+   * devolveria (FT-07). Nesse separador a consulta traz o período e o filtro
+   * fino é feito em memória, onde as duas grafias são reconhecidas.
+   */
+  const SERVER_STATUS_TABS = ['Paga', 'Pendente', 'Crédito', 'Proforma'];
+
   const getCurrentSalesQuery = () => ({
     startDate,
     endDate,
-    status: faturasFilter === 'Todas' ? undefined : faturasFilter
+    status:
+      faturasFilter !== 'Todas' && SERVER_STATUS_TABS.includes(faturasFilter)
+        ? (faturasFilter as Sale['status'])
+        : undefined
   });
 
   const loadData = async (notifyOnError = true) => {
@@ -99,7 +159,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     try {
       await dbService.init();
       const queryOptions = getCurrentSalesQuery();
-      const [salesPage, globalSettings, summary] = await Promise.all([
+      const [salesPage, globalSettings, summary, dividas] = await Promise.all([
         dbService.getSalesPage({ ...queryOptions, pageSize: 30 }),
         dbService.getSettings(),
         // A summary is helpful, but a temporary aggregate/offline error must
@@ -107,6 +167,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         dbService.getSalesSummary({ startDate, endDate }).catch(error => {
           console.warn('[FaturasModule] Could not refresh sales summary:', error);
           return null;
+        }),
+        // As dívidas são informação de apoio: uma falha aqui não pode esconder
+        // as facturas.
+        dbService.getDebts().catch(error => {
+          console.warn('[FaturasModule] Could not refresh debts:', error);
+          return [] as Debt[];
         })
       ]);
 
@@ -116,6 +182,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       setHasMoreSales(salesPage.hasMore);
       setSettings(globalSettings);
       setSalesSummary(summary);
+      const mapaDividas: Record<string, Debt> = {};
+      for (const divida of dividas || []) mapaDividas[divida.saleId || divida.id] = divida;
+      setDebtsById(mapaDividas);
+      setDebtSummary(summarizeDebts(dividas || []));
     } catch (err) {
       console.error('Error loading invoices data:', err);
       if (notifyOnError) {
@@ -184,53 +254,118 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
-  // A função "Eliminar Histórico de Teste" foi removida. Qualquer operação que
-  // apague vendas viola a regra inviolável do negócio ("não perder nenhuma venda
-  // já efetuada") e não tem lugar na interface de produção.
-
   const handlePayInvoice = (sale: Sale) => {
     if (isProcessing) return;
+    if (isCancelledSale(sale)) {
+      showToast('Esta factura está anulada: não pode ser liquidada.', 'error');
+      return;
+    }
+    if (!isDebtSale(sale)) {
+      showToast('Só facturas pendentes ou a crédito podem ser liquidadas.', 'warning');
+      return;
+    }
+    // A forma de pagamento é escolhida agora: a factura pode ter sido emitida a
+    // crédito e ser paga em dinheiro, e o recibo tem de dizer a verdade (FT-23).
+    setSecurityModal({
+      show: true,
+      action: 'pay',
+      sale,
+      password: '',
+      error: '',
+      paymentMethod: sale.paymentMethod && sale.paymentMethod !== 'Crédito' ? sale.paymentMethod : 'Dinheiro',
+      // Valor em falta pré-preenchido: o operador só o altera para cobrar parte.
+      payAmount: Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0)).toFixed(2)
+    });
+  };
+
+  /**
+   * Converte uma proforma numa factura definitiva (FT-79).
+   *
+   * A proforma não deduz stock nem conta como receita: é uma proposta. Sem esta
+   * acção, o único caminho era repetir a venda de raiz no PDV — com risco de
+   * preços ou quantidades diferentes do que o cliente autorizou por escrito.
+   */
+  const handleIssueInvoiceFromProforma = (sale: Sale) => {
+    if (isProcessing) return;
+    if (!isProformaSale(sale) || sale.convertedToInvoice) return;
+
     askConfirmation(
-      'Liquidar Fatura',
-      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString()} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
+      'Emitir Factura Definitiva',
+      `A proforma ${sale.invoiceNumber} vai originar uma factura definitiva com número novo, no valor de ` +
+        `${sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT. ` +
+        `O stock é deduzido agora. A proforma mantém-se no histórico, marcada como convertida.`,
       async () => {
-        if (isProcessing) return;
         setIsProcessing(true);
-        let paymentSaved = false;
+        let issuedNumber: string | null = null;
         try {
-          const allSales = await dbService.getSales();
-          const receiptNum = await reserveDocumentNumber(
-            generateNextReceiptNumber(allSales, 'ReciboA4'),
-            (key, min) => dbService.nextDocumentNumber(key, min)
-          );
-          const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
-          await dbService.addSale(updatedSale);
-          paymentSaved = true;
+          const products = await dbService.getProducts();
+          const deductionItems: any[] = [];
+          for (const item of (sale.items || [])) {
+            if (!item) continue;
+            const prod = products.find(p => String(p.id) === String(item.productId));
+            if (!prod || prod.isService) continue;
 
-          setInvoiceToPrint(updatedSale);
-          setPrintType('ReciboA4');
-          const receiptGenerated = await runPostCommitTask({
-            label: 'gerar o recibo da fatura liquidada',
-            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
-          });
+            const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+            const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+            const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+            const hasConversion = conversaoEfetiva !== undefined;
+            const qty = Number(item.quantity) || 0;
+            if (qty <= 0) continue;
+
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              deductionItems.push({
+                productId: String(prod.id),
+                hasConversion: true,
+                sellingUnit: 'Bulk',
+                qtyToReduce: qty,
+                equivalentBaseQty: qty * conversaoEfetiva
+              });
+            } else if (hasConversion) {
+              deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce: qty });
+            } else {
+              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce: qty });
+            }
+          }
+
+          issuedNumber = await dbService.nextDocumentNumberByKind('FaturaDefinitiva', new Date().getFullYear(), 0);
+
+          const invoice: Sale = {
+            ...sale,
+            id: `conv-${String(sale.id || sale.invoiceNumber).slice(0, 40)}-${Date.now()}`,
+            invoiceNumber: issuedNumber,
+            date: new Date().toISOString(),
+            status: 'Pendente',
+            documentType: 'FaturaDefinitiva',
+            receiptNumber: undefined,
+            paidAt: undefined,
+            paidBy: undefined,
+            settledPaymentMethod: undefined,
+            convertedToInvoice: undefined,
+            reissuedFrom: undefined
+          };
+
+          await dbService.addSaleWithStockDeduction(invoice, deductionItems);
           await runPostCommitTask({
-            label: 'atualizar as faturas depois da liquidação',
-            task: () => loadData(false)
+            label: 'marcar a proforma como convertida',
+            task: () => dbService.addSale({ ...sale, convertedToInvoice: issuedNumber as string })
           });
 
-          if (receiptGenerated) {
-            showToast(`Factura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
-          } else {
-            showToast(`Factura ${sale.invoiceNumber} foi liquidada com sucesso. Pode reimprimir o recibo pelo histórico.`, 'warning');
-          }
-        } catch (err) {
-          console.error('Error paying invoice:', err);
-          if (paymentSaved) {
-            showToast(`A factura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
-          } else {
-            showToast('Erro ao liquidar factura.', 'error');
-          }
+          void dbService.addAuditLog({
+            id: 'log-' + Date.now(),
+            timestamp: new Date().toISOString(),
+            username: currentUser?.username || 'Gestor',
+            ipAddress: '127.0.0.1',
+            action: 'Conversão de Proforma',
+            status: 'Sucesso',
+            details: `Proforma ${sale.invoiceNumber} convertida na factura definitiva ${issuedNumber} (${sale.total} MT).`
+          });
+
+          openPreview(invoice, 'A4');
+          await runPostCommitTask({ label: 'atualizar as faturas', task: () => loadData(false) });
+          showToast(`Proforma ${sale.invoiceNumber} convertida na factura ${issuedNumber}. Estado: Pendente.`, 'success');
+        } catch (err: any) {
+          console.error('[FaturasModule] Erro ao converter proforma:', err);
+          showToast(err?.message || 'Não foi possível emitir a factura definitiva.', 'error');
         } finally {
           setIsProcessing(false);
         }
@@ -239,12 +374,18 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   };
 
   const handleCancelInvoice = (sale: Sale) => {
+    const podeDevolver = canRefund(sale);
     setSecurityModal({
       show: true,
       action: 'cancel',
       sale,
       password: '',
-      error: ''
+      error: '',
+      // Nunca pré-marcado: devolver dinheiro é uma decisão, não um efeito
+      // colateral de anular uma factura.
+      refund: false,
+      refundAmount: podeDevolver ? maxRefundFor(sale).toFixed(2) : '',
+      refundMethod: 'Dinheiro'
     });
   };
 
@@ -263,115 +404,375 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     const sale = securityModal.sale;
     if (!sale) return;
 
-    const inputPw = (securityModal.password || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '').trim();
-    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
-    const isValidPassword = Boolean(targetPw) && inputPw === targetPw;
-    if (!isValidPassword) {
-      setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
-      return;
-    }
-
     setIsProcessing(true);
     setSecurityModal(prev => ({ ...prev, error: '' }));
     let actionPersisted = false;
 
     try {
+      // ── Liquidação ────────────────────────────────────────────────────
+      if (securityModal.action === 'pay') {
+        const settledPaymentMethod = securityModal.paymentMethod || 'Dinheiro';
+        const operator = currentUser?.username || 'Gestor';
+
+        let payment: { sale: Sale; receiptNumber: string; full: boolean; remaining: number };
+        try {
+          // Semeia o contador com o maior recibo já emitido: se o contador
+          // estiver vazio, o próximo número não pode repetir um recibo existente.
+          const candidatoRecibo = generateNextReceiptNumber(sales, 'ReciboA4');
+          const ultimoReciboConhecido =
+            parseInt(candidatoRecibo.slice(candidatoRecibo.lastIndexOf('-') + 1), 10) - 1 || 0;
+
+          const emFalta = Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0));
+          const pedido = String(securityModal.payAmount ?? '').trim();
+          const valor = pedido ? Number(pedido.replace(',', '.')) : emFalta;
+
+          if (!Number.isFinite(valor) || valor <= 0) {
+            setSecurityModal(prev => ({ ...prev, error: 'Indique um valor maior que zero.' }));
+            return;
+          }
+
+          const resultado = await dbService.settleDebt({
+            saleId: String(sale.id),
+            amount: valor,
+            method: settledPaymentMethod,
+            operator,
+            fallbackMax: ultimoReciboConhecido
+          });
+          payment = {
+            sale: resultado.sale,
+            receiptNumber: resultado.receiptNumber,
+            full: resultado.full,
+            remaining: resultado.remaining
+          };
+        } catch (err: any) {
+          // Erros esperados: factura já paga, anulada, inexistente. Ficam no
+          // próprio modal — o utilizador tem de perceber por que não gravou.
+          setSecurityModal(prev => ({
+            ...prev,
+            show: true,
+            error: err?.message || 'Falha ao registar o pagamento.'
+          }));
+          return;
+        }
+
+        actionPersisted = true;
+        const paidSale = payment.sale;
+        setSecurityModal({ show: false, action: 'pay', sale: null, password: '', error: '' });
+
+        void dbService.addAuditLog({
+          id: 'log-' + Date.now(),
+          timestamp: new Date().toISOString(),
+          username: operator,
+          ipAddress: '127.0.0.1',
+          action: payment.full ? 'Liquidação de Factura' : 'Cobrança Parcial de Factura',
+          status: 'Sucesso',
+          details: payment.full
+            ? `Factura ${sale.invoiceNumber} liquidada por ${settledPaymentMethod} no valor de ${paidSale.total} MT. Recibo emitido: ${payment.receiptNumber}.`
+            : `Cobrança parcial da factura ${sale.invoiceNumber} (${settledPaymentMethod}). ` +
+              `Continua em dívida ${payment.remaining.toFixed(2)} MT. Recibo: ${payment.receiptNumber}.`
+        });
+
+        openPreview(paidSale, 'ReciboA4');
+        const receiptGenerated = await runPostCommitTask({
+          label: 'gerar o recibo da factura liquidada',
+          task: () => downloadReceiptA4(paidSale, resolveSettings())
+        });
+        await runPostCommitTask({
+          label: 'atualizar as faturas depois da liquidação',
+          task: () => loadData(false)
+        });
+
+        if (payment.full) {
+          if (receiptGenerated) {
+            showToast(`Factura ${sale.invoiceNumber} liquidada (${settledPaymentMethod}). Recibo ${payment.receiptNumber}.`, 'success');
+          } else {
+            showToast(`Factura ${sale.invoiceNumber} liquidada. Recibo ${payment.receiptNumber} pode ser reimpresso pelo histórico.`, 'warning');
+          }
+        } else {
+          showToast(
+            `Cobrança parcial registada. Continuam em dívida ${payment.remaining.toFixed(2)} MT (recibo ${payment.receiptNumber}).`,
+            'warning'
+          );
+        }
+        return;
+      }
+
+      // ── Anulação e reemissão: exigem palavra-passe de gestor ──────────
+      const inputPw = (securityModal.password || '').trim();
+      const isValidPassword = await verifyAuthorizationPassword(inputPw, settings);
+      if (!isValidPassword) {
+        setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
+        return;
+      }
+
+      const operator = currentUser?.username || 'Gestor';
+
       if (securityModal.action === 'cancel') {
-        if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
+        if (isCancelledSale(sale)) {
+          setSecurityModal(prev => ({ ...prev, error: 'Esta factura já está anulada.' }));
+          return;
+        }
+
+        // Só uma factura definitiva gera nota de crédito. Anular uma proforma
+        // consumia um número NC-AAAA-NNNN para um documento que nunca existiu
+        // (FT-31).
+        const isDefinitiveInvoice = !sale.documentType || sale.documentType === 'FaturaDefinitiva';
+        const creditNoteNumber = isDefinitiveInvoice
+          ? await dbService.nextDocumentNumberByKind('NotaCredito', new Date().getFullYear(), 0)
+          : undefined;
+
+        const cancellationMeta: Partial<Sale> = {
+          cancelledAt: new Date().toISOString(),
+          cancelledBy: operator,
+          ...(creditNoteNumber ? { creditNoteNumber } : {})
+        };
+
+        const missingProducts: string[] = [];
+
+        if (isDefinitiveInvoice) {
           const products = await dbService.getProducts();
           const restockItems: any[] = [];
           for (const item of (sale.items || [])) {
             if (!item) continue;
             const prod = products.find(p => String(p.id) === String(item.productId));
-            if (!prod || prod.isService) continue;
+            if (prod?.isService) continue;
+            if (!prod) {
+              // Devolver stock a um produto que já não existe é impossível:
+              // dizer o nome em voz alta é o mínimo (FT-39).
+              missingProducts.push(item.name || String(item.productId));
+              continue;
+            }
 
-            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+            // D-04: usa-se a conversão registada na linha da venda; só se ela
+            // não existir (vendas antigas) se recorre ao catálogo actual.
+            const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+            const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+            const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+            const hasConversion = conversaoEfetiva !== undefined;
             const qtyToAdd = Number(item.quantity) || 0;
             if (qtyToAdd <= 0) continue;
+
+            const base = {
+              productId: String(prod.id),
+              // O livro de movimentos imprimia o ID em vez do nome nos estornos (FT-40).
+              productName: prod.name || item.name || String(prod.id),
+              unit: item.unit || prod.baseUnit || 'un'
+            };
+
             if (hasConversion && item.sellingUnit === 'Bulk') {
               restockItems.push({
-                productId: String(prod.id),
+                ...base,
                 hasConversion: true,
                 sellingUnit: 'Bulk',
                 qtyToAdd,
-                equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+                equivalentBaseQty: qtyToAdd * conversaoEfetiva
               });
             } else if (hasConversion) {
-              restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+              restockItems.push({ ...base, hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
             } else {
-              restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
+              restockItems.push({ ...base, hasConversion: false, qtyToAdd });
             }
           }
-          await dbService.cancelSaleWithStockRestoration(sale, restockItems);
+
+          const cancelResult = await dbService.cancelSaleWithStockRestoration(
+            { ...sale, ...cancellationMeta, previousStatus: sale.status as Sale['previousStatus'] },
+            restockItems
+          );
+          // O que a base de dados recusou repor é a verdade final: pode ter
+          // sido vendido um produto que entretanto foi eliminado.
+          cancelResult.skipped.forEach(item => {
+            if (!missingProducts.includes(item.name)) missingProducts.push(item.name);
+          });
         } else {
-          await dbService.addSale({ ...sale, id: String(sale.id || uid('sale-')), status: 'Cancelada' });
+          await dbService.addSale({
+            ...sale,
+            ...cancellationMeta,
+            id: String(sale.id || Date.now()),
+            status: 'Cancelada',
+            previousStatus: sale.status as Sale['previousStatus']
+          });
         }
 
         actionPersisted = true;
+
+        // ── Reembolso ao cliente ────────────────────────────────────────
+        // A factura está anulada; o dinheiro pode ter de sair. Se sair sem
+        // registo, o caixa fecha com falta e não há forma de provar nada.
+        let refundRegistered = 0;
+        let refundError = '';
+        if (securityModal.refund && canRefund(sale)) {
+          const valor = Number(String(securityModal.refundAmount || '').replace(',', '.'));
+          const maximo = maxRefundFor(sale);
+          if (!Number.isFinite(valor) || valor <= 0) {
+            refundError = 'A devolução ficou por registar: valor inválido.';
+          } else if (valor > maximo + 0.01) {
+            refundError = `A devolução ficou por registar: o máximo devolvível é ${maximo.toFixed(2)} MT (o que o cliente pagou).`;
+          } else {
+            const agora = new Date().toISOString();
+            try {
+              await dbService.addCashMovement({
+                id: `cx-reembolso-${sale.id || sale.invoiceNumber}-${Date.now()}`,
+                date: agora,
+                day: toCashDay(agora),
+                type: 'Reembolso',
+                amount: -Math.abs(valor),
+                method: securityModal.refundMethod || 'Dinheiro',
+                operator,
+                authorizedBy: operator,
+                reference: sale.invoiceNumber,
+                receiptNumber: sale.receiptNumber,
+                creditNoteNumber,
+                notes: `Devolução ao cliente na anulação de ${sale.invoiceNumber}`
+              });
+              refundRegistered = valor;
+            } catch (erro) {
+              console.error('[Faturas] Falha ao registar o reembolso:', erro);
+              refundError = 'A devolução NÃO foi registada em caixa — registe-a manualmente antes de fechar o dia.';
+            }
+          }
+        }
+
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
+
+        const cancelledSale: Sale = { ...sale, ...cancellationMeta, status: 'Cancelada' };
+        if (creditNoteNumber) {
+          // O número existia mas o documento não: agora existe (FT-32).
+          setInvoiceToPrint(null);
+          void runPostCommitTask({
+            label: 'gerar a nota de crédito',
+            task: () => downloadCreditNoteA4(cancelledSale, resolveSettings())
+          });
+        }
+
+        const receiptNote = sale.receiptNumber
+          ? ` O recibo ${sale.receiptNumber} fica anulado por esta nota de crédito; o reembolso tem de ser registado em caixa.`
+          : '';
+
         void dbService.addAuditLog({
-          id: uid('log-'),
+          id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
-          username: currentUser?.username || 'Gestor',
+          username: operator,
           ipAddress: '127.0.0.1',
           action: 'Anulação de Venda (Autorizada)',
           status: 'Sucesso',
-          details: `Venda ${sale.invoiceNumber} anulada com palavra-passe de autorização.`
+          details:
+            `Venda ${sale.invoiceNumber} (${sale.total} MT) anulada por ${operator}. ` +
+            (creditNoteNumber ? `Nota de crédito emitida: ${creditNoteNumber}.` : 'Documento não definitivo: sem nota de crédito.') +
+            receiptNote +
+            (refundRegistered > 0
+              ? ` Devolvidos ${refundRegistered.toFixed(2)} MT ao cliente por ${securityModal.refundMethod || 'Dinheiro'}.`
+              : ' Sem devolução de dinheiro registada.') +
+            (refundError ? ` ${refundError}` : '')
         });
         void runPostCommitTask({
           label: 'atualizar as faturas depois da anulação',
           task: () => loadData(false)
         });
-        showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
-      } else {
-        const updatedSale: Sale = { ...sale, id: String(sale.id || uid('sale-')), status: 'Pendente' };
-        if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
-          const products = await dbService.getProducts();
-          const deductionItems: any[] = [];
-          for (const item of (sale.items || [])) {
-            if (!item) continue;
-            const prod = products.find(p => String(p.id) === String(item.productId));
-            if (!prod || prod.isService) continue;
 
-            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-            const qtyToReduce = Number(item.quantity) || 0;
-            if (qtyToReduce <= 0) continue;
-            if (hasConversion && item.sellingUnit === 'Bulk') {
-              deductionItems.push({
-                productId: String(prod.id),
-                hasConversion: true,
-                sellingUnit: 'Bulk',
-                qtyToReduce,
-                equivalentBaseQty: qtyToReduce * (Number(prod.conversionRate) || 1)
-              });
-            } else if (hasConversion) {
-              deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce });
-            } else {
-              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
-            }
+        const missingNote = missingProducts.length
+          ? ` Atenção: sem stock reposto em ${missingProducts.join(', ')} (artigo já não existe no catálogo).`
+          : '';
+        showToast(
+          `Venda ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}.` +
+            (refundRegistered > 0 ? ` Devolvidos ${refundRegistered.toFixed(2)} MT (${securityModal.refundMethod || 'Dinheiro'}).` : '') +
+            missingNote +
+            (refundError ? ` ${refundError}` : ''),
+          refundError || missingProducts.length ? 'warning' : 'success'
+        );
+      } else {
+        // ── Reemissão ───────────────────────────────────────────────────
+        // Uma factura anulada não volta a viver: o documento cancelado é nulo
+        // para efeitos fiscais. Reemitir cria uma factura NOVA, com número
+        // novo, e deixa o cancelamento e a nota de crédito intactos no
+        // histórico (corrige FT-33, FT-35 e evita "ressuscitar" papel).
+        const newInvoiceNumber = await dbService.nextDocumentNumberByKind(
+          'FaturaDefinitiva',
+          new Date().getFullYear(),
+          0
+        );
+
+        const reissued: Sale = {
+          ...sale,
+          id: `reemit-${String(sale.id || sale.invoiceNumber).slice(0, 40)}-${Date.now()}`,
+          invoiceNumber: newInvoiceNumber,
+          date: new Date().toISOString(),
+          status: 'Pendente',
+          receiptNumber: undefined,
+          creditNoteNumber: undefined,
+          cancelledAt: undefined,
+          cancelledBy: undefined,
+          previousStatus: undefined,
+          paidAt: undefined,
+          paidBy: undefined,
+          settledPaymentMethod: undefined,
+          reissuedFrom: sale.invoiceNumber
+        };
+
+        const products = await dbService.getProducts();
+        const deductionItems: any[] = [];
+        const missingProducts: string[] = [];
+        for (const item of (sale.items || [])) {
+          if (!item) continue;
+          const prod = products.find(p => String(p.id) === String(item.productId));
+          if (prod?.isService) continue;
+          if (!prod) {
+            missingProducts.push(item.name || String(item.productId));
+            continue;
           }
-          await dbService.addSaleWithStockDeduction(updatedSale, deductionItems);
-        } else {
-          await dbService.addSale(updatedSale);
+
+          // Simetria com a anulação: a conversão vem da linha da venda, não do
+          // catálogo actual (FT-34). Sem isso, mudar o factor saco→quilo entre
+          // a venda e a reemissão deixava o stock permanentemente errado.
+          const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+          const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+          const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+          const hasConversion = conversaoEfetiva !== undefined;
+          const qty = Number(item.quantity) || 0;
+          if (qty <= 0) continue;
+
+          if (hasConversion && item.sellingUnit === 'Bulk') {
+            deductionItems.push({
+              productId: String(prod.id),
+              hasConversion: true,
+              sellingUnit: 'Bulk',
+              qtyToReduce: qty,
+              equivalentBaseQty: qty * conversaoEfetiva
+            });
+          } else if (hasConversion) {
+            deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce: qty });
+          } else {
+            deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce: qty });
+          }
         }
+
+        await dbService.addSaleWithStockDeduction(reissued, deductionItems);
 
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'restore', sale: null, password: '', error: '' });
+
         void dbService.addAuditLog({
-          id: uid('log-'),
+          id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
-          username: currentUser?.username || 'Gestor',
+          username: operator,
           ipAddress: '127.0.0.1',
-          action: 'Restauração de Venda (Autorizada)',
+          action: 'Reemissão de Factura (Autorizada)',
           status: 'Sucesso',
-          details: `Factura ${sale.invoiceNumber} restaurada para o estado Pendente com palavra-passe de autorização.`
+          details:
+            `Factura anulada ${sale.invoiceNumber} reemitida como ${newInvoiceNumber} por ${operator}. ` +
+            `Estado: Pendente. O documento anulado mantém-se no histórico.`
         });
         void runPostCommitTask({
-          label: 'atualizar as faturas depois da restauração',
+          label: 'atualizar as faturas depois da reemissão',
           task: () => loadData(false)
         });
-        showToast(`Factura ${sale.invoiceNumber} restaurada para o estado Pendente com sucesso!`, 'success');
+
+        const missingNote = missingProducts.length
+          ? ` Sem linhas de ${missingProducts.join(', ')} (artigo já não existe).`
+          : '';
+        showToast(
+          `Factura ${sale.invoiceNumber} reemitida como ${newInvoiceNumber} (Pendente). O documento anulado fica no histórico.` + missingNote,
+          missingProducts.length ? 'warning' : 'success'
+        );
       }
     } catch (err: any) {
       console.error('[FaturasModule] Error in handleExecuteSecurityAction:', err);
@@ -380,23 +781,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         showToast('A ação foi gravada com sucesso. Alguns dados visuais serão atualizados em seguida.', 'warning');
       } else {
         const errMsg = err?.message || 'Falha ao processar a operação.';
-        setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação de segurança: ${errMsg}` }));
+        setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação: ${errMsg}` }));
       }
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  const downloadInvoicePDF = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4') => {
-    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as SystemSettings;
-    if (format === 'Thermal') {
-      downloadThermalReceipt(sale, s);
-    } else if (format === 'DoubleA5') {
-      downloadDuplicatedInvoiceA4(sale, s);
-    } else if (format === 'ReciboA4') {
-      downloadReceiptA4(sale, s);
-    } else {
-      downloadInvoiceA4(sale, s, false);
     }
   };
 
@@ -418,23 +806,59 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     return Boolean(matchInvoice || matchCustomer || matchOperator || matchPayment || matchNuit || matchTotal || matchItem);
   };
 
+  /**
+   * Um estado só é "o mesmo estado" se as regras de negócio o disserem.
+   * Comparar `sale.status` em bruto mostrava proformas como dívida e não
+   * reconhecia o estado legado 'canceled' (FT-06, FT-07).
+   */
+  const matchesStatusTab = (sale: Sale, tab: typeof faturasFilter): boolean => {
+    switch (tab) {
+      case 'Todas':
+        return true;
+      case 'Cancelada':
+        return isCancelledSale(sale);
+      case 'Proforma':
+        return isProformaSale(sale);
+      case 'Paga':
+      case 'Pendente':
+      case 'Crédito':
+        return !isCancelledSale(sale) && !isProformaSale(sale) && sale.status === tab;
+      default:
+        return true;
+    }
+  };
+
   const filteredSales = sales.filter(sale => {
     // These redundant guards avoid showing a stale previous page while the
     // server query for a newly selected period/status is in flight.
     if (!isDateInRange(sale.date, startDate, endDate)) return false;
-    if (faturasFilter !== 'Todas' && sale.status !== faturasFilter) return false;
+    if (!matchesStatusTab(sale, faturasFilter)) return false;
     return matchesInvoiceSearch(sale);
   });
 
+  const financialSales = sales.filter(isFinancialSale);
+  const sumOf = (subset: Sale[]) => subset.reduce((sum, sale) => sum + (Number(sale.total) || 0), 0);
+  const paidSales = financialSales.filter(sale => sale.status === 'Paga');
+  const pendingSales = financialSales.filter(sale => sale.status === 'Pendente');
+  const creditSales = financialSales.filter(sale => sale.status === 'Crédito');
+  const proformaSales = sales.filter(isProformaSale);
+  const cancelledSales = sales.filter(isCancelledSale);
+
   const pageSummary: SalesSummary = {
-    totalInvoiced: sales.filter(sale => sale.status !== 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
-    paidInvoiced: sales.filter(sale => sale.status === 'Paga').reduce((sum, sale) => sum + sale.total, 0),
-    pendingInvoiced: sales.filter(sale => sale.status === 'Pendente').reduce((sum, sale) => sum + sale.total, 0),
-    canceledInvoiced: sales.filter(sale => sale.status === 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
+    totalInvoiced: sumOf(financialSales),
+    paidInvoiced: sumOf(paidSales),
+    pendingInvoiced: sumOf(pendingSales),
+    creditInvoiced: sumOf(creditSales),
+    debtInvoiced: sumOf(pendingSales) + sumOf(creditSales),
+    proformaInvoiced: sumOf(proformaSales),
+    canceledInvoiced: sumOf(cancelledSales),
     totalCount: sales.length,
-    paidCount: sales.filter(sale => sale.status === 'Paga').length,
-    pendingCount: sales.filter(sale => sale.status === 'Pendente').length,
-    canceledCount: sales.filter(sale => sale.status === 'Cancelada').length
+    paidCount: paidSales.length,
+    pendingCount: pendingSales.length,
+    creditCount: creditSales.length,
+    debtCount: pendingSales.length + creditSales.length,
+    proformaCount: proformaSales.length,
+    canceledCount: cancelledSales.length
   };
   const periodSummary = salesSummary || pageSummary;
 
@@ -446,9 +870,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       ? periodSummary.paidInvoiced
       : faturasFilter === 'Pendente'
         ? periodSummary.pendingInvoiced
-        : 0;
+        : faturasFilter === 'Crédito'
+          ? periodSummary.creditInvoiced
+          : faturasFilter === 'Proforma'
+            ? periodSummary.proformaInvoiced
+            : 0;
   const paidInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Paga' ? periodSummary.paidInvoiced : 0;
   const pendingInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Pendente' ? periodSummary.pendingInvoiced : 0;
+  // O cartão "Pendente (Crédito)" mostra a dívida real: Pendente + Crédito.
+  const debtInvoiced = periodSummary.debtInvoiced;
   const canceledInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Cancelada' ? periodSummary.canceledInvoiced : 0;
   const activeQueryCount = faturasFilter === 'Todas'
     ? periodSummary.totalCount
@@ -456,7 +886,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       ? periodSummary.paidCount
       : faturasFilter === 'Pendente'
         ? periodSummary.pendingCount
-        : periodSummary.canceledCount;
+        : faturasFilter === 'Crédito'
+          ? periodSummary.creditCount
+          : faturasFilter === 'Proforma'
+            ? periodSummary.proformaCount
+            : periodSummary.canceledCount;
 
   const getSalesForExport = async () => {
     const allSales = await dbService.getSalesForPeriod(getCurrentSalesQuery());
@@ -470,13 +904,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       const exportSales = await getSalesForExport();
       const data = exportSales.map(sale => ({
         'Nº Factura': sale.invoiceNumber,
+        // Um NUIT inventado num relatório fiscal é pior do que um campo vazio (FT-47).
+        'NUIT': sale.customerNuit || '',
         'Data': formatDatePT(sale.date),
         'Cliente': sale.customerName || 'Consumidor Final',
-        'NUIT': sale.customerNuit || '999999999',
+        'Tipo': isProformaSale(sale) ? 'Proforma' : 'Factura definitiva',
         'Operador': sale.operatorName || 'Caixa',
+        'Posto': sale.terminalId || '',
         'Método Pagamento': sale.paymentMethod,
+        'Meio de Liquidação': sale.settledPaymentMethod || '',
+        'Subtotal (MT)': sale.subtotal,
+        'Desconto (MT)': sale.discount,
+        'IVA (MT)': sale.includeIva ? (sale.ivaAmount ?? sumTaxAmount(sale.items || [], [])) : 0,
         'Total (MT)': sale.total,
-        'Estado': sale.status
+        'Estado': saleStatusLabel(sale),
+        'Nº Recibo': sale.receiptNumber || '',
+        'Nº Nota de Crédito': sale.creditNoteNumber || '',
+        'Data Liquidação': sale.paidAt ? new Date(sale.paidAt).toLocaleString('pt-MZ') : ''
       }));
       const ws = XLSX.utils.json_to_sheet(data);
       const wb = XLSX.utils.book_new();
@@ -496,12 +940,14 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     setIsExporting(true);
     try {
       const exportSales = await getSalesForExport();
+      // Proformas não são facturação e canceladas não são receita: o mapa
+      // somava as proformas e contradizia o ecrã (FT-46).
       const exportTotal = exportSales
-        .filter(sale => sale.status !== 'Cancelada')
-        .reduce((sum, sale) => sum + sale.total, 0);
+        .filter(isFinancialSale)
+        .reduce((sum, sale) => sum + (Number(sale.total) || 0), 0);
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-      const nuit = settings?.companyNuit || '401976590';
+      const nuit = companyNuit(settings?.companyNuit);
 
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
@@ -512,7 +958,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
       doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
-      doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${exportTotal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 15, 29);
+      doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${exportTotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 15, 29);
 
       doc.setDrawColor(0, 106, 78);
       doc.line(15, 33, 195, 33);
@@ -535,7 +981,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         doc.text(formatDatePT(sale.date), 45, y);
         doc.text((sale.customerName || 'Consumidor Final').substring(0, 25), 75, y);
         doc.text((sale.paymentMethod || '').substring(0, 12), 130, y);
-        doc.text(sale.total.toLocaleString('pt-PT', { minimumFractionDigits: 2 }), 160, y);
+        doc.text(sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2 }), 160, y);
         doc.text(sale.status || '', 185, y);
         y += 6;
       });
@@ -550,39 +996,50 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     }
   };
 
-  return (
-    <div className="space-y-6" id="faturas_module_container">
-      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
+  // IVA do documento: o valor gravado manda; se não existir (vendas antigas),
+  // calcula-se pelas taxas das linhas em vez de assumir 16 % cego (FT-57).
+  const previewIva = invoiceToPrint
+    ? Number(invoiceToPrint.ivaAmount ?? sumTaxAmount(invoiceToPrint.items || [], []))
+    : 0;
 
-      {/* Module Title */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
-        <h2 className="text-xl font-black text-slate-800 flex items-center gap-2">
-          <span className="material-symbols-outlined text-emerald-600">receipt_long</span>
+  return (
+    <div className="space-y-2.5" id="faturas_module_container">
+      {/* Toast Notification Banner */}
+      {toastMessage && (
+        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
+          toastType === 'success'
+            ? 'bg-emerald-600 text-white border-emerald-700'
+            : toastType === 'warning'
+              ? 'bg-amber-500 text-slate-950 border-amber-600'
+              : 'bg-red-600 text-white border-red-700'
+        }`}>
+          <span className="material-symbols-outlined">
+            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
+          </span>
+          <span className="text-sm font-semibold">{toastMessage}</span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-emerald-600 text-[18px]">receipt_long</span>
           Gestão de Facturas
         </h2>
-
-        <button
-          type="button"
-          onClick={() => setShowCutoffTool(true)}
-          className="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-[11px] rounded-xl flex items-center gap-1.5 shadow-md cursor-pointer self-start md:self-auto"
-          title="Anular em bloco as vendas de um dia (contagem física lançada depois das vendas) ou corrigir o stock sem anular facturas"
-        >
-          <span className="material-symbols-outlined text-[16px]">content_cut</span>
-          Corte de Inventário
-        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-slate-400">
+            {isLoadingSales ? 'A actualizar…' : `${sales.length} de ${activeQueryCount} factura(s)`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCutoffTool(true)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[10.5px] font-black transition-colors"
+            title="Corte de inventário: anular vendas do período ou descontar do stock as vendas feitas depois da contagem"
+          >
+            <span className="material-symbols-outlined text-[14px]">content_cut</span>
+            Corte de Inventário
+          </button>
+        </div>
       </div>
-
-      {/* Ferramenta de anulação em massa / correcção de stock por corte de inventário */}
-      <InventoryCutoffTool
-        isOpen={showCutoffTool}
-        onClose={() => setShowCutoffTool(false)}
-        currentUser={currentUser ? { username: currentUser.username, role: currentUser.role } : null}
-        onCompleted={() => {
-          loadData();
-          showToast('Corte de inventário aplicado. Dados actualizados.', 'success');
-        }}
-      />
 
       {/* Date Range Filter */}
       <DateRangeFilter
@@ -598,101 +1055,133 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         onExportExcel={handleExportInvoicesExcel}
       />
 
+      {/* Dívidas: prazo e atraso — fora dos totais de faturação */}
+      {debtSummary.openCount > 0 && (
+        <div
+          className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-3 ${
+            debtSummary.overdueCount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'
+          }`}
+        >
+          <p className={`text-[11px] font-bold ${debtSummary.overdueCount > 0 ? 'text-rose-800' : 'text-amber-800'}`}>
+            <span className="material-symbols-outlined text-[14px] align-middle mr-1">schedule</span>
+            {debtSummary.openCount} factura(s) em dívida · {debtSummary.openValue.toFixed(2)} MT
+            {debtSummary.overdueCount > 0 && (
+              <span className="ml-2 font-black text-rose-700">
+                {debtSummary.overdueCount} vencida(s): {debtSummary.overdueValue.toFixed(2)} MT
+              </span>
+            )}
+          </p>
+          <span className="text-[9.5px] text-slate-500 shrink-0">Liquidação parcial disponível no botão «Pagar»</span>
+        </div>
+      )}
+
       {/* Invoice Dashboard Header Summary cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">payments</span>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">payments</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Facturado</p>
-            <p className="text-lg font-black text-slate-800 truncate font-mono mt-0.5">
-              {totalInvoiced.toLocaleString()} MT
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Total Facturado</p>
+            <p className="text-[13px] font-black text-slate-800 truncate font-mono leading-tight">
+              {totalInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">check_circle</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">check_circle</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Pago (Liquidado)</p>
-            <p className="text-lg font-black text-emerald-700 truncate font-mono mt-0.5">
-              {paidInvoiced.toLocaleString()} MT
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Total Pago (Liquidado)</p>
+            <p className="text-[13px] font-black text-emerald-700 truncate font-mono leading-tight">
+              {paidInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">hourglass_empty</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">hourglass_empty</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Pendente (Crédito)</p>
-            <p className="text-lg font-black text-amber-700 truncate font-mono mt-0.5">
-              {pendingInvoiced.toLocaleString()} MT
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Em dívida (Pendente + Crédito)</p>
+            <p className="text-[13px] font-black text-amber-700 truncate font-mono leading-tight">
+              {debtInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-red-50 border border-red-100 flex items-center justify-center text-red-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">cancel</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-red-50 border border-red-100 flex items-center justify-center text-red-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">cancel</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Cancelado</p>
-            <p className="text-lg font-black text-red-700 truncate font-mono mt-0.5">
-              {canceledInvoiced.toLocaleString()} MT
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Cancelado</p>
+            <p className="text-[13px] font-black text-red-700 truncate font-mono leading-tight">
+              {canceledInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
       </div>
 
+      {/* Totais só da página quando a agregação falha (FT-01). */}
+      {!salesSummary && !isLoadingSales && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-900 flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-[13px]">warning</span>
+          <span>Totais só desta página — a soma do período não está disponível. Confirme pela exportação.</span>
+        </div>
+      )}
+
       {/* Main Filter and Invoice Grid Search area */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
-        <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
+      <div className="bg-white border border-slate-200 rounded-xl p-2.5 shadow-sm space-y-2">
+        <div className="flex flex-col lg:flex-row gap-2 items-center justify-between">
           {/* Quick filter status tabs */}
-          <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold w-full lg:w-auto custom-scrollbar">
-            {(['Todas', 'Pendente', 'Paga', 'Cancelada'] as const).map(tab => {
+          <div className="flex gap-1 overflow-x-auto text-[10.5px] font-bold w-full lg:w-auto custom-scrollbar">
+            {(['Todas', 'Pendente', 'Crédito', 'Paga', 'Proforma', 'Cancelada'] as const).map(tab => {
               const count = tab === 'Todas'
                 ? periodSummary.totalCount
                 : tab === 'Paga'
                   ? periodSummary.paidCount
                   : tab === 'Pendente'
                     ? periodSummary.pendingCount
-                    : periodSummary.canceledCount;
+                    : tab === 'Crédito'
+                      ? periodSummary.creditCount
+                      : tab === 'Proforma'
+                        ? periodSummary.proformaCount
+                        : periodSummary.canceledCount;
               return (
                 <button
                   key={tab}
                   type="button"
                   onClick={() => setFaturasFilter(tab)}
-                  className={`px-3 py-1.5 rounded-lg border transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md border transition-colors whitespace-nowrap cursor-pointer ${
                     faturasFilter === tab
                       ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
                       : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
                   }`}
                 >
-                  {tab === 'Todas' ? 'Todas' : tab === 'Pendente' ? 'Pendentes' : tab === 'Paga' ? 'Pagas' : 'Canceladas'} ({count})
+                  {tab === 'Todas' ? 'Todas' : tab === 'Pendente' ? 'Pendentes' : tab === 'Crédito' ? 'A Crédito' : tab === 'Paga' ? 'Pagas' : tab === 'Proforma' ? 'Proformas' : 'Canceladas'} ({count})
                 </button>
               );
             })}
           </div>
 
           {/* Search bar inputs */}
-          <div className="relative w-full lg:max-w-md">
-            <span className="material-symbols-outlined absolute left-3 top-2.5 text-slate-400 text-[20px]">search</span>
+          <div className="relative w-full lg:max-w-xs">
+            <span className="material-symbols-outlined absolute left-2 top-2 text-slate-400 text-[15px]">search</span>
             <input
               type="text"
               placeholder="Pesquise por Número de Factura ou Nome do Cliente..."
               value={faturasSearch}
               onChange={(e) => setFaturasSearch(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-slate-800"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-[11px] focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-slate-800"
             />
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[9.5px] text-slate-500">
           <span>
             {isLoadingSales
               ? 'A atualizar facturas…'
@@ -706,17 +1195,17 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
 
         {/* Detailed Scrollable Invoices Table/Grid */}
-        <div className="overflow-x-auto border border-slate-150 rounded-xl">
-          <table className="w-full text-left border-collapse text-[10.5px]">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-150 text-slate-500 uppercase text-[9px] font-black tracking-wider">
-                <th className="p-2">Nº Factura</th>
-                <th className="p-2">Cliente</th>
-                <th className="p-2">Data de Emissão</th>
-                <th className="p-2">Meio de Pagamento</th>
-                <th className="p-2 text-right">Valor Total</th>
-                <th className="p-2 text-center">Estado</th>
-                <th className="p-2 text-right">Acções Operacionais</th>
+        <div className="overflow-auto max-h-[46vh] border border-slate-150 rounded-lg">
+          <table className="w-full text-left border-collapse text-[10px]">
+            <thead className="sticky top-0 z-10 bg-slate-50">
+              <tr className="bg-slate-50 border-b border-slate-150 text-slate-500 uppercase text-[8.5px] font-black tracking-wider">
+                <th className="px-1.5 py-1">Nº Factura</th>
+                <th className="px-1.5 py-1">Cliente</th>
+                <th className="px-1.5 py-1">Data de Emissão</th>
+                <th className="px-1.5 py-1">Meio de Pagamento</th>
+                <th className="px-1.5 py-1 text-right">Valor Total</th>
+                <th className="px-1.5 py-1 text-center">Estado</th>
+                <th className="px-1.5 py-1 text-right">Acções Operacionais</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-150 bg-white">
@@ -727,129 +1216,205 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   </td>
                 </tr>
               ) : (
-                filteredSales.map(sale => {
+                filteredSales.map((sale, rowIdx) => {
                   return (
-                    <tr key={sale.id} className="hover:bg-slate-50/50 transition-colors">
+                    <tr key={sale.id || sale.invoiceNumber || `linha-${rowIdx}`} className="hover:bg-slate-50/50 transition-colors">
                       {/* Invoice Number */}
-                      <td className="p-2 font-mono font-black text-slate-700 text-[10.5px]">{sale.invoiceNumber}</td>
+                      <td className="px-1.5 py-1 font-mono font-black text-slate-700 text-[10px]">{sale.invoiceNumber}</td>
                       
                       {/* Customer Name */}
-                      <td className="p-2">
+                      <td className="px-1.5 py-1">
                         <p className="font-bold text-slate-800 text-[10.5px]">{sale.customerName}</p>
                         <p className="text-[9.5px] text-slate-400">Op: {sale.operatorName}</p>
                       </td>
 
                       {/* Date */}
-                      <td className="p-2 text-slate-500 text-[10px]">
+                      <td className="px-1.5 py-1 text-slate-500 text-[9.5px] whitespace-nowrap">
                         {new Date(sale.date).toLocaleDateString('pt-MZ', { day: '2-digit', month: '2-digit', year: 'numeric' })} • {new Date(sale.date).toLocaleTimeString('pt-MZ', { hour: '2-digit', minute: '2-digit' })}
                       </td>
 
                       {/* Payment Method */}
-                      <td className="p-2">
+                      <td className="px-1.5 py-1">
                         <span className="font-semibold text-slate-600 bg-slate-100 border border-slate-150 px-1.5 py-0.5 rounded text-[9.5px]">
                           {sale.paymentMethod}
                         </span>
                       </td>
 
                       {/* Total Price */}
-                      <td className="p-2 text-right font-black text-slate-900 font-mono text-[11px]">
-                        {sale.total.toLocaleString()} MT
+                      <td className="px-1.5 py-1 text-right font-black text-slate-900 font-mono text-[10.5px] whitespace-nowrap">
+                        {sale.total.toLocaleString('pt-MZ')} MT
                       </td>
 
                       {/* Status Badges */}
-                      <td className="p-2 text-center">
+                      <td className="px-1.5 py-1 text-center">
                         <span className={`text-[8.5px] font-black uppercase px-2 py-0.5 rounded-full border ${
                           sale.status === 'Paga'
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-150'
                             : sale.status === 'Pendente'
                               ? 'bg-amber-50 text-amber-700 border-amber-150'
-                              : 'bg-rose-50 text-rose-700 border-rose-150'
-                        }`}>
-                          {sale.status === 'Paga' ? 'PAGA' : sale.status === 'Pendente' ? 'PENDENTE' : 'CANCELADA'}
+                              : sale.status === 'Crédito'
+                                ? 'bg-orange-50 text-orange-700 border-orange-150'
+                                : sale.status === 'Proforma'
+                                  ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-150'
+                        }`}
+                          title={
+                            sale.status === 'Paga' ? 'Venda paga: o dinheiro entrou.'
+                            : sale.status === 'Pendente' ? 'Documento emitido sem pagamento registado (legado).'
+                            : sale.status === 'Crédito' ? 'Venda a crédito: dívida do cliente, ainda por receber.'
+                            : sale.status === 'Proforma' ? 'Proforma/cotação: não conta como receita nem como dívida.'
+                            : 'Venda cancelada: anulada com nota de crédito.'
+                          }>
+                          {saleStatusLabel(sale)}
                         </span>
+                        {sale.creditNoteNumber && (
+                          <p className="text-[9px] text-rose-600 font-mono mt-0.5" title="Nota de crédito emitida na anulação">
+                            {sale.creditNoteNumber}
+                          </p>
+                        )}
+                        {(() => {
+                          const divida = debtsById[String(sale.id)];
+                          if (!divida || isCancelledSale(sale) || sale.status === 'Paga') return null;
+                          const vista = describeDebt(divida);
+                          if (vista.remaining <= 0) return null;
+                          return (
+                            <p
+                              className={`text-[9px] font-bold mt-0.5 ${
+                                vista.state === 'Vencida' ? 'text-rose-600' : 'text-slate-500'
+                              }`}
+                              title={`Em dívida ${vista.remaining.toFixed(2)} MT · prazo ${new Date(divida.dueDate).toLocaleDateString('pt-MZ')}`}
+                            >
+                              {vista.label}
+                              {vista.paid > 0 ? ` · pago ${vista.paid.toFixed(2)}` : ''}
+                            </p>
+                          );
+                        })()}
                       </td>
 
                       {/* Operations */}
-                      <td className="p-2 text-right">
+                      <td className="px-1.5 py-1 text-right">
                         <div className="flex justify-end gap-1 flex-wrap">
-                          {/* Liquidate payment buttons */}
-                          {sale.status === 'Pendente' && (
+                          {/* Liquidar: só dívida real, nunca proforma ou anulada */}
+                          {isDebtSale(sale) && !isCancelledSale(sale) && (
                             <button
                               type="button"
                               onClick={() => handlePayInvoice(sale)}
                               className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[9.5px] uppercase px-1.5 py-0.5 rounded shadow-2xs flex items-center gap-0.5 cursor-pointer transition-colors"
-                              title="Liquidar / Pagar factura pendente"
+                              title="Liquidar factura: registar o pagamento e emitir recibo"
                             >
                               <span className="material-symbols-outlined text-[11px]">payments</span>
                               Pagar
                             </button>
                           )}
 
-                          {/* Secondary view/print/cancel triggers */}
-                          {sale.status !== 'Cancelada' ? (
+                          {isCancelledSale(sale) ? (
+                            <>
+                              {sale.creditNoteNumber && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void runPostCommitTask({
+                                      label: 'gerar a nota de crédito',
+                                      task: () => downloadCreditNoteA4({ ...sale, items: sale.items || [] }, resolveSettings())
+                                    })
+                                  }
+                                  className="bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 font-bold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors"
+                                  title={`Reimprimir a nota de crédito ${sale.creditNoteNumber}`}
+                                >
+                                  Nota de Crédito
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => openPreview(sale, 'A4')}
+                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                title="Ver a factura anulada (sai marcada como ANULADA)"
+                              >
+                                Ver Factura
+                              </button>
+                              {(!sale.documentType || sale.documentType === 'FaturaDefinitiva') && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRestoreInvoice(sale)}
+                                  className="bg-blue-50 border border-blue-100 hover:bg-blue-100 text-blue-600 font-bold text-[9.5px] uppercase px-2 py-0.5 rounded cursor-pointer transition-colors"
+                                  title="Emitir uma factura nova com o mesmo conteúdo e número novo. A factura anulada mantém-se no histórico."
+                                >
+                                  Reemitir
+                                </button>
+                              )}
+                            </>
+                          ) : (
                             <>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('A4');
-                                }}
+                                onClick={() => openPreview(sale, 'A4')}
                                 className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Fatura A4"
+                                title="Visualizar e imprimir Factura A4"
                               >
                                 Fatura A4
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('Proforma');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Fatura Proforma A4"
-                              >
-                                F. Proforma
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('Thermal');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Recibo POS"
-                              >
-                                POS
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('ReciboA4');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Recibo A4"
-                              >
-                                Recibo A4
-                              </button>
+                              {isProformaSale(sale) && !sale.convertedToInvoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleIssueInvoiceFromProforma(sale)}
+                                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[9.5px] uppercase px-1.5 py-0.5 rounded cursor-pointer transition-colors"
+                                  title="Emitir a factura definitiva a partir desta proforma (número novo, stock deduzido)"
+                                >
+                                  Emitir Factura
+                                </button>
+                              )}
+                              {isProformaSale(sale) && sale.convertedToInvoice && (
+                                <span
+                                  className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 font-mono"
+                                  title="Proforma já convertida numa factura definitiva"
+                                >
+                                  → {sale.convertedToInvoice}
+                                </span>
+                              )}
+                              {/* Proforma só se reimprime em facturas que são proformas.
+                                  Antes, qualquer factura definitiva podia sair com o
+                                  mesmo número e o título "FACTURA PROFORMA" (FT-54). */}
+                              {isProformaSale(sale) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openPreview(sale, 'Proforma')}
+                                  className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                  title="Visualizar e imprimir Factura Proforma (documento sem efeito fiscal)"
+                                >
+                                  F. Proforma
+                                </button>
+                              )}
+                              {/* Recibo só de factura liquidada: um recibo de uma dívida
+                                  é prova de um pagamento que não houve (FT-67). */}
+                              {isSettledSale(sale) && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openPreview(sale, 'Thermal')}
+                                    className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                    title="Visualizar e imprimir Recibo POS"
+                                  >
+                                    POS
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openPreview(sale, 'ReciboA4')}
+                                    className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                    title="Visualizar e imprimir Recibo A4"
+                                  >
+                                    Recibo A4
+                                  </button>
+                                </>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleCancelInvoice(sale)}
                                 className="bg-rose-50 border border-rose-100 hover:bg-rose-100 text-rose-600 font-bold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors"
-                                title="Cancelar Factura definitivamente"
+                                title="Anular a factura: emite nota de crédito e devolve o stock"
                               >
                                 Cancelar
                               </button>
                             </>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleRestoreInvoice(sale)}
-                              className="bg-blue-50 border border-blue-100 hover:bg-blue-100 text-blue-600 font-bold text-[9.5px] uppercase px-2 py-0.5 rounded cursor-pointer transition-colors"
-                              title="Restaurar Factura Cancelada de volta a Pendente"
-                            >
-                              Restaurar
-                            </button>
                           )}
                         </div>
                       </td>
@@ -861,16 +1426,16 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           </table>
         </div>
 
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
-          <p className="text-[10px] text-slate-400 text-center sm:text-left">
-            A lista é carregada por páginas de 30 facturas. Os totais e contagens acima referem-se ao período completo.
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+          <p className="text-[9px] text-slate-400">
+            30 facturas por página · totais do período completo
           </p>
           {hasMoreSales && (
             <button
               type="button"
               onClick={() => void loadMoreSales()}
               disabled={isLoadingSales}
-              className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-wait border border-emerald-200 text-emerald-800 rounded-lg text-xs font-black transition-colors"
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-wait border border-emerald-200 text-emerald-800 rounded-lg text-[10px] font-black transition-colors"
             >
               <span className={`material-symbols-outlined text-[16px] ${isLoadingSales ? 'animate-spin' : ''}`}>expand_more</span>
               {isLoadingSales ? 'A carregar…' : 'Carregar mais facturas'}
@@ -887,20 +1452,38 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             <div className="bg-slate-900 p-4 border-b border-slate-800 flex justify-between items-center text-white">
               <span className="font-bold flex items-center gap-2 text-sm uppercase tracking-wide">
                 <span className="material-symbols-outlined text-emerald-500">print</span>
-                Visualização de Emissão de Fatura / Recibo
+                {isCancelledSale(invoiceToPrint)
+                  ? 'Documento ANULADO — via de arquivo'
+                  : printType === 'ReciboA4' || printType === 'Thermal'
+                    ? 'Recibo de liquidação'
+                    : 'Visualização de emissão'}
               </span>
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as any;
+                    const s = resolveSettings();
+                    const isCancelled = isCancelledSale(invoiceToPrint);
                     if (printType === 'Thermal') {
                       downloadThermalReceipt(invoiceToPrint, s);
                     } else if (printType === 'A4') {
-                      downloadInvoiceA4(invoiceToPrint, s, false, invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA');
+                      downloadInvoiceA4(
+                        invoiceToPrint,
+                        s,
+                        false,
+                        isCancelled
+                          ? 'FACTURA ANULADA'
+                          : isProformaSale(invoiceToPrint)
+                            ? 'FACTURA PROFORMA'
+                            : invoiceToPrint.paymentMethod === 'Crédito'
+                              ? 'FACTURA A CRÉDITO'
+                              : 'FACTURA DEFINITIVA'
+                      );
                     } else if (printType === 'Proforma') {
                       downloadInvoiceA4(invoiceToPrint, s, false, 'FACTURA PROFORMA');
                     } else if (printType === 'ReciboA4') {
-                      downloadInvoiceA4(invoiceToPrint, s, true);
+                      // Um único gerador de recibos A4: o da liquidação e o da
+                      // reimpressão têm de sair iguais (FT-66).
+                      downloadReceiptA4(invoiceToPrint, s);
                     } else if (printType === 'DoubleA5') {
                       downloadDuplicatedInvoiceA4(invoiceToPrint, s);
                     }
@@ -923,6 +1506,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             </div>
 
             {/* Document Layouts */}
+            {isCancelledSale(invoiceToPrint) && (
+              <div className="bg-rose-600 text-white text-center text-[11px] font-black uppercase tracking-widest py-1.5">
+                Factura anulada{invoiceToPrint.creditNoteNumber ? ` — nota de crédito ${invoiceToPrint.creditNoteNumber}` : ''} · este documento não tem valor fiscal
+              </div>
+            )}
+
             <div className="p-8 bg-slate-100 flex justify-center custom-scrollbar overflow-y-auto max-h-[650px]">
               
               {/* 1. Standard A4 Commercial Invoice Layout */}
@@ -952,21 +1541,25 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                   )}
                                   <h2 className="text-lg font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS,EI'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600 text-[10px]">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                                  <p className="text-gray-600 text-[10px]">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                                   <div className="text-[10px] text-gray-600 space-y-0.5 mt-1 border-t border-gray-100 pt-1">
                                     {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                                     <p><strong>Contacto:</strong> {[settings?.vodacom1, settings?.movitel1].filter(Boolean).join(' / ') || '84 94 23 241'}</p>
                                   </div>
                                 </div>
                                 <div className="text-right">
-                                  <div className="bg-emerald-800 text-white px-5 py-2 rounded text-sm font-black uppercase tracking-wider shadow-sm">
-                                    {printType === 'Proforma' 
-                                      ? 'FACTURA PROFORMA' 
-                                      : (invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA')}
+                                  <div className={`${isCancelledSale(invoiceToPrint) ? 'bg-rose-700' : 'bg-emerald-800'} text-white px-5 py-2 rounded text-sm font-black uppercase tracking-wider shadow-sm`}>
+                                    {isCancelledSale(invoiceToPrint)
+                                      ? 'FACTURA ANULADA'
+                                      : printType === 'Proforma' || isProformaSale(invoiceToPrint)
+                                        ? 'FACTURA PROFORMA'
+                                        : (invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA')}
                                   </div>
                                   <p className="text-gray-700 mt-2 font-mono font-bold text-xs">Nº: {invoiceToPrint.invoiceNumber}</p>
                                   <p className="text-gray-500 font-mono text-[10px]">Emissão: {new Date(invoiceToPrint.date).toLocaleString('pt-MZ')}</p>
-                                  <p className="text-gray-500 text-[10px] mt-0.5">Forma de Pagamento: Transferência Bancária</p>
+                                  <p className="text-gray-500 text-[10px] mt-0.5">
+                                    Forma de Pagamento: {invoiceToPrint.settledPaymentMethod || invoiceToPrint.paymentMethod || 'Não indicada'}
+                                  </p>
                                 </div>
                               </div>
                             ) : (
@@ -991,8 +1584,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                 </div>
                                 <div className="text-right space-y-1">
                                   <p className="text-[10px] font-black uppercase text-gray-400 tracking-wider mb-1">OPERADOR:</p>
-                                  <p className="font-bold text-gray-800">{invoiceToPrint.operatorName || 'Mazive'}</p>
-                                  <p className="text-gray-500 text-[10px]">Sessão Offline Validada</p>
+                                  <p className="font-bold text-gray-800">{invoiceToPrint.operatorName || 'Operador'}</p>
+                                  <p className="text-gray-500 text-[10px]">
+                                    {invoiceToPrint.terminalId ? `Posto: ${invoiceToPrint.terminalId}` : 'Posto não registado'}
+                                  </p>
                                 </div>
                               </div>
                             )}
@@ -1009,7 +1604,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className={idx % 2 === 1 ? "bg-slate-50/50" : "bg-white"}>
+                                  <tr key={item.productId || item.name || idx} className={idx % 2 === 1 ? "bg-slate-50/50" : "bg-white"}>
                                     <td className="p-2.5 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-2.5 text-right font-mono text-blue-700 font-bold">{item.quantity}</td>
                                     <td className="p-2.5 text-gray-600">{item.unit || 'UN'}</td>
@@ -1046,7 +1641,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     </div>
                                     <div className="flex justify-between text-gray-600">
                                       <span>IVA:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.includeIva ? `${(invoiceToPrint.ivaAmount || 0).toLocaleString('pt-MZ')} MT` : 'IVA INCLUSO'}</span>
+                                      <span className="font-bold font-mono">
+                                        {invoiceToPrint.includeIva
+                                          ? `${previewIva.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT`
+                                          : 'Isento'}
+                                      </span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-emerald-800 border-t border-gray-300 pt-1.5">
                                       <span>Total Líquido:</span>
@@ -1060,7 +1659,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS,EI'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'} • Email: {settings?.email || 'agroxicomo1@gmail.com'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)} • Email: {settings?.email || 'agroxicomo1@gmail.com'}
                                   </p>
                                   <p className="text-[8px] text-gray-400 uppercase tracking-widest pt-1">
                                     Processado por Computador • Impresso via AgroGestão ERP
@@ -1108,7 +1707,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                   )}
                                   <h2 className="text-xl font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold mt-1">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                                 </div>
                                 
                                 <div className="text-right space-y-1.5">
@@ -1116,7 +1715,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     RECIBO
                                   </div>
                                   <p className="text-gray-700 font-bold font-mono text-sm pt-2">
-                                    Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-') : `Rec-${new Date().getFullYear()}-${invoiceToPrint.invoiceNumber}`)}
+                                    Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}
                                   </p>
                                   <p className="text-gray-500 font-medium text-[10px]">
                                     Referente à Fatura Nº: <span className="font-bold font-mono text-gray-800">{invoiceToPrint.invoiceNumber}</span>
@@ -1161,12 +1760,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className="hover:bg-gray-50">
+                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                                     <td className="p-3 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-3 text-right font-mono">{item.quantity}</td>
                                     <td className="p-3 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                                    <td className="p-3 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-3 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -1178,20 +1777,20 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               <>
                                 <div className="flex justify-between items-center border-t border-gray-200 pt-6 mb-8">
                                   <div className="text-[11px] text-gray-500 italic max-w-lg leading-relaxed">
-                                    *Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.
+                                    {settlementDisclaimer(invoiceToPrint)}
                                   </div>
                                   <div className="w-64 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-emerald-700 font-mono text-base">{invoiceToPrint.total.toLocaleString()} MT</span>
+                                      <span className="text-emerald-700 font-mono text-base">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                   </div>
                                 </div>
@@ -1201,13 +1800,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
                                   </p>
                                 </div>
                               </>
                             ) : (
                               <div className="border-t border-gray-200 pt-4 flex justify-between items-center text-[10px] text-gray-400 italic">
-                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-') : invoiceToPrint.invoiceNumber)}</span>
+                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</span>
                                 <span className="font-semibold text-emerald-700">Continua na página seguinte... (Pág {pageIdx + 1} de {chunks.length})</span>
                               </div>
                             )}
@@ -1228,7 +1827,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <img src={settings.logoUrl} alt="Logo" className="max-h-10 object-contain bg-white mx-auto mb-1 block" />
                     ) : null}
                     <h3 className="text-[11px] font-black uppercase tracking-wide">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h3>
-                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                     <div className="text-[8px] text-gray-600 space-y-0.5">
                       {settings?.email && <p>Email: {settings.email}</p>}
                       <p>Vodacom: {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
@@ -1238,7 +1837,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                   {/* Document Title Bar */}
                   <div className="border-y-2 border-double border-gray-400 py-1.5 text-center font-black uppercase text-[10px] tracking-wider text-gray-900 bg-gray-50/50">
-                    Recibo de Pagamento POS
+                    {isSettledSale(invoiceToPrint) ? 'Recibo de Pagamento POS' : 'Comprovativo de Venda'}
                   </div>
 
                   {/* Metadata */}
@@ -1276,8 +1875,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                         <div key={idx} className="space-y-0.5">
                           <div className="font-bold text-gray-900 uppercase text-[8.5px] leading-tight">{item.name}</div>
                           <div className="flex justify-between text-[8px] text-gray-600 font-mono">
-                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
-                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                           </div>
                         </div>
                       ))}
@@ -1291,26 +1890,26 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   <div className="space-y-1 text-[8.5px]">
                     <div className="flex justify-between">
                       <span>SUBTOTAL:</span>
-                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
                     
                     {invoiceToPrint.discount > 0 && (
                       <div className="flex justify-between text-red-600">
                         <span>DESCONTO:</span>
-                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
-                        <span>IVA INCLUÍDO (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total * 0.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span>IVA:</span>
+                        <span className="font-mono">{previewIva.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
                     <div className="flex justify-between font-black text-[11px] border-t border-dashed border-gray-400 pt-1.5 mt-1 text-black">
-                      <span>TOTAL PAGO:</span>
-                      <span className="font-mono">{invoiceToPrint.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span>{isSettledSale(invoiceToPrint) ? 'TOTAL PAGO:' : 'TOTAL EM DÍVIDA:'}</span>
+                      <span className="font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
 
                     <div className="flex justify-between text-[8px] text-gray-700 pt-0.5 border-t border-dotted border-gray-300 mt-1">
@@ -1341,7 +1940,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="flex justify-between items-start pb-4 mb-4 border-b border-gray-200">
                         <div className="space-y-0.5">
                           <h2 className="text-sm font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
-                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                         </div>
                         <div className="text-right">
                           <div className="bg-slate-100 text-slate-800 px-3 py-1 rounded text-xs font-black uppercase">
@@ -1367,19 +1966,19 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <table className="w-full text-left text-[9px] mb-4">
                         <thead>
                           <tr className="bg-slate-800 text-white font-bold">
-                            <th className="p-2">Item</th>
-                            <th className="p-2 text-right">Qtd</th>
-                            <th className="p-2 text-right">P. Unitário</th>
-                            <th className="p-2 text-right">Total</th>
+                            <th className="px-1.5 py-1">Item</th>
+                            <th className="px-1.5 py-1 text-right">Qtd</th>
+                            <th className="px-1.5 py-1 text-right">P. Unitário</th>
+                            <th className="px-1.5 py-1 text-right">Total</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {invoiceToPrint.items.map((item, idx) => (
-                            <tr key={idx} className="hover:bg-gray-50">
+                            <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                               <td className="p-2 font-semibold text-gray-800">{item.name}</td>
                               <td className="p-2 text-right font-mono">{item.quantity}</td>
-                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1391,15 +1990,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="w-48 text-right font-mono text-[9px] space-y-0.5">
                         <div className="flex justify-between">
                           <span>SUBTOTAL:</span>
-                          <span>{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between text-red-500">
                           <span>DESCONTO:</span>
-                          <span>-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                          <span>-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between font-black text-xs text-slate-800 border-t border-gray-200 pt-1">
                           <span>TOTAL GERAL:</span>
-                          <span>{invoiceToPrint.total.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                         </div>
                       </div>
                     </div>
@@ -1412,7 +2011,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="flex justify-between items-start pb-4 mb-4 border-b border-gray-200">
                         <div className="space-y-0.5">
                           <h2 className="text-sm font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
-                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                         </div>
                         <div className="text-right">
                           <div className="bg-slate-100 text-slate-800 px-3 py-1 rounded text-xs font-black uppercase">
@@ -1438,19 +2037,19 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <table className="w-full text-left text-[9px] mb-4">
                         <thead>
                           <tr className="bg-slate-800 text-white font-bold">
-                            <th className="p-2">Item</th>
-                            <th className="p-2 text-right">Qtd</th>
-                            <th className="p-2 text-right">P. Unitário</th>
-                            <th className="p-2 text-right">Total</th>
+                            <th className="px-1.5 py-1">Item</th>
+                            <th className="px-1.5 py-1 text-right">Qtd</th>
+                            <th className="px-1.5 py-1 text-right">P. Unitário</th>
+                            <th className="px-1.5 py-1 text-right">Total</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {invoiceToPrint.items.map((item, idx) => (
-                            <tr key={idx} className="hover:bg-gray-50">
+                            <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                               <td className="p-2 font-semibold text-gray-800">{item.name}</td>
                               <td className="p-2 text-right font-mono">{item.quantity}</td>
-                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1462,15 +2061,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="w-48 text-right font-mono text-[9px] space-y-0.5">
                         <div className="flex justify-between">
                           <span>SUBTOTAL:</span>
-                          <span>{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between text-red-500">
                           <span>DESCONTO:</span>
-                          <span>-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                          <span>-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between font-black text-xs text-slate-800 border-t border-gray-200 pt-1">
                           <span>TOTAL GERAL:</span>
-                          <span>{invoiceToPrint.total.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                         </div>
                       </div>
                     </div>
@@ -1481,6 +2080,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           </div>
         </div>
       )}
+
+      <InventoryCutoffTool
+        isOpen={showCutoffTool}
+        onClose={() => setShowCutoffTool(false)}
+        currentUser={currentUser || null}
+        onCompleted={() => { void loadData(false); }}
+      />
 
       {/* Custom Confirmation Modal */}
       {confirmModal?.show && (
@@ -1520,35 +2126,66 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
       )}
 
-      {/* Security Action Validation Modal (Anulação / Restauração protegidas por senha de gestor) */}
+      {/* Modal de acção: liquidação (sem senha), anulação e reemissão (com senha) */}
       {securityModal.show && securityModal.sale && (
         <div className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden border border-gray-200">
             <div className={`p-3.5 text-white font-bold flex justify-between items-center ${
-              securityModal.action === 'cancel' ? 'bg-gradient-to-r from-red-600 to-red-700' : 'bg-gradient-to-r from-blue-600 to-blue-700'
+              securityModal.action === 'cancel'
+                ? 'bg-gradient-to-r from-red-600 to-red-700'
+                : securityModal.action === 'pay'
+                  ? 'bg-gradient-to-r from-emerald-600 to-emerald-700'
+                  : 'bg-gradient-to-r from-blue-600 to-blue-700'
             }`}>
               <span className="flex items-center gap-2 text-sm">
-                <span className="material-symbols-outlined text-[18px]">gpp_maybe</span>
-                {securityModal.action === 'cancel' ? 'Anular Venda' : 'Restaurar Venda'}
+                <span className="material-symbols-outlined text-[18px]">
+                  {securityModal.action === 'pay' ? 'payments' : 'gpp_maybe'}
+                </span>
+                {securityModal.action === 'cancel'
+                  ? 'Anular Factura'
+                  : securityModal.action === 'pay'
+                    ? 'Registar Pagamento'
+                    : 'Reemitir Factura'}
               </span>
-              <button onClick={() => setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' })} className="text-white hover:opacity-80 cursor-pointer">
+              <button
+                onClick={() => setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' })}
+                className="text-white hover:opacity-80 cursor-pointer"
+              >
                 <span className="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
-            
+
             <div className="p-4 space-y-3 text-xs">
               <div className={`p-2.5 rounded-lg border text-center ${
-                securityModal.action === 'cancel' ? 'bg-red-50 border-red-200 text-red-900' : 'bg-blue-50 border-blue-200 text-blue-900'
+                securityModal.action === 'cancel'
+                  ? 'bg-red-50 border-red-200 text-red-900'
+                  : securityModal.action === 'pay'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-blue-50 border-blue-200 text-blue-900'
               }`}>
                 <p className="font-bold text-xs">
                   {securityModal.sale.invoiceNumber} • {securityModal.sale.customerName || 'Cliente Geral'}
                 </p>
                 <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
-                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString()} MT</strong>
+                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</strong>
                 </p>
                 {securityModal.action === 'cancel' && (
-                  <p className="text-[10px] text-red-700 mt-1">
-                    O stock será estornado de volta ao inventário.
+                  <p className="text-[10px] text-red-700 mt-1 text-left">
+                    O stock é devolvido ao inventário e é emitida uma nota de crédito com número próprio.
+                    Se o cliente já pagou, diga abaixo se o dinheiro voltou: sem esse registo, o caixa fecha com falta.
+                  </p>
+                )}
+                {securityModal.action === 'restore' && (
+                  <p className="text-[10px] text-blue-700 mt-1 text-left">
+                    A factura anulada <strong>não volta a viver</strong>. É emitida uma factura nova, com número novo e
+                    estado Pendente, e o stock é deduzido outra vez. A factura anulada e a nota de crédito ficam no
+                    histórico.
+                  </p>
+                )}
+                {securityModal.action === 'pay' && (
+                  <p className="text-[10px] text-emerald-700 mt-1 text-left">
+                    O recibo é numerado e emitido ao confirmar. Se outra pessoa liquidar a mesma factura ao mesmo
+                    tempo, o sistema recusa a segunda operação em vez de duplicar o recibo.
                   </p>
                 )}
               </div>
@@ -1559,33 +2196,136 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 </div>
               )}
 
-              <div className="space-y-1">
-                <label className="block text-[10px] font-black uppercase text-gray-500">
-                  Senha de Autorização
-                </label>
-                <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} autoComplete="off" noValidate>
-                  <input
-                    type="password"
-                    name="sec_mgr_pass_input"
-                    id="sec_mgr_pass_input"
-                    autoComplete="new-password"
-                    spellCheck={false}
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    data-lpignore="true"
-                    data-form-type="other"
-                    aria-autocomplete="none"
-                    placeholder="Código de Gestor / Técnico"
-                    value={securityModal.password}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setSecurityModal(prev => ({ ...prev, password: val, error: '' }));
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                    autoFocus
-                  />
+              {securityModal.action === 'pay' ? (
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black uppercase text-gray-500">
+                    Como entrou o dinheiro?
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {PAYMENT_METHODS.map(method => (
+                      <button
+                        key={method}
+                        type="button"
+                        onClick={() => setSecurityModal(prev => ({ ...prev, paymentMethod: method, error: '' }))}
+                        className={`px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors ${
+                          (securityModal.paymentMethod || 'Dinheiro') === method
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        {method}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Cobrança parcial: o valor em falta vem preenchido. */}
+                  <label className="block text-[10px] font-black uppercase text-gray-500 pt-1">
+                    Valor a receber agora
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={securityModal.payAmount ?? ''}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, payAmount: e.target.value, error: '' }))}
+                      className="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <span className="text-[11px] font-bold text-gray-500">MT</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    Em falta:{' '}
+                    <strong className="text-slate-700">
+                      {Math.max(0, (Number(securityModal.sale.total) || 0) - (Number(securityModal.sale.amountPaid) || 0)).toFixed(2)} MT
+                    </strong>
+                    {' · '}um valor menor regista uma <strong>cobrança parcial</strong> e emite recibo na mesma.
+                  </p>
+                </div>
+              ) : securityModal.action === 'cancel' && canRefund(securityModal.sale) ? (
+                <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(securityModal.refund)}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, refund: e.target.checked, error: '' }))}
+                      className="mt-0.5 w-4 h-4 accent-amber-600 cursor-pointer"
+                    />
+                    <span className="text-[11px] font-bold text-amber-900 leading-tight">
+                      Devolvi dinheiro ao cliente
+                      <span className="block font-normal text-[10px] text-amber-700">
+                        Máximo devolvível: {maxRefundFor(securityModal.sale).toFixed(2)} MT
+                        {securityModal.sale.receiptNumber ? ` • recibo ${securityModal.sale.receiptNumber}` : ''}
+                      </span>
+                    </span>
+                  </label>
+
+                  {securityModal.refund && (
+                    <div className="grid grid-cols-[1fr_auto] gap-1.5">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={securityModal.refundAmount || ''}
+                        onChange={(e) => setSecurityModal(prev => ({ ...prev, refundAmount: e.target.value, error: '' }))}
+                        placeholder="Valor devolvido"
+                        className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                      <select
+                        value={securityModal.refundMethod || 'Dinheiro'}
+                        onChange={(e) => setSecurityModal(prev => ({ ...prev, refundMethod: e.target.value }))}
+                        className="border border-gray-300 rounded-lg px-2 py-1.5 text-[11px] font-bold bg-white focus:outline-none"
+                      >
+                        <option>Dinheiro</option>
+                        <option>Transferência</option>
+                        <option>M-Pesa</option>
+                        <option>E-Mola</option>
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-black uppercase text-gray-500">
+                      Senha do Gestor (autoriza a anulação e a devolução)
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      placeholder="Palavra-passe de gestor"
+                      value={securityModal.password}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, password: e.target.value, error: '' }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                      autoFocus
+                    />
+                  </div>
                 </form>
-              </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black uppercase text-gray-500">
+                    Senha de Autorização
+                  </label>
+                  <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} autoComplete="off" noValidate>
+                    <input
+                      type="password"
+                      name="sec_mgr_pass_input"
+                      id="sec_mgr_pass_input"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      data-lpignore="true"
+                      data-form-type="other"
+                      aria-autocomplete="none"
+                      placeholder="Palavra-passe de gestor"
+                      value={securityModal.password}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSecurityModal(prev => ({ ...prev, password: val, error: '' }));
+                      }}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                      autoFocus
+                    />
+                  </form>
+                </div>
+              )}
 
               <div className="flex gap-2 justify-end pt-2 border-t border-gray-100">
                 <button
@@ -1598,11 +2338,22 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 <button
                   type="button"
                   onClick={handleExecuteSecurityAction}
-                  className={`px-3.5 py-1.5 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer text-xs ${
-                    securityModal.action === 'cancel' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+                  disabled={isProcessing}
+                  className={`px-3.5 py-1.5 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer text-xs disabled:opacity-60 disabled:cursor-wait ${
+                    securityModal.action === 'cancel'
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : securityModal.action === 'pay'
+                        ? 'bg-emerald-600 hover:bg-emerald-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
                   }`}
                 >
-                  {securityModal.action === 'cancel' ? 'Confirmar Anulação' : 'Confirmar Restauração'}
+                  {isProcessing
+                    ? 'A processar…'
+                    : securityModal.action === 'cancel'
+                      ? 'Confirmar Anulação'
+                      : securityModal.action === 'pay'
+                        ? 'Confirmar Recebimento'
+                        : 'Confirmar Reemissão'}
                 </button>
               </div>
             </div>

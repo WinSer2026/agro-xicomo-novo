@@ -1,6 +1,8 @@
+import { companyNuit, companyName } from './companyInfo';
 import { jsPDF } from 'jspdf';
 import { Sale, SystemSettings } from '../types';
 import { numeroParaExtenso } from './numberToWords';
+import { isFinancialSale, settlementDisclaimer } from './saleStatus';
 
 /**
  * Gerador de PDFs profissionais para AGRO - XICOMO & SERVIÇOS, LDA.
@@ -54,21 +56,14 @@ async function getLogoBase64(url: string): Promise<string | null> {
 }
 
 function getCompanyDefaults(settings: SystemSettings) {
-  const vodacomList = [settings.vodacom1, settings.vodacom2, settings.vodacom3].filter(Boolean);
-  const movitelList = [settings.movitel1, settings.movitel2, settings.movitel3].filter(Boolean);
-  const vodaStr = vodacomList.length > 0 ? vodacomList.join(' / ') : '845197072 / 84 94 23 241';
-  const moviStr = movitelList.length > 0 ? movitelList.join(' / ') : '86 36 99900';
-
   return {
     name: settings.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA',
-    nuit: settings.companyNuit || '401976590',
+    nuit: companyNuit(settings.companyNuit),
     address: settings.companyAddress || 'Maputo, Bairro do Zimpeto, Av. de Moçambique, Parcela: 654 R/C',
     email: settings.email || 'agroxicomo1@gmail.com',
-    phone1: settings.vodacom1 || '845197072',
-    phone2: settings.vodacom2 || '84 94 23 241',
-    phone3: settings.movitel1 || '86 36 99900',
-    vodaStr,
-    moviStr,
+    phone1: settings.vodacom1 || '84 94 23 241',
+    phone2: settings.vodacom2 || '86 36 99900',
+    phone3: settings.movitel1 || '8451970702',
     mpesa: settings.mpesa || '',
     emola: settings.emola || '',
     bank1: settings.banco || 'First Capital Bank, S.A.',
@@ -154,7 +149,7 @@ export async function downloadInvoiceA4(invoice: Sale, settings: SystemSettings,
       doc.setTextColor(80, 80, 80);
       doc.text(`${co.address.split(',')[0]}, Moçambique • NUIT: ${co.nuit}`, 15, 56);
       
-      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} | Contacto: ${contacts || '+258 84 123 4567'}`, 15, 60);
 
       // Document title and info (right side)
@@ -375,21 +370,38 @@ function renderInvoiceFooter(
   doc.setTextColor(200, 0, 0); // red for discount
   doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
 
+  // IVA: só aparece quando a venda o cobrou. O valor gravado é a autoridade;
+  // o fallback recalcula 16% sobre a base líquida.
+  const invoiceHasIva = Boolean(invoice.includeIva);
+  const invoiceIvaValue = invoiceHasIva
+    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    : 0;
+  let a4Cursor = totalsY + 5;
+  if (invoiceHasIva) {
+    a4Cursor += 4.5;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(80, 80, 80);
+    doc.text('IVA (16%):', 130, a4Cursor);
+    doc.text(`${fmtMT(invoiceIvaValue)} MT`, 195, a4Cursor, { align: 'right' });
+  }
+
   // Divider for totals
+  const a4DividerY = a4Cursor + 3;
   doc.setDrawColor(200, 200, 200);
   doc.setLineWidth(0.2);
-  doc.line(130, totalsY + 8, 195, totalsY + 8);
+  doc.line(130, a4DividerY, 195, a4DividerY);
 
   // Total Pago
+  const a4TotalY = a4DividerY + 5;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
   doc.setTextColor(0, 0, 0);
-  doc.text('Total Pago:', 130, totalsY + 13);
+  doc.text('Total Pago:', 130, a4TotalY);
   doc.setTextColor(14, 98, 49); // Primary green
-  doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 13, { align: 'right' });
+  doc.text(`${fmtMT(invoice.total)} MT`, 195, a4TotalY, { align: 'right' });
 
   // Forma de pagamento box
-  const payY = totalsY + 17;
+  const payY = a4TotalY + 4;
   doc.setFillColor(245, 245, 245);
   doc.rect(130, payY, 65, 8, 'F');
   doc.setDrawColor(220, 220, 220);
@@ -468,7 +480,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(80, 80, 80);
       doc.text(`${co.address.split(',')[0]}, Moçambique • NUIT: ${co.nuit}`, 15, 56);
       
-      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} | Contacto: ${contacts || '+258 84 123 4567'}`, 15, 60);
 
       // Document title and info (right side)
@@ -481,7 +493,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.text('RECIBO', 162.5, 15.5, { align: 'center' });
 
       // Receipt number
-      const recNumber = invoice.receiptNumber || (invoice.invoiceNumber.startsWith('Fact-') ? invoice.invoiceNumber.replace('Fact-', 'Rec-') : invoice.invoiceNumber.startsWith('FAC-') ? invoice.invoiceNumber.replace('FAC-', 'REC-') : `Rec-2026-${invoice.invoiceNumber}`);
+      const recNumber = invoice.receiptNumber || 'S/N';
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9);
       doc.setTextColor(50, 50, 50);
@@ -492,7 +504,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(100, 100, 100);
       doc.text(`Referente à Fatura Nº: ${invoice.invoiceNumber}`, 195, 29, { align: 'right' });
       doc.text(`Data de Emissão: ${new Date(invoice.date).toLocaleString('pt-MZ')}`, 195, 34, { align: 'right' });
-      doc.text(`Forma de Pagamento: ${(invoice.paymentMethod || 'Dinheiro').toUpperCase()}`, 195, 39, { align: 'right' });
+      doc.text(`Forma de Pagamento: ${(invoice.settledPaymentMethod || invoice.paymentMethod || 'Dinheiro').toUpperCase()}`, 195, 39, { align: 'right' });
 
     } else {
       // ── CONTINUATION PAGE HEADER ──
@@ -614,7 +626,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(8.5);
       doc.setTextColor(100, 100, 100);
-      doc.text('*Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.', 15, footerStartY + 6, { maxWidth: 105 });
+      doc.text(settlementDisclaimer(invoice as any), 15, footerStartY + 6, { maxWidth: 105 });
 
       // Right Column: Summary Totals
       const totalsY = footerStartY + 6;
@@ -630,18 +642,33 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(200, 0, 0); // red for discount
       doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
 
+      const receiptHasIva = Boolean(invoice.includeIva);
+      const receiptIvaValue = receiptHasIva
+        ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+        : 0;
+      let receiptCursor = totalsY + 5;
+      if (receiptHasIva) {
+        receiptCursor += 4.5;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(80, 80, 80);
+        doc.text('IVA (16%):', 130, receiptCursor);
+        doc.text(`${fmtMT(receiptIvaValue)} MT`, 195, receiptCursor, { align: 'right' });
+      }
+
       // Divider for totals
+      const receiptDividerY = receiptCursor + 3;
       doc.setDrawColor(200, 200, 200);
       doc.setLineWidth(0.2);
-      doc.line(130, totalsY + 8, 195, totalsY + 8);
+      doc.line(130, receiptDividerY, 195, receiptDividerY);
 
       // Total Pago
+      const receiptTotalY = receiptDividerY + 5;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10.5);
       doc.setTextColor(0, 0, 0);
-      doc.text('Total Pago:', 130, totalsY + 13.5);
+      doc.text('Total Pago:', 130, receiptTotalY);
       doc.setTextColor(14, 98, 49); // Primary green
-      doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 13.5, { align: 'right' });
+      doc.text(`${fmtMT(invoice.total)} MT`, 195, receiptTotalY, { align: 'right' });
 
       // Brand / License box at the bottom
       const bLineY = Math.max(258, footerStartY + 42);
@@ -659,7 +686,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFontSize(7);
       doc.setTextColor(100, 100, 100);
       doc.text(`Maputo, Moçambique • NUIT: ${co.nuit}`, 105, bLineY + 9, { align: 'center' });
-      const contacts = [co.phone1, co.phone3].filter(Boolean).slice(0, 2).join(' / ');
+      const contacts = [co.phone3, co.phone1, co.phone2].filter(Boolean).slice(0, 2).join(' / ');
       doc.text(`Email: ${co.email} • Tel: ${contacts || '+258 84 123 4567'}`, 105, bLineY + 13, { align: 'center' });
       
       doc.setFont('helvetica', 'bold');
@@ -677,7 +704,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(8);
       doc.setTextColor(120, 120, 120);
-      const recNumber = invoice.receiptNumber || (invoice.invoiceNumber.startsWith('Fact-') ? invoice.invoiceNumber.replace('Fact-', 'Rec-') : invoice.invoiceNumber.startsWith('FAC-') ? invoice.invoiceNumber.replace('FAC-', 'REC-') : `Rec-2026-${invoice.invoiceNumber}`);
+      const recNumber = invoice.receiptNumber || 'S/N';
       doc.text(`Recibo Nº: ${recNumber}`, 15, footerStartY + 5);
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(14, 98, 49);
@@ -709,7 +736,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   const logoHeight = logoBase64 ? 28 : 0;
   const headerHeight = 115;
   const itemsHeight = items.length * 11;
-  const footerHeight = 90 + (invoice.discount > 0 ? 5 : 0);
+  const footerHeight = 90;
   const breakdownHeight = (invoice.paymentBreakdown?.length || 0) * 7;
   const totalHeight = Math.max(200, logoHeight + headerHeight + itemsHeight + footerHeight + breakdownHeight);
 
@@ -756,13 +783,22 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.text(`Email: ${co.email}`, 40, y, { align: 'center' });
   y += 4.5;
 
-  doc.text(`Vodacom: ${co.vodaStr}`, 40, y, { align: 'center' });
+  const phoneVoda = co.phone3 && co.phone3.length > 5 
+    ? `${co.phone3} / ${co.phone1}` 
+    : '845197072 / 84 94 23 241';
+  doc.text(`Vodacom: ${phoneVoda}`, 40, y, { align: 'center' });
   y += 4.5;
 
-  doc.text(`Movitel: ${co.moviStr}`, 40, y, { align: 'center' });
+  const phoneMovi = co.phone2 || '86 36 99900';
+  doc.text(`Movitel: ${phoneMovi}`, 40, y, { align: 'center' });
   y += 6;
 
-  // ── Banner Box: RECIBO DE PAGAMENTO POS ──
+  // ── Banner Box ──
+  // Um documento térmico só se chama "recibo de pagamento" se a venda estiver
+  // efectivamente paga (FT-70). Caso contrário é um comprovativo de venda, e
+  // dizê-lo evita que o cliente saia com prova de um pagamento que não houve.
+  const thermalIsSettled = Boolean(isFinancialSale(invoice) && invoice.status === 'Paga');
+  const thermalTitle = thermalIsSettled ? 'RECIBO DE PAGAMENTO POS' : 'COMPROVATIVO DE VENDA';
   doc.setFillColor(245, 245, 245);
   doc.rect(3, y, 74, 8, 'F');
   doc.setDrawColor(0, 0, 0);
@@ -770,7 +806,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.line(3, y, 77, y);
   doc.line(3, y + 8, 77, y + 8);
   doc.setFontSize(10);
-  doc.text('RECIBO DE PAGAMENTO POS', 40, y + 5.5, { align: 'center' });
+  doc.text(thermalTitle, 40, y + 5.5, { align: 'center' });
   y += 14;
 
   // ── Details (Left label, right value) ──
@@ -825,14 +861,24 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.line(3, y, 77, y);
   y += 5;
 
-  // SUBTOTAL / DESCONTO
+  // SUBTOTAL
   doc.setFontSize(9);
   doc.text('SUBTOTAL:', 4, y);
   doc.text(`${fmtMT(invoice.subtotal)} MT`, 76, y, { align: 'right' });
   y += 5;
-  if (invoice.discount > 0) {
+
+  // DESCONTO (quando exista) e IVA (quando cobrado)
+  if (Number(invoice.discount) > 0) {
     doc.text('DESCONTO:', 4, y);
     doc.text(`-${fmtMT(invoice.discount)} MT`, 76, y, { align: 'right' });
+    y += 5;
+  }
+  if (invoice.includeIva) {
+    const thermalIva = Number(
+      invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100
+    );
+    doc.text('IVA (16%):', 4, y);
+    doc.text(`${fmtMT(thermalIva)} MT`, 76, y, { align: 'right' });
     y += 5;
   }
 
@@ -842,7 +888,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
 
   // TOTAL PAGO (Highlight)
   doc.setFontSize(11);
-  doc.text('TOTAL PAGO:', 4, y);
+  doc.text(thermalIsSettled ? 'TOTAL PAGO:' : 'TOTAL EM DÍVIDA:', 4, y);
   doc.text(`${fmtMT(invoice.total)} MT`, 76, y, { align: 'right' });
   y += 5.5;
 
@@ -853,7 +899,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
 
   // FORMA PAGAMENTO
   doc.text('FORMA PAGAMENTO:', 4, y);
-  doc.text((invoice.paymentMethod || 'DINHEIRO').toUpperCase(), 76, y, { align: 'right' });
+  doc.text((invoice.settledPaymentMethod || invoice.paymentMethod || 'DINHEIRO').toUpperCase(), 76, y, { align: 'right' });
   y += 5;
 
   // Additional Payment breakdown if any
@@ -1037,6 +1083,180 @@ function renderCompactInvoice(
 // 5. RELATÓRIO DE VENDAS (PDF A4)
 // ============================================================================
 
+// ============================================================================
+// NOTA DE CRÉDITO (A4)
+// ============================================================================
+
+/**
+ * Nota de crédito de anulação total.
+ *
+ * A anulação de uma factura definitiva emitia um número `NC-AAAA-NNNN` que era
+ * guardado na venda e nunca chegava a existir em papel. Sem este documento, a
+ * empresa anulava facturas no sistema e mantinha-as válidas no dossier — o
+ * oposto do que uma inspecção fiscal aceita. Este gerador produz o documento
+ * que acompanha a anulação, com a referência cruzada à factura e ao recibo.
+ */
+export async function downloadCreditNoteA4(invoice: Sale, settings: SystemSettings) {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const co = getCompanyDefaults(settings);
+  const logoBase64 = await getLogoBase64(settings.logoUrl || '/logo.png');
+
+  const items = invoice.items || [];
+  const CHUNK = 16;
+  const pages: typeof items[] = [];
+  for (let i = 0; i < Math.max(items.length, 1); i += CHUNK) {
+    pages.push(items.slice(i, i + CHUNK));
+  }
+
+  const creditNoteNumber = invoice.creditNoteNumber || 'S/Nº';
+  const cancellationDate = invoice.cancelledAt ? new Date(invoice.cancelledAt) : new Date();
+  const ivaValue = invoice.includeIva
+    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    : 0;
+
+  pages.forEach((pageItems, pageIdx) => {
+    if (pageIdx > 0) doc.addPage();
+    const isFirst = pageIdx === 0;
+    const isLast = pageIdx === pages.length - 1;
+
+    // ── Cabeçalho ─────────────────────────────────────────────────────
+    if (logoBase64) {
+      try { doc.addImage(logoBase64, 'PNG', 15, 10, 45, 26); }
+      catch { try { doc.addImage(logoBase64, 'JPEG', 15, 10, 45, 26); } catch { /* sem logo */ } }
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(14, 98, 49);
+    doc.text(co.name, 195, 16, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(90, 90, 90);
+    doc.text(`NUIT: ${co.nuit}`, 195, 21, { align: 'right' });
+    doc.text(co.address, 195, 25, { align: 'right', maxWidth: 100 });
+    doc.text(`${co.email} • ${co.phone1}`, 195, 33, { align: 'right' });
+
+    // ── Caixa do título ───────────────────────────────────────────────
+    doc.setFillColor(190, 30, 45);
+    doc.rect(15, 40, 180, 12, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.text('NOTA DE CRÉDITO', 105, 48, { align: 'center' });
+
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(9);
+    doc.text(`Nº: ${creditNoteNumber}`, 15, 58);
+    doc.text(`Data de emissão: ${fmtDate(cancellationDate.toISOString())}`, 195, 58, { align: 'right' });
+
+    // ── Referências ───────────────────────────────────────────────────
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(0.2);
+    doc.rect(15, 61, 180, 20);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.text('DOCUMENTO RECTIFICADO', 18, 66);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Factura nº: ${invoice.invoiceNumber}`, 18, 71);
+    doc.text(`Data da factura: ${fmtDate(invoice.date)}`, 18, 76);
+    doc.text(`Cliente: ${invoice.customerName || 'Consumidor Final'}`, 108, 71);
+    doc.text(`NUIT: ${invoice.customerNuit || 'Consumidor Final'}`, 108, 76);
+    if (invoice.receiptNumber) {
+      doc.text(`Recibo liquidado: ${invoice.receiptNumber}`, 18, 79);
+    }
+
+    // ── Motivo ────────────────────────────────────────────────────────
+    doc.setFontSize(8);
+    doc.text(
+      `Motivo: anulação total da factura ${invoice.invoiceNumber}, emitida por ${invoice.operatorName || 'operador'} ` +
+      `no posto ${invoice.terminalId || 'não identificado'}. O valor de ${fmtMT(invoice.total)} MT é creditado ao cliente.`,
+      15,
+      88,
+      { maxWidth: 180 }
+    );
+
+    // ── Tabela de artigos ─────────────────────────────────────────────
+    const tableTop = 96;
+    doc.setFillColor(240, 240, 240);
+    doc.rect(15, tableTop, 180, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.text('ARTIGO / SERVIÇO', 17, tableTop + 5);
+    doc.text('QTD', 120, tableTop + 5, { align: 'right' });
+    doc.text('P. UNIT.', 145, tableTop + 5, { align: 'right' });
+    doc.text('TOTAL', 193, tableTop + 5, { align: 'right' });
+
+    let rowY = tableTop + 12;
+    doc.setFont('helvetica', 'normal');
+    if (pageItems.length === 0) {
+      doc.text('Sem linhas registadas nesta venda.', 17, rowY);
+      rowY += 6;
+    }
+    pageItems.forEach(item => {
+      const name = String(item.name || item.productId || '').substring(0, 62);
+      doc.text(name, 17, rowY, { maxWidth: 96 });
+      doc.text(String(item.quantity ?? ''), 120, rowY, { align: 'right' });
+      doc.text(fmtMT(Number(item.unitPrice) || 0), 145, rowY, { align: 'right' });
+      doc.text(fmtMT(Number(item.totalPrice) || 0), 193, rowY, { align: 'right' });
+      rowY += 5.5;
+    });
+
+    // ── Totais ────────────────────────────────────────────────────────
+    if (isLast) {
+      const totalsY = Math.max(rowY + 8, 200);
+      doc.setDrawColor(200, 200, 200);
+      doc.line(120, totalsY - 5, 195, totalsY - 5);
+      doc.setFontSize(8);
+      doc.text('Subtotal:', 120, totalsY);
+      doc.text(`${fmtMT(invoice.subtotal)} MT`, 195, totalsY, { align: 'right' });
+      doc.text('Desconto:', 120, totalsY + 5);
+      doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
+      if (invoice.includeIva) {
+        doc.text('IVA:', 120, totalsY + 10);
+        doc.text(`${fmtMT(ivaValue)} MT`, 195, totalsY + 10, { align: 'right' });
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.text('TOTAL CREDITADO:', 120, totalsY + 17);
+      doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 17, { align: 'right' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.text(
+        'Este documento anula, para todos os efeitos, a factura acima identificada. ' +
+        'O original deve ser arquivado junto desta nota de crédito.',
+        15,
+        totalsY + 28,
+        { maxWidth: 180 }
+      );
+
+      // Assinaturas
+      doc.setDrawColor(120, 120, 120);
+      const signY = totalsY + 48;
+      doc.line(20, signY, 85, signY);
+      doc.line(120, signY, 185, signY);
+      doc.text('O Responsável', 52.5, signY + 4, { align: 'center' });
+      doc.text('O Cliente', 152.5, signY + 4, { align: 'center' });
+    }
+
+    // ── Rodapé ────────────────────────────────────────────────────────
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text(
+      `${co.name} • NUIT ${co.nuit} • Processado por computador — AgroGestão ERP • Pág. ${pageIdx + 1}/${pages.length}`,
+      105,
+      288,
+      { align: 'center' }
+    );
+    if (!isFirst) {
+      doc.setFontSize(7.5);
+      doc.text(`NOTA DE CRÉDITO Nº ${creditNoteNumber} (continuação)`, 105, 12, { align: 'center' });
+    }
+  });
+
+  doc.save(`NOTA_CREDITO_${creditNoteNumber}_${invoice.invoiceNumber}.pdf`);
+}
+
 export async function downloadSalesReportPDF(
   sales: Sale[],
   settings: SystemSettings,
@@ -1142,6 +1362,9 @@ export async function downloadSalesReportPDF(
     } else if (sale.status === 'Cancelada') {
       doc.setTextColor(220, 38, 38);
       doc.text('CANCELADO', 160, itemY + 4.5);
+    } else if (sale.status === 'Proforma') {
+      doc.setTextColor(71, 85, 105);
+      doc.text('PROFORMA', 160, itemY + 4.5);
     } else {
       doc.setTextColor(217, 119, 6);
       doc.text('PENDENTE', 160, itemY + 4.5);
@@ -1149,7 +1372,7 @@ export async function downloadSalesReportPDF(
 
     doc.setTextColor(51, 65, 85);
     doc.text(`${fmtMT(sale.total)} MT`, 193, itemY + 4.5, { align: 'right' });
-    if (sale.status !== 'Cancelada') totalAcc += sale.total;
+    if (isFinancialSale(sale)) totalAcc += sale.total;
 
     doc.setDrawColor(241, 245, 249);
     doc.setLineWidth(0.3);

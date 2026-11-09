@@ -28,6 +28,9 @@ import { dbService } from '../utils/firebaseDB';
 import Toast, { type ToastKind } from './Toast';
 import { Product, Sale, SystemSettings } from '../types';
 import { formatDateToISO, formatDatePT } from '../utils/dateRangeHelper';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { getClientIp } from '../utils/clientInfo';
+import { canRefund, maxRefundFor } from '../utils/cashBox';
 import {
   analyzeSalesStockImpact,
   annotateCancelledSale,
@@ -37,7 +40,6 @@ import {
   getSaleTimeLabel,
   projectStock,
   selectSalesForCutoff,
-  StockCorrectionSnapshot,
   toDayKey
 } from '../utils/inventoryCutoff';
 
@@ -76,6 +78,9 @@ export default function InventoryCutoffTool({
   const [toTime, setToTime] = useState('');
   const [reason, setReason] = useState(DEFAULT_REASON);
   const [restoreStock, setRestoreStock] = useState(false);
+  /** Registar em caixa a devolução aos clientes das vendas pagas anuladas. */
+  const [registerRefund, setRegisterRefund] = useState(false);
+  const [refundMethod, setRefundMethod] = useState('Dinheiro');
   const [excluded, setExcluded] = useState<Record<string, boolean>>({});
 
   const [showConfirm, setShowConfirm] = useState(false);
@@ -89,6 +94,11 @@ export default function InventoryCutoffTool({
     salesCount: number;
     productsCount: number;
     stockTouched: boolean;
+    creditNotes: Array<{ invoiceNumber: string; creditNoteNumber: string }>;
+    skipped: string[];
+    clamped: string[];
+    refunded: number;
+    atomic: boolean;
   } | null>(null);
 
   const loadData = useCallback(async () => {
@@ -136,10 +146,31 @@ export default function InventoryCutoffTool({
   const direction: 'deduct' | 'restore' | null =
     mode === 'descontar' ? 'deduct' : restoreStock ? 'restore' : null;
 
-  const snapshots: StockCorrectionSnapshot[] = useMemo(
-    () => (direction ? buildStockSnapshots(impact.movements, direction) : []),
-    [impact.movements, direction]
+  /**
+   * Variações a aplicar ao stock. Trabalha-se com diferenças, não com saldos
+   * absolutos: assim uma venda registada entre a leitura e o clique não é
+   * apagada pelo valor que estava no ecrã.
+   */
+  const refundableSales = useMemo(
+    () => (mode === 'anular' ? selectedSales.filter(sale => canRefund(sale)) : []),
+    [mode, selectedSales]
   );
+  const refundTotal = useMemo(
+    () => refundableSales.reduce((total, sale) => total + maxRefundFor(sale), 0),
+    [refundableSales]
+  );
+
+  const stockDeltas = useMemo(() => {
+    if (!direction) return [];
+    const sinal = direction === 'deduct' ? -1 : 1;
+    return impact.movements.map(movement => ({
+      productId: movement.productId,
+      productName: movement.productName,
+      base: sinal * movement.soldBase,
+      bulk: movement.hasConversion ? sinal * movement.soldBulk : undefined,
+      retail: movement.hasConversion ? sinal * movement.soldRetail : undefined
+    }));
+  }, [impact.movements, direction]);
 
   const cancelledSameDay = useMemo(
     () => (sales || []).filter(sale => sale.status === 'Cancelada' && toDayKey(sale.date) === day).length,
@@ -284,14 +315,26 @@ export default function InventoryCutoffTool({
     event.preventDefault();
     if (isRunning) return;
 
-    const expected = (settings?.stockPasswordHash || '').trim();
-    const typed = password.trim();
-    if (!expected || typed !== expected) {
-      setError('Palavra-passe de autorização incorrecta ou não configurada.');
+    // A palavra-passe é verificada contra a configuração real (hash com salt).
+    // A versão anterior comparava o texto escrito com o próprio hash guardado
+    // — com qualquer palavra-passe protegida, o corte era impossível de usar.
+    if (!(await verifyAuthorizationPassword(password, settings))) {
+      setError('Palavra-passe de autorização incorrecta.');
       return;
     }
-    if (selectedSales.length === 0) {
+
+    const motivo = reason.trim();
+    if (motivo.length < 10) {
+      setError('Indique o motivo (mínimo 10 caracteres). Sem isso, a anulação não tem justificação em auditoria.');
+      return;
+    }
+
+    if (mode === 'anular' && selectedSales.length === 0) {
       setError('Não há vendas seleccionadas para processar.');
+      return;
+    }
+    if (mode === 'descontar' && stockDeltas.length === 0) {
+      setError('Não há quantidades a descontar no período escolhido.');
       return;
     }
 
@@ -299,36 +342,72 @@ export default function InventoryCutoffTool({
     setError('');
     try {
       const username = currentUser?.username || 'Gestor';
+      const ipAddress = await getClientIp().catch(() => 'desconhecido');
 
-      if (mode === 'anular') {
-        const annotated = selectedSales.map(sale => annotateCancelledSale(sale, reason, username));
-        await dbService.cancelSalesBulk(annotated, snapshots);
-      } else {
-        await dbService.applyStockCorrection(snapshots);
-      }
+      const semStock = mode === 'anular' && !restoreStock;
+
+      /**
+       * Reembolsos: só para vendas que já tinham entrado em dinheiro. Uma
+       * proforma anulada não move dinheiro nenhum. O valor devolvido nunca
+       * passa o que o cliente pagou.
+       */
+      const refunds = mode === 'anular' && registerRefund
+        ? selectedSales
+            .filter(sale => canRefund(sale))
+            .map(sale => ({
+              saleId: String(sale.id || sale.invoiceNumber),
+              invoiceNumber: sale.invoiceNumber,
+              receiptNumber: sale.receiptNumber,
+              amount: maxRefundFor(sale),
+              method: refundMethod
+            }))
+            .filter(item => item.amount > 0)
+        : [];
+
+      const execucao = await dbService.applyCutoff({
+        sales: mode === 'anular' ? selectedSales : [],
+        stockDeltas: semStock ? [] : stockDeltas,
+        applyStock: !semStock,
+        username,
+        reason: motivo,
+        refunds
+      });
+
+      // Prova documento a documento: factura ↔ nota de crédito.
+      const mapa = execucao.creditNotes
+        .slice(0, 60)
+        .map(item => `${item.invoiceNumber}→${item.creditNoteNumber}`)
+        .join('; ');
 
       await dbService.addAuditLog({
         id: 'log-cutoff-' + Date.now(),
         timestamp: new Date().toISOString(),
         username,
-        ipAddress: '127.0.0.1',
+        ipAddress,
         action: mode === 'anular' ? 'Anulação em Massa (Corte de Inventário)' : 'Correcção de Stock por Corte de Inventário',
         status: 'Sucesso',
         level: 'WARNING',
         entity: 'sales/products',
         details:
           mode === 'anular'
-            ? `${selectedSales.length} venda(s) do dia ${day} anuladas ${snapshots.length > 0 ? 'COM' : 'SEM'} estorno de stock. ` +
-              `Valor anulado: ${money(impact.totals.totalValue)}. Motivo: ${reason}`
-            : `Stock corrigido em ${snapshots.length} artigo(s) com base em ${selectedSales.length} venda(s) do dia ${day} ` +
-              `posteriores à contagem física. Custo movimentado: ${money(impact.totals.costValue)}. Motivo: ${reason}`
+            ? `${execucao.cancelled} venda(s) do dia ${day} anuladas ${execucao.stockAdjusted > 0 ? 'COM' : 'SEM'} estorno de stock. ` +
+              `Valor anulado: ${money(impact.totals.totalValue)}. Motivo: ${motivo}. ` +
+              `Ignoradas (já anuladas ou inexistentes): ${execucao.skipped.length}. ` +
+              `Notas de crédito: ${mapa || 'nenhuma'}`
+            : `Stock corrigido em ${execucao.stockAdjusted} artigo(s) com base em ${selectedSales.length} venda(s) do dia ${day} ` +
+              `posteriores à contagem física. Custo movimentado: ${money(impact.totals.costValue)}. Motivo: ${motivo}.`
       });
 
       setResult({
         mode,
-        salesCount: selectedSales.length,
-        productsCount: mode === 'anular' ? snapshots.length : snapshots.length,
-        stockTouched: snapshots.length > 0
+        salesCount: execucao.cancelled,
+        productsCount: execucao.stockAdjusted,
+        stockTouched: execucao.stockAdjusted > 0,
+        creditNotes: execucao.creditNotes,
+        skipped: execucao.skipped,
+        clamped: execucao.clamped,
+        refunded: execucao.refunded,
+        atomic: execucao.atomic
       });
       setShowConfirm(false);
       setPassword('');
@@ -365,15 +444,15 @@ export default function InventoryCutoffTool({
 
   return (
     <div className="fixed inset-0 bg-black/60 z-50 p-2 sm:p-4 flex items-start sm:items-center justify-center backdrop-blur-xs overflow-y-auto">
-      <div className="bg-slate-50 rounded-2xl shadow-2xl w-full max-w-6xl my-4 overflow-hidden border border-slate-200">
+      <div className="bg-slate-50 rounded-xl shadow-2xl w-full max-w-5xl my-2 overflow-hidden border border-slate-200">
         {/* Cabeçalho */}
-        <div className="bg-slate-900 p-4 text-white flex items-start justify-between gap-4">
+        <div className="bg-slate-900 px-3 py-2 text-white flex items-start justify-between gap-3">
           <div>
-            <h3 className="font-black text-base flex items-center gap-2">
+            <h3 className="font-black text-sm flex items-center gap-1.5">
               <span className="material-symbols-outlined">content_cut</span>
               Corte de Inventário — Anulação de Vendas &amp; Correcção de Stock
             </h3>
-            <p className="text-[11px] text-slate-300 mt-1 max-w-3xl">
+            <p className="text-[10px] text-slate-300 mt-0.5 max-w-3xl leading-snug">
               Use quando a contagem física foi tirada a uma hora e só foi lançada no sistema mais tarde, depois de já
               terem sido registadas vendas. O sistema mostra tudo antes de gravar.
             </p>
@@ -383,10 +462,10 @@ export default function InventoryCutoffTool({
           </button>
         </div>
 
-        <div className="p-4 sm:p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+        <div className="p-3 space-y-2.5 max-h-[86vh] overflow-y-auto">
           {/* Resultado da última execução */}
           {result && (
-            <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 text-emerald-900 space-y-1">
+            <div className="bg-emerald-50 border border-emerald-300 rounded-lg px-2.5 py-1.5 text-emerald-900">
               <p className="font-black text-sm flex items-center gap-2">
                 <span className="material-symbols-outlined">task_alt</span>
                 Operação concluída com sucesso
@@ -399,8 +478,35 @@ export default function InventoryCutoffTool({
                     : 'sem qualquer alteração de stock. Pode agora relançar as vendas no PDV.'}
                 </p>
               ) : (
-                <p className="text-xs">
-                  Stock corrigido em {result.productsCount} artigo(s). As facturas mantiveram-se válidas.
+                <p className="text-xs">Stock corrigido em {result.productsCount} artigo(s). As facturas mantiveram-se válidas.</p>
+              )}
+              {result.refunded > 0 && (
+                <p className="text-[10px] text-amber-900 font-bold">
+                  {result.refunded.toFixed(2)} MT registados em caixa como devolução ao cliente.
+                </p>
+              )}
+              {result.creditNotes.length > 0 && (
+                <p className="text-[10px] text-emerald-800">
+                  {result.creditNotes.length} nota(s) de crédito emitida(s) ·{' '}
+                  {result.creditNotes.slice(0, 4).map(n => `${n.invoiceNumber}→${n.creditNoteNumber}`).join(', ')}
+                  {result.creditNotes.length > 4 ? ' …' : ''}
+                </p>
+              )}
+              {result.skipped.length > 0 && (
+                <p className="text-[10px] text-amber-800 font-bold">
+                  {result.skipped.length} documento(s) ignorado(s) por já estarem anulados ou não existirem:{' '}
+                  {result.skipped.slice(0, 4).join(', ')}{result.skipped.length > 4 ? ' …' : ''}
+                </p>
+              )}
+              {result.clamped.length > 0 && (
+                <p className="text-[10px] text-rose-800 font-bold">
+                  Stock travado em zero (não havia saldo suficiente): {result.clamped.slice(0, 5).join(', ')}
+                  {result.clamped.length > 5 ? ' …' : ''}
+                </p>
+              )}
+              {!result.atomic && (
+                <p className="text-[10px] text-amber-900 font-bold">
+                  Operação dividida em vários lotes (mais de 150 vendas): confirme nos Movimentos de stock que tudo foi aplicado.
                 </p>
               )}
             </div>
@@ -408,14 +514,14 @@ export default function InventoryCutoffTool({
 
           {/* 1. Modo de operação */}
           <section className="space-y-2">
-            <h4 className="text-[11px] font-black uppercase text-slate-500 tracking-wider">1. O que pretende fazer</h4>
+            <h4 className="text-[9.5px] font-black uppercase text-slate-500 tracking-wide">1. O que pretende fazer</h4>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               {modeCards.map(card => (
                 <button
                   key={card.id}
                   type="button"
                   onClick={() => setMode(card.id)}
-                  className={`text-left p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+                  className={`text-left p-2.5 rounded-lg border-2 transition-all cursor-pointer ${
                     mode === card.id
                       ? 'border-emerald-600 bg-white shadow-md'
                       : 'border-slate-200 bg-white/60 hover:border-slate-300'
@@ -432,15 +538,15 @@ export default function InventoryCutoffTool({
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">{card.subtitle}</p>
                     </div>
                   </div>
-                  <p className="text-[11px] text-slate-600 mt-2 leading-relaxed">{card.detail}</p>
+                  <p className="text-[10px] text-slate-600 mt-1 leading-snug">{card.detail}</p>
                 </button>
               ))}
             </div>
           </section>
 
           {/* 2. Período */}
-          <section className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
-            <h4 className="text-[11px] font-black uppercase text-slate-500 tracking-wider">
+          <section className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1.5">
+            <h4 className="text-[9.5px] font-black uppercase text-slate-500 tracking-wide">
               2. Período das vendas a tratar
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -450,7 +556,7 @@ export default function InventoryCutoffTool({
                   type="date"
                   value={day}
                   onChange={e => setDay(e.target.value)}
-                  className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
+                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-[11px] focus:outline-none focus:border-emerald-600"
                 />
               </div>
               <div>
@@ -461,7 +567,7 @@ export default function InventoryCutoffTool({
                   type="time"
                   value={fromTime}
                   onChange={e => setFromTime(e.target.value)}
-                  className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
+                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-[11px] focus:outline-none focus:border-emerald-600"
                 />
               </div>
               <div>
@@ -470,7 +576,7 @@ export default function InventoryCutoffTool({
                   type="time"
                   value={toTime}
                   onChange={e => setToTime(e.target.value)}
-                  className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-600"
+                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-[11px] focus:outline-none focus:border-emerald-600"
                 />
               </div>
               <div className="flex items-end">
@@ -507,7 +613,7 @@ export default function InventoryCutoffTool({
           {/* 3. Pré-visualização */}
           <section className="space-y-3">
             <div className="flex items-center justify-between gap-2 flex-wrap">
-              <h4 className="text-[11px] font-black uppercase text-slate-500 tracking-wider">
+              <h4 className="text-[9.5px] font-black uppercase text-slate-500 tracking-wide">
                 3. Pré-visualização do impacto
               </h4>
               <div className="flex gap-2">
@@ -531,25 +637,25 @@ export default function InventoryCutoffTool({
             </div>
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <div className="bg-white border border-slate-200 rounded-2xl p-3">
+              <div className="bg-white border border-slate-200 rounded-lg p-2">
                 <p className="text-[9.5px] font-black uppercase text-slate-400 tracking-wider">Documentos</p>
                 <p className="text-xl font-black text-slate-800 font-mono">{selectedSales.length}</p>
                 <p className="text-[10px] text-slate-400">de {daySales.length} encontrados no período</p>
               </div>
-              <div className="bg-white border border-slate-200 rounded-2xl p-3">
+              <div className="bg-white border border-slate-200 rounded-lg p-2">
                 <p className="text-[9.5px] font-black uppercase text-slate-400 tracking-wider">Valor facturado</p>
                 <p className="text-xl font-black text-slate-800 font-mono">{money(impact.totals.totalValue)}</p>
                 <p className="text-[10px] text-slate-400">
                   {mode === 'anular' ? 'sai dos relatórios ao anular' : 'mantém-se nos relatórios'}
                 </p>
               </div>
-              <div className="bg-white border border-slate-200 rounded-2xl p-3">
+              <div className="bg-white border border-slate-200 rounded-lg p-2">
                 <p className="text-[9.5px] font-black uppercase text-slate-400 tracking-wider">Artigos afectados</p>
                 <p className="text-xl font-black text-slate-800 font-mono">{impact.totals.productsAffected}</p>
                 <p className="text-[10px] text-slate-400">custo {money(impact.totals.costValue)}</p>
               </div>
               <div
-                className={`rounded-2xl p-3 border ${
+                className={`rounded-lg p-2 border ${
                   direction ? 'bg-amber-50 border-amber-300' : 'bg-slate-100 border-slate-200'
                 }`}
               >
@@ -562,14 +668,14 @@ export default function InventoryCutoffTool({
                       : 'Stock NÃO é alterado'}
                 </p>
                 <p className="text-[10px] text-slate-500">
-                  {snapshots.length > 0 ? `${snapshots.length} artigo(s) gravados` : 'nenhuma gravação em produtos'}
+                  {stockDeltas.length > 0 ? `${stockDeltas.length} artigo(s) a gravar` : 'nenhuma gravação em produtos'}
                 </p>
               </div>
             </div>
 
             {/* Opção de estorno (apenas no modo anular) */}
             {mode === 'anular' && (
-              <label className="flex items-start gap-3 bg-white border border-slate-200 rounded-2xl p-3 cursor-pointer">
+              <label className="flex items-start gap-3 bg-white border border-slate-200 rounded-lg p-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={restoreStock}
@@ -589,8 +695,42 @@ export default function InventoryCutoffTool({
               </label>
             )}
 
+            {mode === 'anular' && refundableSales.length > 0 && (
+              <label className="flex items-start gap-2.5 bg-white border border-amber-200 rounded-lg p-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={registerRefund}
+                  onChange={e => setRegisterRefund(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-amber-600"
+                />
+                <span className="flex-1">
+                  <span className="block text-xs font-black text-slate-800">
+                    Devolvi dinheiro aos clientes — registar em caixa
+                  </span>
+                  <span className="block text-[11px] text-slate-500 mt-0.5">
+                    {refundableSales.length} venda(s) já pagas ·{' '}
+                    <strong className="text-amber-800">{refundTotal.toFixed(2)} MT</strong> a devolver. Sem este
+                    registo, o caixa fecha com falta exatamente desse valor.
+                  </span>
+                </span>
+                {registerRefund && (
+                  <select
+                    value={refundMethod}
+                    onChange={e => setRefundMethod(e.target.value)}
+                    onClick={e => e.stopPropagation()}
+                    className="border border-slate-300 rounded-md px-1.5 py-1 text-[11px] font-bold bg-white"
+                  >
+                    <option>Dinheiro</option>
+                    <option>Transferência</option>
+                    <option>M-Pesa</option>
+                    <option>E-Mola</option>
+                  </select>
+                )}
+              </label>
+            )}
+
             {impact.unmatched.length > 0 && (
-              <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-2xl p-3 text-[11px]">
+              <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-2 text-[11px]">
                 <p className="font-black flex items-center gap-1">
                   <span className="material-symbols-outlined text-[16px]">warning</span>
                   {impact.unmatched.length} linha(s) de venda referem artigos que já não existem no catálogo
@@ -607,7 +747,7 @@ export default function InventoryCutoffTool({
             )}
 
             {/* Tabela de vendas */}
-            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200">
                 <p className="text-[11px] font-black text-slate-700">
                   Documentos do período {isLoading && <span className="text-slate-400 font-normal">a carregar…</span>}
@@ -682,8 +822,22 @@ export default function InventoryCutoffTool({
               </div>
             </div>
 
+            {/* V-C12: saldos que não chegam têm de ser vistos, não arredondados */}
+            {direction && impact.movements.some(m => projectStock(m, direction).insufficient) && (
+              <div className="bg-rose-50 border border-rose-300 rounded-lg px-3 py-2">
+                <p className="text-[11px] font-black text-rose-800 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[15px]">error</span>
+                  {impact.movements.filter(m => projectStock(m, direction).insufficient).length} artigo(s) sem stock suficiente
+                </p>
+                <p className="text-[10px] text-rose-700 mt-0.5">
+                  O saldo final destes artigos ficaria negativo. A gravação trava em zero — o que significa que
+                  a venda saiu de mercadoria que o sistema não tem. Confirme a contagem física antes de executar.
+                </p>
+              </div>
+            )}
+
             {/* Tabela de impacto por artigo */}
-            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
                 <p className="text-[11px] font-black text-slate-700">
                   Impacto por artigo {direction ? '(saldo que ficará gravado)' : '(apenas informativo — stock intocado)'}
@@ -712,7 +866,7 @@ export default function InventoryCutoffTool({
                       impact.movements.map(movement => {
                         const projected = direction
                           ? projectStock(movement, direction)
-                          : { stockQty: movement.currentStockQty };
+                          : { stockQty: movement.currentStockQty, insufficient: false, shortfallQty: 0 };
                         const changed = projected.stockQty !== movement.currentStockQty;
                         return (
                           <tr key={movement.productId}>
@@ -732,10 +886,26 @@ export default function InventoryCutoffTool({
                             <td className="p-2 text-right font-mono text-slate-500">{qty(movement.currentStockQty)}</td>
                             <td
                               className={`p-2 text-right font-mono font-black ${
-                                changed ? (projected.stockQty < movement.currentStockQty ? 'text-red-700' : 'text-blue-700') : 'text-slate-400'
+                                projected.stockQty < 0
+                                  ? 'text-rose-700 bg-rose-50'
+                                  : changed
+                                    ? projected.stockQty < movement.currentStockQty
+                                      ? 'text-red-700'
+                                      : 'text-blue-700'
+                                    : 'text-slate-400'
                               }`}
+                              title={
+                                projected.insufficient
+                                  ? `Faltam ${qty(projected.shortfallQty)} ${movement.baseUnit} — a gravação trava em 0`
+                                  : undefined
+                              }
                             >
                               {qty(projected.stockQty)}
+                              {projected.insufficient && (
+                                <span className="block text-[8.5px] font-bold leading-tight">
+                                  falta {qty(projected.shortfallQty)}
+                                </span>
+                              )}
                             </td>
                           </tr>
                         );
@@ -790,7 +960,7 @@ export default function InventoryCutoffTool({
       {/* Confirmação com palavra-passe */}
       {showConfirm && (
         <div className="fixed inset-0 bg-black/70 z-[60] p-4 flex items-center justify-center">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
             <div className="bg-slate-900 p-4 text-white font-bold flex justify-between items-center">
               <span className="flex items-center gap-2 text-sm">
                 <span className="material-symbols-outlined">verified_user</span>
@@ -820,9 +990,9 @@ export default function InventoryCutoffTool({
                   • Stock:{' '}
                   <strong className={direction ? 'text-amber-700' : 'text-emerald-700'}>
                     {direction === 'deduct'
-                      ? `desce em ${snapshots.length} artigo(s)`
+                      ? `desce em ${stockDeltas.length} artigo(s)`
                       : direction === 'restore'
-                        ? `sobe em ${snapshots.length} artigo(s)`
+                        ? `sobe em ${stockDeltas.length} artigo(s)`
                         : 'não é alterado'}
                   </strong>
                 </p>

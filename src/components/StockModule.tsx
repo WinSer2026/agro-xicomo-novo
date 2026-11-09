@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { uid } from '../utils/idHelper';
+import { companyNuit, companyName } from '../utils/companyInfo';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
-import Toast, { type ToastKind } from './Toast';
-import { Product, LossRecord, SystemSettings, Sale } from '../types';
+import { getClientIp } from '../utils/clientInfo';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { appConfirm, appPrompt, appAlert } from '../utils/confirmDialog';
+import { Product, LossRecord, SystemSettings, StockMovement } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
 import {
@@ -17,16 +19,23 @@ import {
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
-import InventoryCutoffTool from './InventoryCutoffTool';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
-import {
-  analyzeSalesStockImpact,
-  applyCutoffToPhysicalCount,
-  indexMovements,
-  projectStock,
-  selectSalesAfter
-} from '../utils/inventoryCutoff';
+import { nonNegative, safeConversionRate } from '../utils/stockMath';
+import { countedLosses } from '../utils/losses';
+import { collectCategories, canonicalCategory } from '../utils/categories';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
+
+/** Categorias que existem mesmo sem artigos (lista inicial do sistema). */
+const CATEGORIAS_BASE = [
+  'Sementes',
+  'Químicos',
+  'Adubos',
+  'Ferramentas e Ferragens',
+  'Limpeza',
+  'Jardinagem e Irrigação',
+  'Máquinas e Equipamentos',
+  'Serviços'
+];
 
 interface StockModuleProps {
   currentUser?: { username: string; role: string } | null;
@@ -34,8 +43,10 @@ interface StockModuleProps {
 
 export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [products, setProducts] = useState<Product[]>([]);
+  /** ES-50: quando é que estes números foram lidos do servidor. */
+  const [dataSnapshotAt, setDataSnapshotAt] = useState<string | null>(null);
   const [losses, setLosses] = useState<LossRecord[]>([]);
-  const [categories, setCategories] = useState<string[]>(['Sementes', 'Químicos', 'Adubos', 'Ferramentas e Ferragens', 'Limpeza', 'Jardinagem e Irrigação', 'Máquinas e Equipamentos', 'Serviços']);
+  const [categories, setCategories] = useState<string[]>(CATEGORIAS_BASE);
   
   // Stock Sub-tabs & Transformation States (Parte 4 & Parte 7)
   const [stockSubTab, setStockSubTab] = useState<'inventory' | 'transformations' | 'losses' | 'reconciliation'>('inventory');
@@ -48,37 +59,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [lossesPreset, setLossesPreset] = useState<DateRangePreset>('Este Mês');
 
   // Reconciliation & Physical Count States (Parte 7 Enhanced)
-  // NOTA (Auditoria FASE 1, F-06): o "motor de reconciliação" que devolvia
-  // diferença zero foi removido; a contagem física é calculada ao vivo no painel.
+  const [reconciliationData, setReconciliationData] = useState<any | null>(null);
+  const [isReconciling, setIsReconciling] = useState(false);
   const [reconciliationFilter, setReconciliationFilter] = useState<'all' | 'discrepancies' | 'synced'>('all');
   const [reconciliationSearch, setReconciliationSearch] = useState('');
   const [physicalCounts, setPhysicalCounts] = useState<Record<string, number>>({});
+  /** Lotes vencidos com stock: listados, nunca apagados automaticamente. */
+  const [expiredProducts, setExpiredProducts] = useState<Product[]>([]);
+  const [expiringId, setExpiringId] = useState<string | null>(null);
   const [showApplyPhysicalModal, setShowApplyPhysicalModal] = useState(false);
   const [applyPassword, setApplyPassword] = useState('');
   const [applyError, setApplyError] = useState('');
   const [isApplyingAdjustment, setIsApplyingAdjustment] = useState(false);
-
-  /**
-   * CORTE DE INVENTÁRIO (Parte 10)
-   * Momento REAL em que a contagem física foi tirada no armazém/loja.
-   * Quando preenchido, o sistema desconta automaticamente ao valor contado todas as
-   * vendas registadas depois desse instante — é isto que impede o inventário de ficar
-   * inflacionado quando a contagem só é lançada horas mais tarde.
-   */
-  const [countCutoff, setCountCutoff] = useState('');
-  const [sales, setSales] = useState<Sale[]>([]);
-  const [showCutoffTool, setShowCutoffTool] = useState(false);
-
-  /** Vendas registadas DEPOIS do momento indicado para a contagem física. */
-  const cutoffSales = useMemo(
-    () => (countCutoff ? selectSalesAfter(sales, countCutoff) : []),
-    [sales, countCutoff]
-  );
-  /** Quantidades que já saíram da loja depois da contagem e que têm de ser descontadas. */
-  const cutoffImpact = useMemo(
-    () => analyzeSalesStockImpact(cutoffSales, products),
-    [cutoffSales, products]
-  );
 
   // New Product State
   const [showAddModal, setShowAddModal] = useState(false);
@@ -96,6 +88,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [newProdBuyPrice, setNewProdBuyPrice] = useState(0);
   const [newProdBuyPriceBulk, setNewProdBuyPriceBulk] = useState(0);
   const [newProdSellPrice, setNewProdSellPrice] = useState(0);
+  const [newProdTaxRate, setNewProdTaxRate] = useState(16);
   const [newProdSellPriceBulk, setNewProdSellPriceBulk] = useState(0);
   const [newProdUnit, setNewProdUnit] = useState('Unidades');
   const [newProdExpiry, setNewProdExpiry] = useState('');
@@ -110,7 +103,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showNewProdLinkInput, setShowNewProdLinkInput] = useState(false);
   const [showEditLinkInput, setShowEditLinkInput] = useState(false);
 
-  // Stock Adjustment States (Expanded to all product fields; gate uses the manager code configured in Painel Técnico)
+  // Stock Adjustment States (Expanded to all product fields, password code: "05082")
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [stockPassword, setStockPassword] = useState('');
@@ -130,6 +123,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [editBuyingPrice, setEditBuyingPrice] = useState(0);
   const [editBuyingPriceBulk, setEditBuyingPriceBulk] = useState(0);
   const [editSellingPrice, setEditSellingPrice] = useState(0);
+  const [editTaxRate, setEditTaxRate] = useState(16);
+  const [showMovementsModal, setShowMovementsModal] = useState(false);
+  const [movementsProduct, setMovementsProduct] = useState<Product | null>(null);
+  const [movementRows, setMovementRows] = useState<StockMovement[]>([]);
+  const [loadingMovements, setLoadingMovements] = useState(false);
   const [editSellingPriceBulk, setEditSellingPriceBulk] = useState(0);
   const [editExpiryDate, setEditExpiryDate] = useState('');
   const [editReference, setEditReference] = useState('');
@@ -143,13 +141,15 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showLossModal, setShowLossModal] = useState(false);
   const [lossProduct, setLossProduct] = useState<Product | null>(null);
   const [lossQty, setLossQty] = useState(0);
+  /** Unidade da quebra: sacos (converte para base) ou unidade base. */
+  const [lossUnit, setLossUnit] = useState<'base' | 'Bulk'>('base');
   const [lossReason, setLossReason] = useState<'Fora de Prazo' | 'Danos Físicos' | 'Quebras de Inventário' | 'Outro'>('Danos Físicos');
   const [lossJustification, setLossJustification] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Notification Banner
   const [toastMessage, setToastMessage] = useState('');
-  const [toastType, setToastType] = useState<ToastKind>('success');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('success');
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
@@ -185,6 +185,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteProductTarget, setDeleteProductTarget] = useState<Product | null>(null);
   const [deletePassword, setDeletePassword] = useState('');
+  /** Histórico do artigo a eliminar: decide entre desactivar e apagar (ES-37/38). */
+  const [deleteUsage, setDeleteUsage] = useState<{ sales: number; losses: number; movements: number; transformations: number; stock: number } | null>(null);
   const [deleteError, setDeleteError] = useState('');
 
   const handleConfirmDeleteProduct = async (e: React.FormEvent) => {
@@ -194,151 +196,136 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (!deleteProductTarget) return;
 
-    const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = (currentSettings.stockPasswordHash || '').trim();
+    const currentSettings = settings || (await dbService.getSettings());
 
-    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
-    if (!expectedPass || deletePassword !== expectedPass) {
+    if (!(await verifyAuthorizationPassword(deletePassword, currentSettings))) {
       setDeleteError('Senha de Gestor de Stock incorreta!');
       return;
     }
 
     setIsSubmitting(true);
     try {
+      const operador = currentUser?.username || 'Gestor de Stock';
+      const ip = await getClientIp().catch(() => 'desconhecido');
+      const uso = deleteUsage || (await dbService.getProductUsage(String(deleteProductTarget.id)));
+
+      // ES-38: a decisão é tomada com números à frente, não às cegas.
+      if (uso.stock > 0) {
+        setDeleteError(
+          `Este artigo ainda tem ${uso.stock} ${deleteProductTarget.baseUnit || 'un'} em stock. ` +
+            'Dê baixa do stock antes de o eliminar ou desactivar.'
+        );
+        return;
+      }
+
+      const temHistorico =
+        uso.sales > 0 || uso.losses > 0 || uso.movements > 0 || uso.transformations > 0;
+
+      if (temHistorico) {
+        // ES-37: com histórico não se apaga — desactiva-se e o histórico fica intacto.
+        await dbService.deactivateProduct({
+          productId: String(deleteProductTarget.id),
+          operator: operador,
+          ipAddress: ip,
+          reason:
+            `Pedido de eliminação com histórico ` +
+            `(${uso.sales} venda(s), ${uso.movements} movimento(s), ${uso.losses} quebra(s))`
+        });
+        await loadInventoryData();
+        setShowDeleteModal(false);
+        setDeleteProductTarget(null);
+        setDeletePassword('');
+        triggerToast(
+          `"${deleteProductTarget.name}" foi desactivado, não apagado: tem histórico ` +
+            `(${uso.sales} venda(s), ${uso.movements} movimento(s)). Sai do PDV, fica nas facturas.`,
+          'warning'
+        );
+        return;
+      }
+
       await dbService.deleteProduct(deleteProductTarget.id);
-      const updated = await dbService.getProducts();
-      setProducts(updated);
 
       void dbService.addAuditLog({
-        id: uid('log-'),
+        id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
-        username: 'Gestor de Stock',
-        ipAddress: 'N/D',
+        username: operador,
+        ipAddress: ip,
         action: 'Eliminação de Produto',
-        status: 'Sucesso',
-        details: `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}) foi eliminado com autorização de gestor.`
+        status: 'Alerta',
+        level: 'WARNING',
+        entity: 'products',
+        details:
+          `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}, código ${deleteProductTarget.code || '—'}) ` +
+          `eliminado sem histórico nem stock, com autorização de gestor.`
       });
+
+      const updated = await dbService.getProducts();
+      setProducts(updated);
 
       setShowDeleteModal(false);
       setDeleteProductTarget(null);
       setDeletePassword('');
-      triggerToast(`Produto "${deleteProductTarget.name}" eliminado com sucesso!`);
-    } catch (err) {
+      triggerToast(`Produto "${deleteProductTarget.name}" eliminado (não tinha histórico nem stock).`);
+    } catch (err: any) {
       console.error(err);
-      setDeleteError('Erro ao eliminar produto.');
+      setDeleteError(err?.message || 'Erro ao eliminar produto.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  /**
+   * Contagem física.
+   *
+   * ES-31/32/34: antes gravava o saldo absoluto, a perda ia para a base antes do
+   * produto e as sobras não deixavam rasto. Agora cada diferença é aplicada numa
+   * transacção, com movimento de stock; as faltas registam perda no mesmo
+   * commit.
+   */
   const handleApplyPhysicalInventory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isApplyingAdjustment) return;
     setApplyError('');
 
-    const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = (currentSettings?.stockPasswordHash || '').trim();
+    const currentSettings = settings || (await dbService.getSettings());
 
-    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
-    if (!expectedPass || applyPassword !== expectedPass) {
+    if (!(await verifyAuthorizationPassword(applyPassword, currentSettings))) {
       setApplyError('Senha de autorização de gestor incorreta.');
+      return;
+    }
+
+    const contagens: Record<string, number> = {};
+    for (const [id, valor] of Object.entries(physicalCounts)) {
+      if (valor === undefined || valor === null || !Number.isFinite(Number(valor))) continue;
+      contagens[id] = Number(valor);
+    }
+
+    if (Object.keys(contagens).length === 0) {
+      setApplyError('Não há quantidades contadas para aplicar.');
       return;
     }
 
     setIsApplyingAdjustment(true);
     try {
-      const prodsToSave: Product[] = [];
-      let adjustedCount = 0;
-      let lossCount = 0;
-      let totalLossVal = 0;
-
-      /**
-       * CORTE DE INVENTÁRIO: se o gestor indicou o momento real da contagem, as vendas
-       * registadas depois desse instante são descontadas ao valor contado. Sem isto, uma
-       * contagem lançada horas mais tarde faria o stock do sistema subir indevidamente.
-       */
-      const movementsIndex = indexMovements(cutoffImpact.movements);
-
-      for (const prod of products) {
-        const countedQty = physicalCounts[prod.id] !== undefined ? physicalCounts[prod.id] : prod.stockQty;
-        const movement = movementsIndex[String(prod.id)];
-        const physicalQty = countCutoff
-          ? applyCutoffToPhysicalCount(countedQty, movement)
-          : countedQty;
-        const diff = physicalQty - prod.stockQty;
-
-        if (diff !== 0) {
-          adjustedCount++;
-
-          // If physical count is less than system recorded stock, record an automatic loss
-          if (diff < 0) {
-            const missingQty = Math.abs(diff);
-            const lossVal = missingQty * getUnitCost(prod);
-            totalLossVal += lossVal;
-            lossCount++;
-
-            await dbService.addLoss({
-              id: uid('loss-phy-'),
-              date: new Date().toISOString().split('T')[0],
-              productId: prod.id,
-              productName: prod.name,
-              quantity: missingQty,
-              unit: prod.baseUnit || 'Unidades',
-              reason: 'Quebras de Inventário',
-              costValue: lossVal,
-              justification: `Ajuste por Reconciliação e Contagem Física de Inventário. Falta de ${missingQty} ${prod.baseUnit} identificada.`
-                + (countCutoff ? ` Contagem referida a ${countCutoff.replace('T', ' ')} (vendas posteriores já descontadas).` : '')
-            });
-          }
-
-          const updatedProd: Product = {
-            ...prod,
-            stockQty: Math.max(0, physicalQty),
-            updatedAt: new Date().toISOString()
-          };
-
-          // Produtos híbridos (saco + quilo): as vendas posteriores à contagem também
-          // têm de sair dos saldos de grosso e de retalho, para não ficarem incoerentes.
-          if (countCutoff && movement && movement.hasConversion) {
-            const projected = projectStock(movement, 'deduct');
-            if (projected.stockQtyBulk !== undefined) updatedProd.stockQtyBulk = projected.stockQtyBulk;
-            if (projected.stockQtyRetail !== undefined) updatedProd.stockQtyRetail = projected.stockQtyRetail;
-          }
-
-          prodsToSave.push(updatedProd);
-        }
-      }
-
-      if (prodsToSave.length > 0) {
-        await dbService.saveProducts(prodsToSave);
-      }
-
-      // Log to Audit Log
-      void dbService.addAuditLog({
-        id: uid('log-'),
-        timestamp: new Date().toISOString(),
-        username: currentUser?.username || 'Gestor de Stock',
-        ipAddress: 'N/D',
-        action: 'Ajuste de Contagem Física',
-        status: 'Sucesso',
-        level: 'WARNING',
-        details: `Reconciliação e contagem física aplicada: ${adjustedCount} produtos atualizados, ${lossCount} quebras geradas (${totalLossVal.toLocaleString()} MT).`
-          + (countCutoff
-            ? ` Corte de inventário activo: contagem referida a ${countCutoff.replace('T', ' ')}, com ${cutoffSales.length} venda(s) posteriores descontadas em ${cutoffImpact.movements.length} artigo(s).`
-            : ' Sem corte de inventário: contagem assumida como válida para o momento do lançamento.')
+      const resultado = await dbService.applyPhysicalCount({
+        counts: contagens,
+        operator: currentUser?.username || 'Gestor de Stock',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
-      // Reload fresh data
-      const freshProds = await dbService.getProducts();
-      setProducts(freshProds);
-      // NOTA (Auditoria FASE 1, F-06): o "motor de reconciliação" que devolvia
-      // diferença zero foi removido; a contagem física é calculada ao vivo no painel.
       setShowApplyPhysicalModal(false);
       setApplyPassword('');
-      triggerToast(`Inventário físico sincronizado com sucesso! (${adjustedCount} artigos atualizados)`);
-    } catch (err) {
-      console.error(err);
-      setApplyError('Falha ao gravar os ajustes de inventário na base de dados.');
+      setPhysicalCounts({});
+      triggerToast(
+        `Contagem aplicada: ${resultado.adjusted} artigo(s) — ${resultado.shortages} falta(s), ` +
+          `${resultado.surpluses} sobra(s), ${resultado.lossValue.toFixed(2)} MT de perdas.`
+      );
+      await loadInventoryData();
+      const res = await dbService.reconcileStock();
+      setReconciliationData(res);
+    } catch (erro: any) {
+      console.error(erro);
+      setApplyError(erro?.message || 'Falha ao gravar os ajustes de inventário.');
     } finally {
       setIsApplyingAdjustment(false);
     }
@@ -415,16 +402,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     return `${abbreviation}-${lotNumber}`;
   };
 
-  const handleRegenerateReferencesAll = () => {
-    if (isSubmitting) return;
-    askConfirmation(
-      'Gerar referências de todos os produtos',
-      'Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?',
-      doRegenerateReferencesAll
-    );
+  // F-05: consulta do livro de movimentos de um artigo.
+  const openMovements = async (product: Product) => {
+    setMovementsProduct(product);
+    setShowMovementsModal(true);
+    setLoadingMovements(true);
+    try {
+      setMovementRows(await dbService.getStockMovements(product.id, 100));
+    } catch {
+      setMovementRows([]);
+      triggerToast('Não foi possível carregar os movimentos deste artigo.');
+    } finally {
+      setLoadingMovements(false);
+    }
   };
 
-  const doRegenerateReferencesAll = async () => {
+  const handleRegenerateReferencesAll = async () => {
+    if (isSubmitting) return;
+    if (!(await appConfirm("Deseja realmente gerar novas referências para TODOS os produtos com base nas suas categorias e números de lote aleatórios?"))) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -436,24 +431,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast("Novas referências geradas para todos os produtos!");
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.", 'error');
+      triggerToast("Erro ao gerar referências.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleRegenerateReferencesSelected = () => {
+  const handleRegenerateReferencesSelected = async () => {
     if (isSubmitting) return;
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) return;
-    askConfirmation(
-      'Gerar referências dos produtos selecionados',
-      `Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`,
-      doRegenerateReferencesSelected
-    );
-  };
-
-  const doRegenerateReferencesSelected = async () => {
+    if (!(await appConfirm(`Deseja gerar novas referências para os ${selectedIds.length} produtos selecionados com base na categoria e lote aleatório?`))) return;
     setIsSubmitting(true);
     try {
       const updated = [...products];
@@ -469,7 +457,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       triggerToast(`Novas referências geradas para os produtos selecionados!`);
     } catch (err) {
       console.error(err);
-      triggerToast("Erro ao gerar referências.", 'error');
+      triggerToast("Erro ao gerar referências.");
     } finally {
       setIsSubmitting(false);
     }
@@ -548,62 +536,36 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     const list = await dbService.getProducts();
     const lossList = await dbService.getLosses();
     try {
-      // Necessário para o corte de inventário: movimentos posteriores à contagem física.
-      const saleList = await dbService.getSales();
-      setSales(saleList);
-    } catch (err) {
-      console.warn('Error loading sales in StockModule:', err);
-    }
-    try {
       const s = await dbService.getSettings();
       setSettings(s);
     } catch (err) {
       console.warn('Error loading settings in StockModule:', err);
     }
 
-    // 1. Rigorous Automatic Expiration Checks and transfers
-    const todayStr = new Date().toISOString().split('T')[0];
+    /**
+     * ES-01: o expurgo de lotes vencidos deixou de acontecer sozinho.
+     *
+     * Antes, abrir o ecrã de stock apagava o stock de todos os artigos vencidos
+     * — sem autorização, a cada carregamento, e só no total (sacos e retalho
+     * ficavam a vender). Uma data mal digitada fazia desaparecer mercadoria.
+     *
+     * Agora os vencidos são apenas **listados**; a baixa é uma decisão explícita
+     * com palavra-passe de gestor.
+     */
+    const todayStr = toLocalDateKey(new Date().toISOString());
     const updatedProducts: Product[] = [];
-    
+    const vencidos: Product[] = [];
+
     for (const prod of list) {
       let changed = false;
-      // Auto-generate EAN-13 barcode starting with "961" if missing completely
+      // Código em falta: gerado, mas registado na auditoria da importação.
       if (!prod.code) {
         prod.code = generateValidEAN13('961');
         changed = true;
       }
 
       if (prod.expiryDate && prod.expiryDate <= todayStr && prod.stockQty > 0) {
-        // Product expired! Automatically move all remaining qty to losses
-        const lostCost = prod.stockQty * prod.buyingPrice;
-        
-        await dbService.addLoss({
-          id: uid('loss-') + '-' + Math.random().toString(36).substr(2, 4),
-          productId: prod.id,
-          productName: prod.name + ' (VENCIDO - AUTO REMOVIDO)',
-          quantity: prod.stockQty,
-          unit: prod.baseUnit,
-          date: todayStr,
-          reason: 'Fora de Prazo',
-          justification: `Lote vencido na data de validade (${prod.expiryDate}). Transferência automática de segurança fiscal.`,
-          costValue: lostCost
-        });
-
-        // Set active stock to 0
-        prod.stockQty = 0;
-        await dbService.saveProduct(prod);
-        changed = true;
-
-        // Audit Log
-        void dbService.addAuditLog({
-          id: uid('log-'),
-          timestamp: new Date().toISOString(),
-          username: 'Sistema Automático',
-          ipAddress: '127.0.0.1',
-          action: 'Lote Expirado Removido',
-          status: 'Alerta',
-          details: `Lote de ${prod.name} atingiu a data de validade (${prod.expiryDate}) e foi movido para perdas.`
-        });
+        vencidos.push(prod);
       }
 
       if (changed) {
@@ -612,20 +574,68 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       updatedProducts.push(prod);
     }
 
+    setExpiredProducts(vencidos);
+
     setProducts(updatedProducts.sort((a, b) => a.name.localeCompare(b.name)));
     setLosses(lossList);
 
-    // Extract categories
-    const customCats = new Set<string>(categories);
-    updatedProducts.forEach(p => {
-      if (p.category) customCats.add(p.category);
-    });
-    setCategories(Array.from(customCats));
+    // ES-51: uma lista canónica — «Adubos», «adubos» e «adubos » são a mesma
+    // categoria; o rótulo mostrado é o mais usado.
+    setCategories(collectCategories(updatedProducts, CATEGORIAS_BASE));
+    setDataSnapshotAt(new Date().toISOString());
   };
 
-  const triggerToast = (msg: string, type: ToastKind = 'success') => {
+  /**
+   * Baixa de um lote vencido — acção explícita, com palavra-passe de gestor.
+   * Substitui o expurgo automático que corria ao abrir o ecrã (ES-01).
+   */
+  const handleExpireProduct = async (produto: Product) => {
+    if (isSubmitting) return;
+    const pw = await appPrompt(
+      `Dar baixa do lote vencido de ${produto.name} (${produto.stockQty} ${produto.baseUnit})?\n\n` +
+        'A mercadoria sai do stock e é registada uma perda. Introduza a palavra-passe de gestor.'
+    );
+    if (pw === null) return;
+    const configAtual = settings || (await dbService.getSettings().catch(() => null));
+    if (!(await verifyAuthorizationPassword(pw, configAtual))) {
+      triggerToast('Palavra-passe incorrecta: a baixa não foi feita.', 'error');
+      return;
+    }
+
+    setExpiringId(String(produto.id));
+    try {
+      const resultado = await dbService.expireProductBatch({
+        productId: String(produto.id),
+        operator: currentUser?.username || 'Gestor',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
+      });
+      triggerToast(
+        `${resultado.removedBase} ${produto.baseUnit} de ${resultado.productName} dados como perdidos (${resultado.costValue.toFixed(2)} MT).`,
+        'success'
+      );
+      await loadInventoryData();
+    } catch (erro: any) {
+      triggerToast(erro?.message || 'Falha ao dar baixa do lote vencido.', 'error');
+    } finally {
+      setExpiringId(null);
+    }
+  };
+
+  /**
+   * ES-50: um relatório de stock tem de dizer de quando são os números.
+   * Sem isto, um PDF impresso às 9h pode ter as quantidades das 8h e ninguém
+   * sabe — nem quem o arquiva, nem quem o lê no município.
+   */
+  const describeSnapshot = () => {
+    const lido = dataSnapshotAt ? new Date(dataSnapshotAt) : new Date();
+    const hora = lido.toLocaleTimeString('pt-MZ', { hour: '2-digit', minute: '2-digit' });
+    const dia = lido.toLocaleDateString('pt-MZ');
+    return `Dados lidos às ${hora} de ${dia} · ${products.length} artigos no catálogo`;
+  };
+
+  const triggerToast = (msg: string, tipo: 'success' | 'error' | 'warning' = 'success') => {
+    setToastType(tipo);
     setToastMessage(msg);
-    setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
   };
 
@@ -639,7 +649,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (!newProdName) {
       setNewProdError('Preencha o nome do produto.');
-      triggerToast('Preencha o nome do produto.', 'error');
+      triggerToast('Preencha o nome do produto.');
       return;
     }
 
@@ -662,21 +672,62 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
+    // ES-11: quantidade inicial negativa não é mercadoria.
+    const qtdInicial = isBulkEnabled
+      ? (Number(newProdQtyBulk) * Number(newConversionRate)) + Number(newProdQtyRetail)
+      : Number(newProdQty);
+    if (!Number.isFinite(qtdInicial) || qtdInicial < 0) {
+      setNewProdError('A quantidade inicial não pode ser negativa.');
+      triggerToast('A quantidade inicial não pode ser negativa.', 'error');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      const codeToUse = newProdCode.trim() || generateBarcodeValue();
+      const codeToUse = (newProdCode.trim() || generateBarcodeValue()).trim();
 
-      const existingWithCode = products.find(p => p.code?.trim().toLowerCase() === codeToUse.toLowerCase());
-      if (existingWithCode) {
-        setNewProdError(`O código de barras "${codeToUse}" já está atribuído ao produto "${existingWithCode.name}".`);
-        triggerToast(`Código de barras "${codeToUse}" já existe!`, 'error');
+      // ES-51: reaproveita a categoria existente em vez de criar «Adubos » ao lado de «Adubos».
+      const cat = canonicalCategory(
+        newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory,
+        categories
+      );
+
+      /**
+       * ES-07: código único. Dois artigos com o mesmo código de barras fazem o
+       * scanner do PDV vender o primeiro que encontrar — o cliente leva um
+       * produto e a factura descreve outro.
+       */
+      const donoDoCodigo = products.find(
+        p => String(p.code || '').trim().toLowerCase() === codeToUse.toLowerCase()
+      );
+      if (donoDoCodigo) {
+        setNewProdError(`O código ${codeToUse} já pertence a "${donoDoCodigo.name}".`);
+        triggerToast(`Código duplicado: já é usado por ${donoDoCodigo.name}.`, 'error');
         setIsSubmitting(false);
         return;
       }
-
-      const cat = newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory;
       const finalProdName = newProdName.trim().toUpperCase();
+
+      /**
+       * ES-13: nome repetido. Não é proibido (o mesmo produto pode vir de dois
+       * fornecedores), mas tem de ser uma decisão — não um acidente que deixa
+       * dois «MILHO» na lista do PDV.
+       */
+      const nomeNormalizado = finalProdName.replace(/\s+/g, ' ').toLowerCase();
+      const mesmoNome = products.find(
+        p => String(p.name || '').replace(/\s+/g, ' ').trim().toLowerCase() === nomeNormalizado
+      );
+      if (mesmoNome) {
+        const continuar = await appConfirm(
+          `Já existe um artigo chamado "${mesmoNome.name}" (código ${mesmoNome.code || '—'}).\n\n` +
+            'Criar outro com o mesmo nome dificulta a escolha no PDV. Continuar mesmo assim?'
+        );
+        if (!continuar) {
+          setIsSubmitting(false);
+          return;
+        }
+      }
 
       const computedStockQty = isBulkEnabled 
         ? (Number(newProdQtyBulk) * Number(newConversionRate)) + Number(newProdQtyRetail) 
@@ -685,13 +736,15 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       const bulkBuyPrice = Number(newProdBuyPriceBulk);
 
       const newProduct: Product = {
-        id: uid('prod-'),
+        id: 'prod-' + Date.now(),
         code: codeToUse,
         name: finalProdName,
         category: cat || 'Geral',
-        stockQty: computedStockQty,
-        stockQtyBulk: isBulkEnabled ? Number(newProdQtyBulk) : undefined,
-        stockQtyRetail: isBulkEnabled ? Number(newProdQtyRetail) : undefined,
+        // O stock inicial entra depois, como movimento de entrada — assim o
+        // livro de movimentos explica o saldo desde o primeiro dia (ES-08).
+        stockQty: 0,
+        stockQtyBulk: isBulkEnabled ? 0 : undefined,
+        stockQtyRetail: isBulkEnabled ? 0 : undefined,
         buyingPriceBulk: isBulkEnabled ? bulkBuyPrice : undefined,
         buyingPrice: isBulkEnabled ? bulkBuyPrice / Number(newConversionRate) : Number(newProdBuyPrice),
         sellingPrice: Number(newProdSellPrice),
@@ -702,10 +755,37 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         parentUnit: newParentUnit || undefined,
         reference: newProdReference || undefined,
         isService: newProdIsService,
-        imageUrl: newProdImageUrl || undefined
+        imageUrl: newProdImageUrl || undefined,
+        taxRate: Number(newProdTaxRate) || 0
       };
 
       await dbService.saveProduct(newProduct);
+
+      if (computedStockQty > 0) {
+        await dbService.adjustStock({
+          productId: newProduct.id,
+          deltaBase: computedStockQty,
+          reason: 'Stock inicial no cadastro do artigo',
+          operator: currentUser?.username || 'Gestor de Stock',
+          source: 'Entrada Manual',
+          ipAddress: await getClientIp().catch(() => 'desconhecido')
+        });
+      }
+
+      // ES-09: criar produto passa a ficar em auditoria.
+      void dbService.addAuditLog({
+        id: 'log-prod-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        username: currentUser?.username || 'Gestor de Stock',
+        ipAddress: await getClientIp().catch(() => 'desconhecido'),
+        action: 'Criação de Produto',
+        status: 'Sucesso',
+        entity: 'products',
+        details:
+          `Produto "${finalProdName}" (código ${codeToUse}, categoria ${newProduct.category}) criado ` +
+          `com stock inicial ${computedStockQty} ${newProduct.baseUnit}.`
+      });
+
       setShowAddModal(false);
       triggerToast(`Produto/Serviço ${newProdName} cadastrado com sucesso!`);
       loadInventoryData();
@@ -720,6 +800,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdBuyPriceBulk(0);
       setNewProdSellPrice(0);
       setNewProdSellPriceBulk(0);
+      setNewProdTaxRate(16);
       setNewProdError('');
       setNewProdExpiry('');
       setNewConversionRate(1);
@@ -732,7 +813,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdImageUrl('');
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao cadastrar produto.', 'error');
+      triggerToast('Erro ao cadastrar produto.');
     } finally {
       setIsSubmitting(false);
     }
@@ -749,10 +830,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     // Log to Audit Trail
     void dbService.addAuditLog({
-      id: uid('log-'),
+      id: 'log-' + Date.now(),
       timestamp: new Date().toISOString(),
-      username: 'Operador / Técnico',
-      ipAddress: '127.0.0.1',
+      username: currentUser?.username || 'Operador',
+      ipAddress: await getClientIp().catch(() => 'desconhecido'),
       action: 'Regerar Código de Barras',
       status: 'Sucesso',
       details: `Código de barras do produto ${prod.name} regenerado. SKU Antigo: ${oldCode} -> Novo Código: ${newCode}`
@@ -765,7 +846,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const handleRegenerateBarcodesSelected = () => {
     const selectedIds = Object.keys(selectedProds).filter(id => selectedProds[id]);
     if (selectedIds.length === 0) {
-      triggerToast('Nenhum produto selecionado. Marque os produtos primeiro.', 'warning');
+      triggerToast('Nenhum produto selecionado. Marque os produtos primeiro.');
       return;
     }
     askConfirmation(
@@ -832,8 +913,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+    doc.text(describeSnapshot(), 15, 33);
 
     doc.setDrawColor(190, 18, 60);
     doc.setLineWidth(1);
@@ -989,8 +1071,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+    doc.text(describeSnapshot(), 15, 33);
 
     doc.setDrawColor(0, 106, 78);
     doc.setLineWidth(1);
@@ -1101,7 +1184,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     });
 
     const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-    const cNuit = settings?.companyNuit || '401976590';
+    const cNuit = companyNuit(settings?.companyNuit);
 
     // Group products by category
     const categoryMap: { [cat: string]: Product[] } = {};
@@ -1132,10 +1215,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setTextColor(100, 116, 139);
     doc.text(`${cName} • NUIT: ${cNuit}`, 15, 23);
     doc.text(`Emissão: ${new Date().toLocaleString('pt-MZ')} • Total de Categorias: ${sortedCategories.length}`, 15, 27);
+    doc.text(describeSnapshot(), 15, 31);
 
     doc.setDrawColor(0, 106, 78);
     doc.setLineWidth(1);
-    doc.line(15, 30, 195, 30);
+    doc.line(15, 34, 195, 34);
 
     // Summary Box
     doc.saveGraphicsState();
@@ -1337,7 +1421,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       : products;
 
     if (productsToExport.length === 0) {
-      triggerToast(selectedOnly ? 'Nenhum produto selecionado. Marque os produtos que deseja descarregar.' : 'Nenhum produto em catálogo.', 'warning');
+      triggerToast(selectedOnly ? 'Nenhum produto selecionado. Marque os produtos que deseja descarregar.' : 'Nenhum produto em catálogo.');
       return;
     }
 
@@ -1347,13 +1431,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     productsToExport.forEach(p => {
       stickersHtml += `
         <div class="sticker">
-          <div class="company">AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590</div>
+          <div class="company">{companyName(settings?.companyName)} • NUIT: {companyNuit(settings?.companyNuit)}</div>
           <div class="prod-name">${p.name}</div>
           <div class="category">${p.category}</div>
           <div class="barcode-container">
             ${getEan13SvgString(p.code, 180, 80)}
           </div>
-          <div class="price">Preço: ${p.sellingPrice.toLocaleString()} MT</div>
+          <div class="price">Preço: ${p.sellingPrice.toLocaleString('pt-MZ')} MT</div>
         </div>
       `;
     });
@@ -1525,46 +1609,50 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   };
 
   // Direct Inline Adjustment helper with password dialog verification
+  /**
+   * Ajuste directo na tabela.
+   *
+   * ES-21: antes escrevia o saldo absoluto a partir do ecrã — uma venda feita
+   * entre a leitura e o clique era apagada. Agora a diferença é calculada
+   * dentro da transacção, com movimento de stock e auditoria no mesmo commit.
+   */
   const adjustProductStockDirectly = async (product: Product, newQty: number) => {
     if (newQty < 0) {
       triggerToast('A quantidade em stock não pode ser negativa.', 'error');
       return;
     }
 
-    const inputPw = (settings?.stockPasswordHash || '').trim();
-    const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
-    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
-    if (!inputPw || !pw || pw.trim() !== inputPw) {
-      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.', 'warning');
+    const pw = await appPrompt('Introduza a Palavra-passe de Autorização do Stock para alterar o stock deste produto.');
+    if (!pw) {
+      triggerToast('Operação cancelada: é necessária a palavra-passe de autorização do stock.', 'error');
+      return;
+    }
+    if (!(await verifyAuthorizationPassword(pw, settings))) {
+      triggerToast('A palavra-passe de segurança do stock está incorreta.', 'error');
       return;
     }
 
-    const prevQty = product.stockQty;
-    product.stockQty = newQty;
-    
-    // Auto-reallocate for hybrid products
-    if (product.parentUnit && product.conversionRate && product.conversionRate > 1) {
-      const rate = product.conversionRate || 1;
-      product.stockQtyBulk = Math.floor(newQty / rate);
-      product.stockQtyRetail = newQty % rate;
+    try {
+      const resultado = await dbService.adjustStock({
+        productId: String(product.id),
+        absoluteBase: Number(newQty),
+        reason: 'Ajuste directo na lista de stock',
+        operator: currentUser?.username || 'Gestor de Stock',
+        source: 'Ajuste',
+        ipAddress: await getClientIp().catch(() => 'desconhecido'),
+        allowNegative: false
+      });
+
+      triggerToast(
+        resultado.delta === 0
+          ? `O stock de ${product.name} já estava em ${newQty}.`
+          : `Stock de ${product.name}: ${resultado.previousBase} → ${resultado.newBase} ${product.baseUnit}.`
+      );
+      await loadInventoryData();
+      setInlineEditingProductId(null);
+    } catch (erro: any) {
+      triggerToast(erro?.message || 'Falha ao ajustar o stock.', 'error');
     }
-
-    await dbService.saveProduct(product);
-
-    // Security Audit Log
-    void dbService.addAuditLog({
-      id: uid('log-'),
-      timestamp: new Date().toISOString(),
-      username: 'Operador / Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Ajuste de Stock Direto',
-      status: 'Sucesso',
-      details: `Produto: ${product.name} (SKU: ${product.code}). Quantidade de stock alterada de ${prevQty} para ${newQty}. Validação de senha inline efetuada.`
-    });
-
-    triggerToast(`Stock ajustado de ${prevQty} para ${newQty} ${product.baseUnit}!`);
-    loadInventoryData();
-    setInlineEditingProductId(null);
   };
 
   // Sack requisition flow: moves sacks from wholesale (bulk) to retail stock
@@ -1573,70 +1661,79 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (!reqProduct) return;
     setReqError('');
 
-    const currentBulk = reqProduct.stockQtyBulk || 0;
     if (reqQty <= 0) {
       setReqError('A quantidade requisitada deve ser maior que zero.');
-      return;
-    }
-    if (reqQty > currentBulk) {
-      setReqError(`Quantidade insuficiente no stock de revenda. Disponível: ${currentBulk} ${reqProduct.parentUnit}`);
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const rate = reqProduct.conversionRate || 1;
-      const prevBulk = currentBulk;
-      const prevRetail = reqProduct.stockQtyRetail || 0;
-
-      // Deduct sacks from bulk and add to retail
-      reqProduct.stockQtyBulk = prevBulk - reqQty;
-      reqProduct.stockQtyRetail = prevRetail + (reqQty * rate);
-      // Overall stockQty remains the same (just division shifted!)
-
-      await dbService.saveProduct(reqProduct);
-
-      // Audit Log
-      void dbService.addAuditLog({
-        id: uid('log-'),
-        timestamp: new Date().toISOString(),
-        username: 'Gestor de Stock',
-        ipAddress: '127.0.0.1',
-        action: 'Requisição de Saco para Venda a Retalho',
-        status: 'Sucesso',
-        details: `Produto: ${reqProduct.name}. Requisitado(s) ${reqQty} ${reqProduct.parentUnit}(s). Reduziu revenda de ${prevBulk} para ${reqProduct.stockQtyBulk} e aumentou retalho de ${prevRetail} para ${reqProduct.stockQtyRetail} ${reqProduct.baseUnit}.`
+      // ES-24/25/26: o saldo de revenda é lido no servidor, dentro da
+      // transacção. Antes escrevia-se o valor do ecrã e dois operadores
+      // perdiam uma das requisições.
+      const resultado = await dbService.requisitionSacks({
+        productId: String(reqProduct.id),
+        sacks: Number(reqQty),
+        operator: currentUser?.username || 'Gestor de Stock',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
-      triggerToast(`Requisição concluída! ${reqQty} ${reqProduct.parentUnit}(s) transferido(s) com sucesso para venda a retalho.`);
+      triggerToast(
+        `Requisição registada: ${reqQty} ${reqProduct.parentUnit} de ${resultado.productName}. ` +
+          `Revenda ${resultado.bulk} · retalho ${resultado.retail} ${reqProduct.baseUnit} (total ${resultado.total}).`
+      );
       setShowRequisitionModal(false);
       setReqProduct(null);
       setReqQty(1);
-      loadInventoryData();
+      await loadInventoryData();
     } catch (err: any) {
-      setReqError('Erro ao executar a requisição: ' + err.message);
+      setReqError(err?.message || 'Erro ao executar a requisição.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const handleResetOfficialCatalog = async () => {
+    if (isSubmitting) return;
+    askConfirmation(
+      'RESTAURAR INVENTÁRIO OFICIAL',
+      'ATENÇÃO: Esta ação irá substituir os produtos atuais pelo catálogo oficial do documento (Químicos, Sementes, Insumos, Fertilizantes e Máquinas) com preços e quantidades exatas. Deseja continuar?',
+      async () => {
+        if (isSubmitting) return;
+        setIsSubmitting(true);
+        let catalogRestored = false;
+        try {
+          await dbService.resetProductsToInitial();
+          catalogRestored = true;
+          try {
+            await loadInventoryData();
+          } catch (refreshError) {
+            // The catalogue is already persisted. A later refresh must not
+            // turn that completed action into an apparent failure.
+            console.warn('Catálogo restaurado, mas a atualização visual falhou:', refreshError);
+          }
+          triggerToast('Inventário oficial restaurado com sucesso!');
+        } catch (err) {
+          console.error('Erro ao restaurar catálogo:', err);
+          triggerToast(catalogRestored
+            ? 'Inventário oficial restaurado. A atualização visual será tentada novamente.'
+            : 'Erro ao restaurar catálogo oficial.');
+        } finally {
+          setIsSubmitting(false);
+        }
+      }
+    );
+  };
 
 
 
-
-
-
-
-
-  // Secure Manual Stock Adjustments (Requires the manager code configured in Painel Técnico)
+  // Secure Manual Stock Adjustments (Requires secondary code: "05082")
   const handleAdjustStock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setAdjustError('');
 
-    const inputPw = (stockPassword || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '').trim();
-    // Auditoria FASE 1 (S-03): sem códigos hardcoded — apenas o código configurado.
-    if (!targetPw || inputPw !== targetPw) {
+    if (!(await verifyAuthorizationPassword(stockPassword, settings))) {
       setAdjustError('A palavra-passe de segurança do stock está incorreta.');
       return;
     }
@@ -1663,56 +1760,77 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
+    // ES-11/ES-19: nem quantidade negativa, nem conversão que divida por zero.
+    const conversaoSegura = safeConversionRate(editConversionRate);
+    const computedStockQty = isBulkEnabled
+      ? nonNegative(editStockQtyBulk) * conversaoSegura + nonNegative(editStockQtyRetail)
+      : nonNegative(editStockQty);
+
+    if (!Number.isFinite(computedStockQty) || computedStockQty < 0) {
+      setAdjustError('A quantidade em stock não pode ser negativa.');
+      triggerToast('A quantidade em stock não pode ser negativa.', 'error');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      const computedStockQty = isBulkEnabled 
-        ? (Number(editStockQtyBulk) * Number(editConversionRate)) + Number(editStockQtyRetail) 
-        : Number(editStockQty);
 
       const prevQty = selectedProduct.stockQty;
-      
-      const codeToUse = editCode.trim() || selectedProduct.code || generateBarcodeValue();
 
-      const existingOther = products.find(p => p.id !== selectedProduct.id && p.code?.trim().toLowerCase() === codeToUse.toLowerCase());
-      if (existingOther) {
-        setAdjustError(`O código de barras "${codeToUse}" já pertence ao produto "${existingOther.name}".`);
-        triggerToast(`Código de barras "${codeToUse}" já em uso!`, 'error');
+      /**
+       * ES-14/15: deixou de se mutar o objecto em estado e de gravar saldos
+       * absolutos. Primeiro os dados do artigo, depois o stock — sempre por
+       * diferença, com movimento e auditoria.
+       */
+      const codeToUse = (editCode.trim() || selectedProduct.code || generateBarcodeValue()).trim();
+
+      const donoDoCodigo = products.find(
+        p =>
+          String(p.id) !== String(selectedProduct.id) &&
+          String(p.code || '').trim().toLowerCase() === codeToUse.toLowerCase()
+      );
+      if (donoDoCodigo) {
+        setAdjustError(`O código ${codeToUse} já pertence a "${donoDoCodigo.name}".`);
         setIsSubmitting(false);
         return;
       }
 
-      // Update all properties
-      selectedProduct.name = editName;
-      selectedProduct.code = codeToUse;
-      selectedProduct.category = editCategory;
-      selectedProduct.baseUnit = editBaseUnit;
-      selectedProduct.parentUnit = editParentUnit || undefined;
-      selectedProduct.conversionRate = editConversionRate > 1 ? Number(editConversionRate) : undefined;
-      selectedProduct.stockQty = computedStockQty;
-      selectedProduct.stockQtyBulk = isBulkEnabled ? Number(editStockQtyBulk) : undefined;
-      selectedProduct.stockQtyRetail = isBulkEnabled ? Number(editStockQtyRetail) : undefined;
-      selectedProduct.buyingPriceBulk = isBulkEnabled ? Number(editBuyingPriceBulk) : undefined;
-      selectedProduct.buyingPrice = isBulkEnabled
-        ? Number(editBuyingPriceBulk) / Number(editConversionRate)
-        : Number(editBuyingPrice);
-      selectedProduct.sellingPrice = Number(editSellingPrice);
-      selectedProduct.sellingPriceBulk = isBulkEnabled ? Number(editSellingPriceBulk) : undefined;
-      selectedProduct.expiryDate = editExpiryDate || undefined;
-      selectedProduct.reference = editReference || undefined;
-      selectedProduct.isService = editIsService;
-      selectedProduct.imageUrl = editImageUrl || undefined;
+      const produtoAtualizado: Product = {
+        ...selectedProduct,
+        name: editName,
+        code: codeToUse,
+        category: canonicalCategory(editCategory, categories),
+        baseUnit: editBaseUnit,
+        parentUnit: editParentUnit || undefined,
+        conversionRate: conversaoSegura > 1 ? conversaoSegura : undefined,
+        buyingPriceBulk: isBulkEnabled ? Number(editBuyingPriceBulk) : undefined,
+        buyingPrice: isBulkEnabled
+          ? Number(editBuyingPriceBulk) / conversaoSegura
+          : Number(editBuyingPrice),
+        sellingPrice: Number(editSellingPrice),
+        sellingPriceBulk: isBulkEnabled ? Number(editSellingPriceBulk) : undefined,
+        expiryDate: editExpiryDate || undefined,
+        reference: editReference || undefined,
+        isService: editIsService,
+        imageUrl: editImageUrl || undefined,
+        taxRate: Number(editTaxRate) || 0
+      };
 
-      await dbService.saveProduct(selectedProduct);
+      await dbService.saveProduct(produtoAtualizado);
 
-      void dbService.addAuditLog({
-        id: uid('log-'),
-        timestamp: new Date().toISOString(),
-        username: 'Operador / Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Ajuste Completo de Produto',
-        status: 'Sucesso',
-        details: `Produto: ${editName} (SKU: ${editCode}). Alteração geral realizada. Qtd anterior: ${prevQty} -> Nova Qtd: ${editStockQty}. Validação por senha bem-sucedida.`
-      });
+      // O stock é sempre a última operação: se falhar, os dados do artigo já
+      // estão gravados e o stock continua intacto (nunca um saldo inventado).
+      if (Number.isFinite(computedStockQty)) {
+        await dbService.adjustStock({
+          productId: String(selectedProduct.id),
+          absoluteBase: computedStockQty,
+          reason: `Ajuste no formulário do artigo (antes: ${prevQty})`,
+          operator: currentUser?.username || 'Gestor de Stock',
+          source: 'Ajuste',
+          ipAddress: await getClientIp().catch(() => 'desconhecido'),
+          allowNegative: false
+        });
+      }
 
       setShowAdjustModal(false);
       setSelectedProduct(null);
@@ -1721,16 +1839,27 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setEditSacksForWholesale(0);
       setEditSacksForRetail(0);
       setEditIsService(false);
-      triggerToast(`Artigo ${editName} e stock ajustados com sucesso!`);
-      loadInventoryData();
-    } catch (err) {
-      setAdjustError('Erro ao gravar alteração.');
+      triggerToast(`Artigo ${editName} actualizado${computedStockQty !== prevQty ? ' e stock ajustado' : ''}.`);
+      await loadInventoryData();
+    } catch (err: any) {
+      setAdjustError(err?.message || 'Erro ao gravar alteração.');
+      // Os dados do artigo podem já estar gravados: o ecrã não pode continuar a
+      // mostrar os valores antigos como se nada tivesse mudado.
+      await loadInventoryData().catch(() => undefined);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   // Explicit Loss Log Handlers
+  /**
+   * Quebra / perda.
+   *
+   * ES-27: a baixa era sempre em unidade base — dar baixa de 1 saco (50 kg)
+   * retirava 1 kg do stock, enquanto o relatório registava 50 kg. Agora a
+   * conversão é aplicada e tudo (saldo, perda, movimento, auditoria) é escrito
+   * na mesma transacção.
+   */
   const handleRegisterLoss = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -1740,60 +1869,31 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
-    if (lossQty > lossProduct.stockQty) {
-      triggerToast('A quantidade de quebra excede o stock ativo disponível.', 'error');
-      return;
-    }
-
     setIsSubmitting(true);
     try {
-      const costLost = lossQty * lossProduct.buyingPrice;
-
-      // Deduct stock quantity
-      if (typeof (dbService as any).deductProductStock === 'function') {
-        await (dbService as any).deductProductStock([{
-          productId: lossProduct.id,
-          hasConversion: false,
-          qtyToReduce: lossQty
-        }]);
-      } else {
-        lossProduct.stockQty = Math.max(0, lossProduct.stockQty - lossQty);
-        await dbService.saveProduct(lossProduct);
-      }
-
-      // Register loss
-      await dbService.addLoss({
-        id: uid('loss-'),
-        productId: lossProduct.id,
-        productName: lossProduct.name,
+      const resultado = await dbService.registerLossAtomic({
+        productId: String(lossProduct.id),
         quantity: Number(lossQty),
-        unit: lossProduct.baseUnit,
-        date: new Date().toISOString().split('T')[0],
+        unit: lossUnit === 'Bulk' ? 'Bulk' : 'base',
         reason: lossReason,
         justification: lossJustification,
-        costValue: costLost
+        operator: currentUser?.username || 'Operador',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
-    // Security Audit Log
-    void dbService.addAuditLog({
-      id: uid('log-'),
-      timestamp: new Date().toISOString(),
-      username: 'Operador',
-      ipAddress: '127.0.0.1',
-      action: 'Registo de Quebra/Perda',
-      status: 'Alerta',
-      details: `Quebra de ${lossQty} de ${lossProduct.name} devido a ${lossReason}. Valor do prejuízo: ${costLost}MT.`
-    });
-
-    setShowLossModal(false);
-    setLossProduct(null);
-    setLossQty(0);
-    setLossJustification('');
-    triggerToast('Quebra física registada com sucesso.');
-    loadInventoryData();
-    } catch (err) {
-      console.error(err);
-      triggerToast('Erro ao registar quebra.', 'error');
+      const unidadeBase = lossProduct.baseUnit;
+      setShowLossModal(false);
+      setLossProduct(null);
+      setLossUnit('base');
+      setLossQty(0);
+      setLossJustification('');
+      triggerToast(
+        `Quebra registada: ${resultado.baseQty} ${unidadeBase} = ${resultado.costValue.toFixed(2)} MT.`
+      );
+      await loadInventoryData();
+    } catch (erro: any) {
+      console.error(erro);
+      triggerToast(erro?.message || 'Erro ao registar quebra.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -1846,8 +1946,23 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
   return (
     <div className="space-y-6" id="stock_module">
-      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
-      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
+      {/* Toast banner */}
+      {toastMessage && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border ${
+            toastType === 'error'
+              ? 'bg-red-700 border-red-900'
+              : toastType === 'warning'
+                ? 'bg-amber-600 border-amber-800'
+                : 'bg-primary border-green-700'
+          }`}
+        >
+          <span className="material-symbols-outlined">
+            {toastType === 'error' ? 'error' : toastType === 'warning' ? 'warning' : 'info'}
+          </span>
+          <span className="text-sm font-semibold">{toastMessage}</span>
+        </div>
+      )}
 
       {/* RENDER IN PORTAL (TOP HEADER ACTIONS, SIDE OF DATE) */}
       {typeof document !== 'undefined' && document.getElementById('module-header-actions') && createPortal(
@@ -1876,7 +1991,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
           {/* Os blocos da gestão de stock moved here */}
           <div className="flex items-center gap-1 shrink-0">
-            {/* 1. Dropdown de Códigos e Etiquetas */}
+            {/* 1. Restaurar Lista Anexo */}
+            <button
+              onClick={handleResetOfficialCatalog}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg text-[10px] font-bold transition-all shadow-xs cursor-pointer shrink-0"
+              title="Recarregar a lista oficial de produtos, preços e quantidades em anexo"
+            >
+              <span className="material-symbols-outlined text-[13px]">inventory_2</span>
+              Restaurar Lista
+            </button>
+
+            {/* 2. Dropdown de Códigos e Etiquetas */}
             <div className="relative inline-block text-left shrink-0">
               <button
                 ref={codesButtonRef}
@@ -2063,7 +2188,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           }`}
         >
           <span className="material-symbols-outlined text-[18px] text-red-500">warning</span>
-          Quebras & Perdas ({losses.length})
+          Quebras & Perdas ({countedLosses(losses).length})
         </button>
 
         <button
@@ -2081,6 +2206,37 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       </div>
 
       {/* --- SUB-TAB 1: INVENTÁRIO GERAL DE PRODUTOS --- */}
+      {expiredProducts.length > 0 && stockSubTab === 'inventory' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-xl px-3 py-2.5 space-y-1.5">
+          <p className="text-[11px] font-black text-rose-800 flex items-center gap-1">
+            <span className="material-symbols-outlined text-[15px]">event_busy</span>
+            {expiredProducts.length} lote(s) vencido(s) com stock — nada foi apagado
+          </p>
+          <p className="text-[10px] text-rose-700">
+            O sistema já não dá baixa sozinho. Confirme fisicamente e dê baixa, um a um, com a
+            palavra-passe de gestor.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {expiredProducts.slice(0, 6).map(produto => (
+              <button
+                key={produto.id}
+                type="button"
+                onClick={() => handleExpireProduct(produto)}
+                disabled={expiringId === String(produto.id)}
+                className="px-2 py-1 rounded-md bg-white border border-rose-300 text-[10px] font-bold text-rose-800 hover:bg-rose-100 disabled:opacity-60"
+              >
+                {produto.name} · {produto.stockQty} {produto.baseUnit}
+              </button>
+            ))}
+            {expiredProducts.length > 6 && (
+              <span className="text-[10px] text-rose-700 font-bold self-center">
+                +{expiredProducts.length - 6} outro(s)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {stockSubTab === 'inventory' && (
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto custom-scrollbar">
@@ -2143,7 +2299,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                     {/* Name & Code */}
                     <td className="px-6 py-4">
-                      <div className="font-bold text-gray-800 text-sm">{prod.name}</div>
+                      <div className={`font-bold text-sm flex items-center gap-1.5 ${prod.isActive === false ? 'text-slate-400 line-through' : 'text-gray-800'}`}>
+                        {prod.name}
+                        {prod.isActive === false && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-black uppercase no-underline">
+                            Inactivo
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-2 mt-1">
                         <div
                           onClick={() => setPreviewBarcodeProduct(prod)}
@@ -2172,7 +2335,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                     {/* Selling Price */}
                     <td className="px-8 py-4 text-right font-bold font-mono text-slate-800">
-                      {prod.sellingPrice.toLocaleString()} MT
+                      {prod.sellingPrice.toLocaleString('pt-MZ')} MT
                     </td>
 
                     {/* Quantidade em Sacos Column */}
@@ -2255,6 +2418,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                               setEditBuyingPriceBulk(getBulkCost(prod));
                               setEditSellingPrice(prod.sellingPrice);
                               setEditSellingPriceBulk(prod.sellingPriceBulk || 0);
+                              setEditTaxRate(prod.taxRate ?? 16);
                               setEditExpiryDate(prod.expiryDate || '');
                               setEditReference(prod.reference || generateRandomReference());
                               setEditIsService(!!prod.isService);
@@ -2280,6 +2444,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                             <button
                               onClick={() => {
                                 setLossProduct(prod);
+                                setLossUnit('base');
+                                setLossQty(0);
                                 setShowLossModal(true);
                               }}
                               className="px-2 py-0.5 text-[10px] bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 font-bold cursor-pointer w-[72px] text-center"
@@ -2290,6 +2456,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           ) : (
                             <div className="w-[72px]" />
                           )}
+                          <button
+                            onClick={() => void openMovements(prod)}
+                            className="px-2 py-0.5 text-[10px] bg-slate-100 text-slate-700 border border-slate-200 rounded hover:bg-slate-200 font-bold cursor-pointer w-[72px] text-center"
+                            title="Ver o livro de movimentos deste artigo"
+                          >
+                            Movimentos
+                          </button>
                         </div>
                         <div className="flex gap-1.5">
                           {prod.parentUnit && prod.conversionRate && prod.conversionRate > 1 ? (
@@ -2308,12 +2481,38 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           ) : (
                             <div className="w-[72px]" />
                           )}
+                          {prod.isActive === false && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await dbService.reactivateProduct({
+                                    productId: String(prod.id),
+                                    operator: currentUser?.username || 'Gestor de Stock',
+                                    ipAddress: await getClientIp().catch(() => 'desconhecido')
+                                  });
+                                  triggerToast(`"${prod.name}" voltou a estar activo.`);
+                                  await loadInventoryData();
+                                } catch (erro: any) {
+                                  triggerToast(erro?.message || 'Falha ao reactivar o artigo.', 'error');
+                                }
+                              }}
+                              className="px-2 py-0.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold cursor-pointer w-[72px] text-center"
+                              title="Voltar a pôr o artigo à venda"
+                            >
+                              Reactivar
+                            </button>
+                          )}
                           <button
                             onClick={() => {
                               setDeleteProductTarget(prod);
                               setDeletePassword('');
                               setDeleteError('');
+                              setDeleteUsage(null);
                               setShowDeleteModal(true);
+                              void dbService
+                                .getProductUsage(String(prod.id))
+                                .then(uso => setDeleteUsage(uso))
+                                .catch(() => setDeleteUsage(null));
                             }}
                             className="px-2 py-0.5 text-[10px] bg-red-600 hover:bg-red-700 text-white rounded font-bold cursor-pointer w-[72px] text-center"
                             title="Eliminar produto (requer senha de gestor)"
@@ -2385,7 +2584,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             onExportPDF={() => {
               const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
               const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-              const nuit = settings?.companyNuit || '401976590';
+              const nuit = companyNuit(settings?.companyNuit);
               doc.setFont('helvetica', 'bold');
               doc.setFontSize(14);
               doc.setTextColor(185, 28, 28);
@@ -2414,14 +2613,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 doc.text((loss.productName || '').substring(0, 30), 45, y);
                 doc.text(`${loss.quantity} ${loss.unit}`, 110, y);
                 doc.text((loss.reason || '').substring(0, 15), 130, y);
-                doc.text(`${(loss.costValue || 0).toLocaleString()} MT`, 165, y);
+                doc.text(`${(loss.costValue || 0).toLocaleString('pt-MZ')} MT`, 165, y);
                 y += 6;
               });
               doc.save(`Mapa_Quebras_${lossesStartDate}_${lossesEndDate}.pdf`);
-              triggerToast('Relatório PDF de Quebras gerado com sucesso!');
+              setToastMessage('Relatório PDF de Quebras gerado com sucesso!');
             }}
             onExportExcel={() => {
-              const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+              const filtered = countedLosses(losses).filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
               const data = filtered.map(l => ({
                 'Data': formatDatePT(l.date),
                 'Produto': l.productName,
@@ -2434,13 +2633,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               const wb = XLSX.utils.book_new();
               XLSX.utils.book_append_sheet(wb, ws, 'Quebras_Perdas');
               XLSX.writeFile(wb, `Quebras_Stock_${lossesStartDate}_a_${lossesEndDate}.xlsx`);
-              triggerToast('Planilha Excel de Quebras descarregada com sucesso!');
+              setToastMessage('Planilha Excel de Quebras descarregada com sucesso!');
             }}
           />
 
           {/* Loss Summary Bento Cards */}
           {(() => {
-            const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+            const filtered = countedLosses(losses).filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
             const totalQty = filtered.reduce((s, l) => s + (l.quantity || 0), 0);
             const totalVal = filtered.reduce((s, l) => s + (l.costValue || 0), 0);
             return (
@@ -2452,12 +2651,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 </div>
                 <div className="bg-white p-5 border border-amber-200 rounded-2xl shadow-sm space-y-1">
                   <span className="text-[10px] uppercase font-black text-amber-800 tracking-wider">Artigos Perdidos</span>
-                  <p className="text-2xl font-black text-amber-900 font-mono mt-1">{totalQty.toLocaleString()} unid.</p>
+                  <p className="text-2xl font-black text-amber-900 font-mono mt-1">{totalQty.toLocaleString('pt-MZ')} unid.</p>
                   <p className="text-[10px] text-amber-700">Volume físico deduzido</p>
                 </div>
                 <div className="bg-white p-5 border border-red-200 rounded-2xl shadow-sm space-y-1">
                   <span className="text-[10px] uppercase font-black text-red-800 tracking-wider">Prejuízo Financeiro Total</span>
-                  <p className="text-2xl font-black text-red-900 font-mono mt-1">{totalVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</p>
+                  <p className="text-2xl font-black text-red-900 font-mono mt-1">{totalVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</p>
                   <p className="text-[10px] text-red-700">Valor de custo das perdas</p>
                 </div>
               </div>
@@ -2487,7 +2686,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {(() => {
-                    const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+                    // Anuladas continuam na lista (prova), mas assinaladas.
+                    const filtered = losses
+                      .filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate))
+                      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
                     if (filtered.length === 0) {
                       return (
                         <tr>
@@ -2498,9 +2700,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       );
                     }
                     return filtered.map(loss => (
-                      <tr key={loss.id} className="hover:bg-red-50/70 hover:shadow-md transition-all border-b border-gray-100">
+                      <tr
+                        key={loss.id}
+                        className={`transition-all border-b border-gray-100 ${
+                          loss.annulled ? 'bg-slate-50 text-slate-400' : 'hover:bg-red-50/70 hover:shadow-md'
+                        }`}
+                      >
                         <td className="p-3 font-mono text-[11px]">{formatDatePT(loss.date)}</td>
-                        <td className="p-3 font-bold text-gray-800">{loss.productName}</td>
+                        <td className="p-3 font-bold text-gray-800">
+                          {loss.productName}
+                          {loss.annulled && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-black uppercase align-middle"
+                              title={`Anulada por ${loss.annulledBy || '—'}${loss.annulledReason ? ` · ${loss.annulledReason}` : ''}`}
+                            >
+                              Anulada
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 font-semibold">{loss.quantity} {loss.unit}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -2509,7 +2726,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                             {loss.reason}
                           </span>
                         </td>
-                        <td className="p-3 font-mono font-bold text-red-600">{(loss.costValue || 0).toLocaleString()} MT</td>
+                        <td className={`p-3 font-mono font-bold ${loss.annulled ? 'text-slate-400 line-through' : 'text-red-600'}`}>
+                          {(loss.costValue || 0).toLocaleString('pt-MZ')} MT
+                        </td>
                         <td className="p-3 text-gray-500 italic truncate max-w-xs" title={loss.justification}>
                           {loss.justification}
                         </td>
@@ -2527,18 +2746,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       {stockSubTab === 'reconciliation' && (() => {
         // Compute live physical vs system metrics
         const totalProducts = products.length;
-        // Custo por unidade base (produtos saco+quilo usam o custo derivado do quilo).
-        const totalSystemVal = products.reduce((acc, p) => acc + ((p.stockQty || 0) * getUnitCost(p)), 0);
+        const totalSystemVal = products.reduce((acc, p) => acc + ((p.stockQty || 0) * (Number(p.buyingPrice) || 0)), 0);
         const totalPhysicalVal = products.reduce((acc, p) => {
           const physQty = physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : (p.stockQty || 0);
-          return acc + (physQty * getUnitCost(p));
+          return acc + (physQty * (Number(p.buyingPrice) || 0));
         }, 0);
         const totalFinancialDiff = totalPhysicalVal - totalSystemVal;
         
         const auditedItems = products.map(p => {
           const systemQty = p.stockQty || 0;
           const physicalQty = physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : systemQty;
-          const buyPrice = getUnitCost(p);
+          const buyPrice = Number(p.buyingPrice) || 0;
           const sellPrice = Number(p.sellingPrice) || 0;
           const systemValue = systemQty * buyPrice;
           const physicalValue = physicalQty * buyPrice;
@@ -2604,7 +2822,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       preset[p.id] = p.stockQty || 0;
                     });
                     setPhysicalCounts(preset);
-                    triggerToast('Saldos do sistema copiados para a contagem física!');
+                    setToastMessage('Saldos do sistema copiados para a contagem física!');
                   }}
                   className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="Preenche todas as contagens com as quantidades atuais do sistema"
@@ -2621,23 +2839,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       reset[p.id] = 0;
                     });
                     setPhysicalCounts(reset);
-                    triggerToast('Campos de contagem física zerados!');
+                    setToastMessage('Campos de contagem física zerados!');
                   }}
                   className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="Zera todas as quantidades para nova contagem cega"
                 >
                   <span className="material-symbols-outlined text-[16px]">restart_alt</span>
                   Zerar Contagens
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowCutoffTool(true)}
-                  className="px-3 py-2 bg-slate-900 hover:bg-black text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-md transition-colors cursor-pointer"
-                  title="Anular em bloco as vendas de um dia ou descontar do stock as vendas feitas depois da contagem"
-                >
-                  <span className="material-symbols-outlined text-[16px]">content_cut</span>
-                  Corte de Inventário
                 </button>
 
                 <button
@@ -2655,80 +2863,6 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               </div>
             </div>
 
-            {/* --- CORTE DE INVENTÁRIO: momento real da contagem física --- */}
-            <div className="bg-white border border-amber-200 rounded-2xl p-5 shadow-sm space-y-3">
-              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-                <div>
-                  <h5 className="text-sm font-black text-slate-900 flex items-center gap-2">
-                    <span className="material-symbols-outlined text-amber-600">schedule</span>
-                    Momento real da contagem física (corte de inventário)
-                  </h5>
-                  <p className="text-[11px] text-slate-500 mt-1 max-w-3xl">
-                    Indique a data e hora em que a contagem foi <strong>realmente tirada</strong> no armazém. Se continuou
-                    a vender entre a contagem e este lançamento, o sistema desconta sozinho essas vendas — o inventário
-                    gravado fica igual ao stock físico de agora.
-                  </p>
-                </div>
-                <div className="flex items-end gap-2">
-                  <div>
-                    <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">Contagem tirada em</label>
-                    <input
-                      type="datetime-local"
-                      value={countCutoff}
-                      onChange={(e) => setCountCutoff(e.target.value)}
-                      className="border border-slate-300 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-amber-500"
-                    />
-                  </div>
-                  {countCutoff && (
-                    <button
-                      type="button"
-                      onClick={() => setCountCutoff('')}
-                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-xl cursor-pointer"
-                    >
-                      Limpar
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {countCutoff ? (
-                cutoffSales.length > 0 ? (
-                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 space-y-1">
-                    <p className="font-black flex items-center gap-1">
-                      <span className="material-symbols-outlined text-[16px]">info</span>
-                      {cutoffSales.length} venda(s) registadas depois da contagem serão descontadas automaticamente
-                    </p>
-                    <p>
-                      Artigos afectados: <strong>{cutoffImpact.movements.length}</strong> • Custo das saídas:{' '}
-                      <strong>
-                        {cutoffImpact.totals.costValue.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
-                      </strong>
-                    </p>
-                    {cutoffImpact.movements.length > 0 && (
-                      <p className="text-amber-800">
-                        Ex.:{' '}
-                        {cutoffImpact.movements
-                          .slice(0, 4)
-                          .map(m => `${m.productName} −${m.soldBase.toLocaleString('pt-PT', { maximumFractionDigits: 3 })} ${m.baseUnit}`)
-                          .join(' • ')}
-                        {cutoffImpact.movements.length > 4 ? ' …' : ''}
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-900 font-bold flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[16px]">check_circle</span>
-                    Nenhuma venda registada depois desse momento — a contagem pode ser lançada tal como está.
-                  </div>
-                )
-              ) : (
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-600">
-                  Campo vazio: a contagem é assumida como válida para <strong>este momento</strong>. Preencha-o sempre
-                  que a contagem tiver sido feita antes (ex.: contou de manhã e está a lançar à noite).
-                </div>
-              )}
-            </div>
-
             {/* 4 Financial & Inventory Summary Bento Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Card 1: Total Artigos */}
@@ -2744,7 +2878,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               <div className="bg-white p-5 border border-slate-200 rounded-2xl shadow-sm space-y-1">
                 <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider">Valor em Sistema (Custo)</span>
                 <p className="text-2xl font-black text-slate-900 font-mono mt-1">
-                  {totalSystemVal.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalSystemVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] text-slate-400">Património registado em base de dados</p>
               </div>
@@ -2753,7 +2887,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               <div className="bg-white p-5 border border-indigo-200 rounded-2xl shadow-sm space-y-1">
                 <span className="text-[10px] uppercase font-black text-indigo-700 tracking-wider">Valor Físico Real (Custo)</span>
                 <p className="text-2xl font-black text-indigo-900 font-mono mt-1">
-                  {totalPhysicalVal.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalPhysicalVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] text-indigo-600">Património físico apurado na contagem</p>
               </div>
@@ -2770,14 +2904,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   Desvio Financeiro Global
                 </span>
                 <p className="text-2xl font-black font-mono mt-1">
-                  {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : totalFinancialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : totalFinancialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] font-bold">
                   {totalFinancialDiff === 0 
                     ? '100% ALINHADO / SEM DESVIO ✓'
                     : totalFinancialDiff < 0 
-                      ? `QUEBRA TOTAL: ${Math.abs(totalFinancialDiff).toLocaleString()} MT`
-                      : `SOBRA TOTAL: +${totalFinancialDiff.toLocaleString()} MT`}
+                      ? `QUEBRA TOTAL: ${Math.abs(totalFinancialDiff).toLocaleString('pt-MZ')} MT`
+                      : `SOBRA TOTAL: +${totalFinancialDiff.toLocaleString('pt-MZ')} MT`}
                 </p>
               </div>
             </div>
@@ -2817,7 +2951,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       const wb = XLSX.utils.book_new();
                       XLSX.utils.book_append_sheet(wb, ws, 'Contagem_Fisica_Stock');
                       XLSX.writeFile(wb, `Contagem_Fisica_Inventario_${new Date().toISOString().split('T')[0]}.xlsx`);
-                      triggerToast('Planilha de Contagem Física exportada com sucesso!');
+                      setToastMessage('Planilha de Contagem Física exportada com sucesso!');
                     }}
                     className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
@@ -2830,7 +2964,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                     onClick={() => {
                       const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
                       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-                      const nuit = settings?.companyNuit || '401976590';
+                      const nuit = companyNuit(settings?.companyNuit);
                       doc.setFont('helvetica', 'bold');
                       doc.setFontSize(14);
                       doc.setTextColor(67, 56, 202);
@@ -2839,7 +2973,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       doc.setFontSize(9);
                       doc.setTextColor(100, 116, 139);
                       doc.text(`${cName} • NUIT: ${nuit} • Data de Emissão: ${new Date().toLocaleString('pt-MZ')}`, 15, 24);
-                      doc.text(`Valor Sistema: ${totalSystemVal.toLocaleString()} MT | Valor Físico: ${totalPhysicalVal.toLocaleString()} MT | Desvio: ${totalFinancialDiff.toLocaleString()} MT`, 15, 29);
+                      doc.text(`Valor Sistema: ${totalSystemVal.toLocaleString('pt-MZ')} MT | Valor Físico: ${totalPhysicalVal.toLocaleString('pt-MZ')} MT | Desvio: ${totalFinancialDiff.toLocaleString('pt-MZ')} MT`, 15, 29);
 
                       doc.setDrawColor(67, 56, 202);
                       doc.line(15, 33, 282, 33);
@@ -2861,18 +2995,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       auditedItems.forEach(i => {
                         if (y > 190) { doc.addPage(); y = 20; }
                         doc.text(i.productName.substring(0, 35), 15, y);
-                        doc.text(`${i.buyPrice.toLocaleString()} MT`, 85, y);
+                        doc.text(`${i.buyPrice.toLocaleString('pt-MZ')} MT`, 85, y);
                         doc.text(String(i.systemQty), 115, y);
-                        doc.text(`${i.systemValue.toLocaleString()} MT`, 145, y);
+                        doc.text(`${i.systemValue.toLocaleString('pt-MZ')} MT`, 145, y);
                         doc.text(String(i.physicalQty), 178, y);
-                        doc.text(`${i.physicalValue.toLocaleString()} MT`, 208, y);
-                        doc.text(`${i.financialDiff > 0 ? `+${i.financialDiff.toLocaleString()}` : i.financialDiff.toLocaleString()} MT`, 240, y);
+                        doc.text(`${i.physicalValue.toLocaleString('pt-MZ')} MT`, 208, y);
+                        doc.text(`${i.financialDiff > 0 ? `+${i.financialDiff.toLocaleString('pt-MZ')}` : i.financialDiff.toLocaleString('pt-MZ')} MT`, 240, y);
                         doc.text(i.isAligned ? '100% OK' : (i.qtyDiff > 0 ? `+${i.qtyDiff}` : String(i.qtyDiff)), 265, y);
                         y += 6;
                       });
 
                       doc.save(`Mapa_Contagem_Fisica_${new Date().toISOString().split('T')[0]}.pdf`);
-                      triggerToast('Relatório PDF de Contagem Física gerado!');
+                      setToastMessage('Relatório PDF de Contagem Física gerado!');
                     }}
                     className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
@@ -2967,7 +3101,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* Buy Price */}
                             <td className="p-3 text-right font-mono font-bold text-slate-700">
-                              {item.buyPrice.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.buyPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* System Stock */}
@@ -2977,7 +3111,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* System Value */}
                             <td className="p-3 text-right font-mono font-black text-slate-800">
-                              {item.systemValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.systemValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* Physical Count Interactive Input */}
@@ -2996,10 +3130,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                                 <input
                                   type="number"
                                   min="0"
+                                  step="0.001"
                                   value={currentPhysical}
                                   onChange={(e) => {
-                                    const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                    setPhysicalCounts(prev => ({ ...prev, [item.productId]: val }));
+                                    // A contagem de artigos a peso é em kg: 12,5 kg
+                                    // tem de ser contável. Antes `parseInt` cortava
+                                    // a parte decimal e a falta era inventada.
+                                    const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                    setPhysicalCounts(prev => ({
+                                      ...prev,
+                                      [item.productId]: Number.isFinite(val) ? Math.max(0, val) : 0
+                                    }));
                                   }}
                                   className="w-16 text-center font-mono font-black text-xs text-indigo-950 focus:outline-none"
                                 />
@@ -3018,7 +3159,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* Physical Value */}
                             <td className="p-3 text-right font-mono font-black text-indigo-950">
-                              {item.physicalValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.physicalValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* Qty Diff */}
@@ -3037,9 +3178,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                               {item.financialDiff === 0 ? (
                                 <span className="text-slate-400">0.00 MT</span>
                               ) : item.financialDiff > 0 ? (
-                                <span className="text-blue-700 font-black">+{item.financialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</span>
+                                <span className="text-blue-700 font-black">+{item.financialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</span>
                               ) : (
-                                <span className="text-red-700 font-black">{item.financialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</span>
+                                <span className="text-red-700 font-black">{item.financialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</span>
                               )}
                             </td>
 
@@ -3093,18 +3234,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       </p>
                       <p>
                         Impacto financeiro apurado: <strong className={totalFinancialDiff < 0 ? 'text-red-700' : 'text-emerald-700'}>
-                          {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString()}` : totalFinancialDiff.toLocaleString()} MT
+                          {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-MZ')}` : totalFinancialDiff.toLocaleString('pt-MZ')} MT
                         </strong>.
                       </p>
                       <p className="text-[11px] text-indigo-700">
                         Os artigos com falta de stock física gerarão automaticamente registos no histórico de quebras/perdas para dedução fiscal.
                       </p>
-                      {countCutoff && (
-                        <p className="bg-amber-100 border border-amber-300 text-amber-900 rounded-lg px-2 py-1.5 text-[11px] font-bold">
-                          Corte de inventário activo: contagem referida a {countCutoff.replace('T', ' ')}. Serão descontadas
-                          {' '}{cutoffSales.length} venda(s) posteriores em {cutoffImpact.movements.length} artigo(s) antes de gravar.
-                        </p>
-                      )}
                     </div>
 
                     {applyError && (
@@ -3122,13 +3257,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         type="password"
                         value={applyPassword}
                         onChange={(e) => setApplyPassword(e.target.value)}
-                        placeholder="Digite a palavra-passe do gestor configurada"
+                        placeholder="Palavra-passe de autorização do gestor"
                         className="w-full border border-slate-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
                         required
                         autoFocus
                       />
                       <p className="text-[11px] text-slate-500 mt-1">
-                        Insira a senha de validação de gestor (código configurado no Painel Técnico) para autorizar a sincronização definitiva.
+                        Insira a palavra-passe de autorização do gestor de stock para confirmar a sincronização definitiva.
                       </p>
                     </div>
 
@@ -3156,17 +3291,6 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         );
       })()}
 
-      {/* --- Ferramenta de Corte de Inventário (anulação em massa / correcção de stock) --- */}
-      <InventoryCutoffTool
-        isOpen={showCutoffTool}
-        onClose={() => setShowCutoffTool(false)}
-        currentUser={currentUser || null}
-        onCompleted={() => {
-          loadInventoryData();
-          triggerToast('Corte de inventário aplicado. Saldos actualizados.');
-        }}
-      />
-
       {/* --- Transformation Modal Component (Parte 4) --- */}
       <TransformationModal
         isOpen={showTransformationModal}
@@ -3178,7 +3302,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           const prods = await dbService.getProducts();
           setProducts(prods);
           setShowTransformationModal(false);
-          triggerToast('Transformação concluída e stock atualizado!');
+          setToastMessage('Transformação concluída e stock atualizado!');
         }}
       />
 
@@ -3197,17 +3321,41 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             </div>
 
             <form onSubmit={handleConfirmDeleteProduct} className="p-6 space-y-4">
-              <div className="bg-red-50 border border-red-200 text-red-800 p-3 rounded text-xs space-y-1">
+              <div className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded text-xs space-y-1">
                 <p className="font-bold flex items-center gap-1 text-sm">
-                  <span className="material-symbols-outlined text-[18px]">warning</span>
-                  Atenção: Eliminação Definitiva
+                  <span className="material-symbols-outlined text-[18px]">inventory</span>
+                  Eliminar artigo <strong>{deleteProductTarget.name}</strong>
                 </p>
-                <p>
-                  Está a tentar eliminar o produto <strong>{deleteProductTarget.name}</strong> (Código: {deleteProductTarget.code || deleteProductTarget.id}).
+                <p className="text-[11px]">
+                  Código {deleteProductTarget.code || deleteProductTarget.id} ·{' '}
+                  {deleteProductTarget.stockQty} {deleteProductTarget.baseUnit || 'un'} em stock
                 </p>
-                <p className="text-[11px] text-red-600">
-                  Esta ação removerá o artigo do catálogo e não poderá ser desfeita.
-                </p>
+                {deleteUsage === null ? (
+                  <p className="text-[11px] text-amber-700 italic">A verificar histórico…</p>
+                ) : (
+                  <>
+                    <p className="text-[11px]">
+                      Histórico: <strong>{deleteUsage.sales}</strong> venda(s) ·{' '}
+                      <strong>{deleteUsage.movements}</strong> movimento(s) ·{' '}
+                      <strong>{deleteUsage.losses}</strong> quebra(s) ·{' '}
+                      <strong>{deleteUsage.transformations}</strong> transformação(ões)
+                    </p>
+                    {deleteUsage.stock > 0 ? (
+                      <p className="text-[11px] font-bold text-red-700">
+                        Tem stock: dê baixa primeiro. Mercadoria não sai do inventário por aqui.
+                      </p>
+                    ) : deleteUsage.sales + deleteUsage.movements + deleteUsage.losses + deleteUsage.transformations > 0 ? (
+                      <p className="text-[11px] font-bold text-amber-800">
+                        Tem histórico: o artigo vai ser <strong>desactivado</strong> (fora de venda) e não
+                        apagado — as facturas antigas continuam a apontar para ele.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] font-bold text-red-700">
+                        Sem histórico nem stock: o artigo pode mesmo ser apagado. A acção não é reversível.
+                      </p>
+                    )}
+                  </>
+                )}
               </div>
 
               {deleteError && (
@@ -3231,7 +3379,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   autoFocus
                 />
                 <p className="text-[11px] text-gray-500 mt-1">
-                  Insira a senha de validação de gestor (código configurado no Painel Técnico) para autorizar a remoção.
+                  Senha de gestor para autorizar a operação (desactivar ou apagar).
                 </p>
               </div>
 
@@ -3525,7 +3673,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newConversionRate}
-                          onChange={(e) => setNewConversionRate(Number(e.target.value))}
+                          onChange={(e) => setNewConversionRate(safeConversionRate(e.target.value))}
                           className="w-full border border-gray-300 rounded px-1.5 py-1 text-[10.5px] bg-white focus:outline-none font-bold text-center"
                         />
                       </div>
@@ -3611,7 +3759,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       <input
                         type="number"
                         value={newProdQty}
-                        onChange={(e) => setNewProdQty(Number(e.target.value))}
+                        onChange={(e) => setNewProdQty(nonNegative(e.target.value))}
                         className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-bold text-slate-800"
                       />
                     </div>
@@ -3652,7 +3800,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={newProdSellPriceBulk || ''}
-                            onChange={(e) => setNewProdSellPriceBulk(Number(e.target.value))}
+                            onChange={(e) => setNewProdSellPriceBulk(nonNegative(e.target.value))}
                             className="w-full border border-emerald-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-emerald-500 font-bold bg-emerald-50 text-emerald-800"
                             placeholder="Ex: 4500"
                           />
@@ -3665,7 +3813,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={newProdSellPrice || ''}
-                            onChange={(e) => setNewProdSellPrice(Number(e.target.value))}
+                            onChange={(e) => setNewProdSellPrice(nonNegative(e.target.value))}
                             className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-primary bg-white font-bold"
                             placeholder="Ex: 100"
                           />
@@ -3681,7 +3829,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newProdBuyPrice || ''}
-                          onChange={(e) => setNewProdBuyPrice(Number(e.target.value))}
+                          onChange={(e) => setNewProdBuyPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-semibold"
                         />
                       </div>
@@ -3693,7 +3841,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newProdSellPrice || ''}
-                          onChange={(e) => setNewProdSellPrice(Number(e.target.value))}
+                          onChange={(e) => setNewProdSellPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-semibold"
                         />
                       </div>
@@ -3715,7 +3863,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         </div>
       )}
 
-      {/* --- Stock Adjust Security Modal (código de gestor configurado) --- */}
+      {/* --- Stock Adjust Security Modal (Password check "05082") --- */}
       {showAdjustModal && selectedProduct && (
         <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto p-2 sm:p-4 flex min-h-full items-center justify-center">
           <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[92vh] my-auto flex flex-col overflow-hidden border border-gray-200">
@@ -3927,6 +4075,19 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         className="w-full border border-gray-300 rounded px-2 py-1.5 text-[10.5px] focus:outline-none bg-white font-medium"
                       />
                     </div>
+
+                    <div>
+                      <label className="block text-[9.5px] font-black uppercase text-gray-500 mb-0.5">Taxa de IVA (%)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={editTaxRate}
+                        onChange={(e) => setEditTaxRate(Number(e.target.value))}
+                        className="w-full border border-gray-300 rounded px-2 py-1.5 text-[10.5px] focus:outline-none bg-white font-medium"
+                      />
+                    </div>
                   </div>
 
                   <div className="pt-1 border-t border-gray-200">
@@ -3938,7 +4099,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       data-lpignore="true"
                       value={stockPassword}
                       onChange={(e) => setStockPassword(e.target.value)}
-                      placeholder="Senha do Stock (código configurado)"
+                      placeholder="Senha do Stock (Ex: 05082)"
                       className="w-full border border-red-300 rounded px-2.5 py-1.5 text-[11px] text-center focus:border-red-500 focus:outline-none font-extrabold bg-white"
                     />
                   </div>
@@ -3986,7 +4147,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editConversionRate}
-                          onChange={(e) => setEditConversionRate(Number(e.target.value))}
+                          onChange={(e) => setEditConversionRate(safeConversionRate(e.target.value))}
                           className="w-full border border-gray-300 rounded px-1.5 py-1 text-[10.5px] bg-white focus:outline-none text-center font-bold"
                         />
                       </div>
@@ -4160,7 +4321,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={editSellingPriceBulk || ''}
-                            onChange={(e) => setEditSellingPriceBulk(Number(e.target.value))}
+                            onChange={(e) => setEditSellingPriceBulk(nonNegative(e.target.value))}
                             className="w-full border border-emerald-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-emerald-500 font-bold bg-emerald-50 text-emerald-800"
                           />
                         </div>
@@ -4172,7 +4333,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={editSellingPrice || ''}
-                            onChange={(e) => setEditSellingPrice(Number(e.target.value))}
+                            onChange={(e) => setEditSellingPrice(nonNegative(e.target.value))}
                             className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-primary bg-white font-bold"
                           />
                         </div>
@@ -4185,7 +4346,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editBuyingPrice || ''}
-                          onChange={(e) => setEditBuyingPrice(Number(e.target.value))}
+                          onChange={(e) => setEditBuyingPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] font-bold text-center focus:outline-none bg-white"
                         />
                       </div>
@@ -4195,7 +4356,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editSellingPrice || ''}
-                          onChange={(e) => setEditSellingPrice(Number(e.target.value))}
+                          onChange={(e) => setEditSellingPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] font-bold text-center focus:outline-none bg-white"
                         />
                       </div>
@@ -4226,7 +4387,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <span className="material-symbols-outlined">delete_sweep</span>
                 Registar Quebra Comercial
               </span>
-              <button onClick={() => { setShowLossModal(false); setLossProduct(null); }} className="text-white hover:opacity-80">
+              <button onClick={() => { setShowLossModal(false); setLossProduct(null); setLossUnit('base'); setLossQty(0); }} className="text-white hover:opacity-80">
                 <span className="material-symbols-outlined">close</span>
               </button>
             </div>
@@ -4238,13 +4399,40 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               </p>
 
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Quantidade Danificada / Perdida</label>
-                <input
-                  type="number"
-                  value={lossQty}
-                  onChange={(e) => setLossQty(Number(e.target.value))}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm text-center font-bold"
-                />
+                <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">
+                  Quantidade Danificada / Perdida
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={lossQty}
+                    onChange={(e) => setLossQty(nonNegative(e.target.value))}
+                    className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm text-center font-bold"
+                  />
+                  {lossProduct?.parentUnit && Number(lossProduct.conversionRate) > 1 ? (
+                    <select
+                      value={lossUnit}
+                      onChange={(e) => setLossUnit(e.target.value as 'base' | 'Bulk')}
+                      className="border border-gray-300 rounded px-2 py-2 text-xs font-bold bg-white"
+                      title="Escolha a unidade: um saco vale pela conversão do artigo"
+                    >
+                      <option value="base">{lossProduct.baseUnit}</option>
+                      <option value="Bulk">{lossProduct.parentUnit}</option>
+                    </select>
+                  ) : (
+                    <span className="self-center text-[11px] font-bold text-slate-500">
+                      {lossProduct?.baseUnit}
+                    </span>
+                  )}
+                </div>
+                {lossProduct?.parentUnit && Number(lossProduct.conversionRate) > 1 && lossUnit === 'Bulk' && (
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    1 {lossProduct.parentUnit} = {lossProduct.conversionRate} {lossProduct.baseUnit} · sai do stock{' '}
+                    <strong>{(Number(lossQty) * Number(lossProduct.conversionRate)).toLocaleString('pt-MZ')} {lossProduct.baseUnit}</strong>
+                  </p>
+                )}
               </div>
 
               <div>
@@ -4433,6 +4621,57 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   Confirmar Operação
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMovementsModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+            <div className="px-5 py-4 border-b flex items-center justify-between">
+              <div>
+                <h3 className="font-black text-slate-800">Livro de Movimentos</h3>
+                <p className="text-[11px] text-slate-500">{movementsProduct?.name} · {movementsProduct?.baseUnit}</p>
+              </div>
+              <button onClick={() => setShowMovementsModal(false)} className="text-slate-400 hover:text-slate-700">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="overflow-auto flex-1">
+              {loadingMovements ? (
+                <p className="p-6 text-center text-sm text-slate-500">A carregar…</p>
+              ) : movementRows.length === 0 ? (
+                <p className="p-6 text-center text-sm text-slate-500">
+                  Sem movimentos registados. O livro começou a ser escrito com esta correcção — os saldos
+                  anteriores não têm rasto.
+                </p>
+              ) : (
+                <table className="w-full text-[11px]">
+                  <thead className="bg-slate-50 text-slate-500 uppercase text-[9px]">
+                    <tr>
+                      <th className="p-2 text-left">Data</th>
+                      <th className="p-2 text-left">Tipo</th>
+                      <th className="p-2 text-right">Quantidade</th>
+                      <th className="p-2 text-left">Documento</th>
+                      <th className="p-2 text-left">Operador</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {movementRows.map(movimento => (
+                      <tr key={movimento.id} className="border-t border-slate-100">
+                        <td className="p-2 font-mono">{new Date(movimento.date).toLocaleString('pt-MZ')}</td>
+                        <td className="p-2 font-bold">{movimento.type}</td>
+                        <td className={`p-2 text-right font-mono font-bold ${movimento.qtyDelta < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                          {movimento.qtyDelta > 0 ? '+' : ''}{movimento.qtyDelta.toLocaleString('pt-MZ')} {movimento.unit}
+                        </td>
+                        <td className="p-2 font-mono">{movimento.reference || '—'}</td>
+                        <td className="p-2">{movimento.operatorName || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         </div>

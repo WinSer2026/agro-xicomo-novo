@@ -139,9 +139,19 @@ const vendaServico = venda({
 const vendaAnulada = venda({ id: '0004', date: `${DIA}T16:00:00.000Z`, total: 900, status: 'Cancelada' });
 const proforma = venda({ id: '0005', date: `${DIA}T16:30:00.000Z`, total: 700, documentType: 'FaturaProforma' });
 const vendaOutroDia = venda({ id: '0006', date: '2026-10-02T09:00:00.000Z', total: 1200 });
-const vendaAntesDaContagem = venda({ id: '0007', date: `${DIA}T07:10:00.000Z`, total: 400 });
+const vendaAntesDaContagem = venda({ id: '0007', date: `${DIA}T05:30:00.000Z`, total: 400 });
 
 const todasVendas = [venda1, venda2, vendaServico, vendaAnulada, proforma, vendaOutroDia, vendaAntesDaContagem];
+
+/* Fuso horário: 23:30 UTC já é o dia seguinte em Maputo (UTC+2). */
+assert(
+  toDayKey(`${DIA}T23:30:00.000Z`) !== DIA,
+  'Uma venda às 23:30 UTC pertence ao dia seguinte em Maputo'
+);
+assert(
+  toDayKey(`${DIA}T21:00:00.000Z`) === DIA,
+  'Uma venda às 21:00 UTC continua no mesmo dia em Maputo'
+);
 
 /* ------------------------------------------------------------------ */
 /* Suite 1 — Selecção de documentos                                     */
@@ -233,7 +243,16 @@ assert(
 );
 
 const movNegativo = { ...movMilho, currentStockQty: 10, currentStockBulk: 0, currentStockRetail: 0 };
-assert(projectStock(movNegativo, 'deduct').stockQty === 0, 'Saldo é travado em zero (nunca negativo)');
+/**
+ * V-C12: a pré-visualização mostrava zero e escondia o problema. Agora mostra o
+ * saldo real (negativo) e diz quanto falta; só a GRAVAÇÃO trava em zero.
+ */
+assert(projectStock(movNegativo, 'deduct').stockQty < 0, 'Pré-visualização mostra o saldo negativo');
+assert(projectStock(movNegativo, 'deduct').insufficient === true, 'Marca stock insuficiente');
+assert(projectStock(movNegativo, 'deduct').shortfallQty > 0, 'Diz quanto falta');
+assert(projectStock(movMilho, 'deduct').insufficient === false, 'Stock suficiente não é sinalizado');
+assert(projectStock(movMilho, 'deduct').shortfallQty === 0, 'Sem falta quando há stock');
+assert(buildStockSnapshots([movNegativo], 'deduct')[0].stockQty === 0, 'A gravação continua a travar em zero');
 
 /* ------------------------------------------------------------------ */
 /* Suite 4 — Contagem lançada com atraso                                */

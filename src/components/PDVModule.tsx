@@ -3,6 +3,7 @@ import { uid } from '../utils/idHelper';
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { dbService } from '../utils/firebaseDB';
+import { checkStockAddition, lineBaseQty } from '../utils/stockGuard';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
 import { getUnitCost, isHybridProduct, getBulkSellingPrice } from '../utils/priceHelper';
@@ -456,7 +457,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       await runPostCommitTasks([
         {
           label: 'atualizar o catálogo depois da venda antiga',
-          task: async () => setProducts(await dbService.getProducts())
+          task: async () => setProducts((await dbService.getProducts()).filter(p => p.isActive !== false))
         },
         {
           label: 'atualizar o histórico depois da venda antiga',
@@ -781,7 +782,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     // PDV deliberately keeps a complete live catalogue and sales cache: it
     // needs them for barcode lookup, stock validation and receipt sequencing.
     await dbService.enableLiveCatalogAndSalesSync();
-    const prodList = await dbService.getProducts();
+    // Artigos desactivados saem do balcão: ficam no histórico, não à venda.
+    const prodList = (await dbService.getProducts()).filter(p => p.isActive !== false);
     setProducts(prodList);
 
     const config = await dbService.getSettings();
@@ -1108,7 +1110,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     }
   };
 
-  const addToCart = (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
+  const addToCart = async (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
     // Determine default selling unit
     const hasConversion = !!(product.parentUnit && product.conversionRate && product.conversionRate > 1);
     const selectedUnit = preferredUnit || (hasConversion ? 'Retail' : 'Retail');
@@ -1117,36 +1119,31 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     const existingQty = currentCartItem ? currentCartItem.quantity : 0;
     const requestedQty = existingQty + customQty;
 
-    // Check stock availability based on selected unit
+    /**
+     * Stock verificado **aqui**, não só ao gravar.
+     *
+     * Antes a conta usava o stock da última sincronização do ecrã e, nos
+     * artigos híbridos, tratava sacos e quilos como gavetas separadas. O
+     * resultado era descobrir a falta no fim, com o carrinho montado, ou
+     * deixar passar uma venda sem mercadoria. Agora lê-se o stock do servidor
+     * neste instante e a conta é feita em unidade base.
+     */
     if (!product.isService) {
-      if (hasConversion) {
-        if (selectedUnit === 'Bulk') {
-          const availableBulk = product.stockQtyBulk || 0;
-          if (requestedQty > availableBulk) {
-            showToast(
-              `Quantidade de revenda insuficiente. Disponível: ${availableBulk} ${product.parentUnit}`,
-              'error'
-            );
-            return;
-          }
-        } else {
-          const availableRetail = product.stockQtyRetail || 0;
-          if (requestedQty > availableRetail) {
-            showToast(
-              `Quantidade de retalho insuficiente. Disponível: ${availableRetail} ${product.baseUnit}`,
-              'error'
-            );
-            return;
-          }
-        }
-      } else {
-        if (requestedQty > product.stockQty) {
-          showToast(
-            `Quantidade insuficiente em stock. Stock disponível: ${product.stockQty} ${product.baseUnit}`,
-            'error'
-          );
-          return;
-        }
+      const stockServidor = await dbService.getProductStock(String(product.id));
+      const outrosNoCarrinho = cart
+        .filter(item => item.productId === product.id && item.sellingUnit !== selectedUnit)
+        .reduce((acc, item) => acc + lineBaseQty(product, item.quantity, item.sellingUnit), 0);
+
+      const veredicto = checkStockAddition({
+        product,
+        serverStock: stockServidor ?? (Number(product.stockQty) || 0),
+        inCartBase: outrosNoCarrinho,
+        quantity: requestedQty,
+        sellingUnit: selectedUnit
+      });
+      if (!veredicto.allowed) {
+        showToast(veredicto.message, 'error');
+        return;
       }
     }
 
@@ -1527,7 +1524,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       await runPostCommitTasks([
         {
           label: 'atualizar o catálogo depois da venda',
-          task: async () => setProducts(await dbService.getProducts())
+          task: async () => setProducts((await dbService.getProducts()).filter(p => p.isActive !== false))
         },
         {
           label: 'atualizar o histórico de vendas',
@@ -1747,6 +1744,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   };
 
   const filteredProducts = products.filter(p => {
+    if (p.isActive === false) return false;
     const matchCat = selectedCategory === 'Todas' || p.category === selectedCategory;
     const matchQuery =
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||

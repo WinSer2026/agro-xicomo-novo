@@ -1,8 +1,10 @@
+import { companyNuit } from '../utils/companyInfo';
 import React, { useState, useEffect } from 'react';
-import { uid } from '../utils/idHelper';
 import { Product, ProductTransformation, TransformationItem, SystemSettings } from '../types';
 import { dbService } from '../utils/firebaseDB';
 import { getSingularUnit } from '../utils/unitHelper';
+import { getClientIp } from '../utils/clientInfo';
+import { toLocalDateKey } from '../utils/dateRangeHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -148,7 +150,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
     setResultingItems(prev => [
       ...prev,
       {
-        id: uid('draft-'),
+        id: 'draft-' + Date.now(),
         isNewProduct: true,
         productId: '',
         productName: originalProduct ? `${originalProduct.name} (Fracionado)` : '',
@@ -273,7 +275,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
         items: createdItems,
         lossQuantity: lossQty,
         lossValue: lossValue,
-        date: new Date().toISOString().split('T')[0],
+        date: toLocalDateKey(new Date().toISOString()),
         operatorId: currentUser.username,
         operatorName: currentUser.username,
         notes: notes.trim(),
@@ -315,19 +317,17 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
         equivalentBaseQty: originalBaseQty
       };
 
-      // Execute atomic transaction
-      await dbService.addTransformationWithStockUpdate(transformationRecord, itemsToCredit, originalDeduction);
-
-      // Log audit
-      void dbService.addAuditLog({
-        id: uid('log-'),
-        timestamp: new Date().toISOString(),
-        username: currentUser.username,
-        ipAddress: '127.0.0.1',
-        action: 'Transformação de Produto Realizada',
-        status: 'Sucesso',
-        details: `Transformado ${originalBaseQty} ${originalProduct.baseUnit} de "${originalProduct.name}" em ${createdItems.length} artigos resultantes (Perda: ${lossQty} ${originalProduct.baseUnit}).`
-      });
+      // Executa a transacção: saldo verificado no servidor, movimentos e
+      // auditoria com o utilizador real são gravados no mesmo commit.
+      await dbService.addTransformationWithStockUpdate(
+        transformationRecord,
+        itemsToCredit,
+        originalDeduction,
+        {
+          operator: currentUser.username,
+          ipAddress: await getClientIp().catch(() => 'desconhecido')
+        }
+      );
 
       setSuccessTransformation(transformationRecord);
       if (onTransformationComplete) onTransformationComplete();
@@ -343,7 +343,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
   const handlePrintVoucher = (trf: ProductTransformation) => {
     const doc = new jsPDF({ format: 'a4', unit: 'mm' });
     const compName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-    const compNuit = settings?.companyNuit || '401976590';
+    const compNuit = companyNuit(settings?.companyNuit);
 
     // Header Banner
     doc.setFillColor(6, 78, 59); // Emerald-900
@@ -378,8 +378,8 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
         [
           trf.originalProductName,
           `${trf.originalQuantity} ${trf.originalUnit}`,
-          `${trf.originalUnitCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-          `${trf.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`
+          `${trf.originalUnitCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+          `${trf.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`
         ]
       ],
       headStyles: { fillColor: [15, 118, 110], textColor: [255, 255, 255], fontStyle: 'bold' },
@@ -395,9 +395,9 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
       `${it.quantity} ${it.unit}`,
       `${it.unitWeight} ${trf.originalUnit}`,
       `${(it.quantity * it.unitWeight)} ${trf.originalUnit}`,
-      `${it.calculatedUnitCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-      `${(it.sellingPrice || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`,
-      `${(it.quantity * it.calculatedUnitCost).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`
+      `${it.calculatedUnitCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+      `${(it.sellingPrice || 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`,
+      `${(it.quantity * it.calculatedUnitCost).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`
     ]);
 
     autoTable(doc, {
@@ -416,9 +416,9 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
       startY: finalTableY + 16,
       head: [['Indicador', 'Quantidade', 'Valor Monetário (MT)', 'Impacto Financeiro']],
       body: [
-        ['Saída de Stock Original', `${trf.originalQuantity} ${trf.originalUnit}`, `${trf.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 'Crédito de Stock Original'],
-        ['Entrada de Stock Resultante', `${trf.items.reduce((s, x) => s + x.quantity, 0)} unidades`, `${trf.items.reduce((s, x) => s + (x.quantity * x.calculatedUnitCost), 0).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 'Débito em Stock Fracionado'],
-        ['Perda no Processo', `${trf.lossQuantity} ${trf.originalUnit}`, `${trf.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, trf.lossQuantity > 0 ? 'Custo Operacional de Quebra' : 'Sem Perdas (100% Eficiente)'],
+        ['Saída de Stock Original', `${trf.originalQuantity} ${trf.originalUnit}`, `${trf.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 'Crédito de Stock Original'],
+        ['Entrada de Stock Resultante', `${trf.items.reduce((s, x) => s + x.quantity, 0)} unidades`, `${trf.items.reduce((s, x) => s + (x.quantity * x.calculatedUnitCost), 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 'Débito em Stock Fracionado'],
+        ['Perda no Processo', `${trf.lossQuantity} ${trf.originalUnit}`, `${trf.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, trf.lossQuantity > 0 ? 'Custo Operacional de Quebra' : 'Sem Perdas (100% Eficiente)'],
         ['Balanço Líquido de Custo', 'Equilíbrio Perfeito', '0.00 MT', 'NEUTRALIDADE FINANCEIRA ✓']
       ],
       headStyles: { fillColor: [51, 65, 85], textColor: [255, 255, 255], fontStyle: 'bold' },
@@ -496,7 +496,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                     {successTransformation.originalQuantity} {successTransformation.originalUnit}
                   </p>
                   <p className="text-[10px] text-slate-500 font-mono">
-                    {successTransformation.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                    {successTransformation.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                   </p>
                 </div>
 
@@ -516,7 +516,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                     {successTransformation.lossQuantity} {successTransformation.originalUnit}
                   </p>
                   <p className="text-[10px] text-amber-800 font-mono">
-                    {successTransformation.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                    {successTransformation.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                   </p>
                 </div>
               </div>
@@ -647,7 +647,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                                     Stock: {hasBulk ? `${p.stockQtyBulk} ${p.parentUnit} (${p.stockQty} ${p.baseUnit})` : `${p.stockQty} ${p.baseUnit}`}
                                   </span>
                                   <span className="text-slate-500 font-mono">
-                                    Custo: {p.buyingPrice.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                                    Custo: {p.buyingPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                                   </span>
                                 </div>
                               </button>
@@ -682,7 +682,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                         <div>
                           <span className="text-[9px] font-black text-slate-500 uppercase block">Custo Unitário</span>
                           <span className="text-xs font-mono font-bold text-slate-700">
-                            {originalUnitCostPerBase.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT/{originalProduct.baseUnit}
+                            {originalUnitCostPerBase.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT/{originalProduct.baseUnit}
                           </span>
                         </div>
                       </div>
@@ -736,13 +736,13 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                       <div>
                         <span className="text-[9px] font-black text-slate-400 uppercase">Custo Unitário Base</span>
                         <p className="text-xs font-black text-slate-700 mt-0.5">
-                          {originalUnitCostPerBase.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT / {originalProduct.baseUnit}
+                          {originalUnitCostPerBase.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT / {originalProduct.baseUnit}
                         </p>
                       </div>
                       <div>
                         <span className="text-[9px] font-black text-slate-400 uppercase">Custo Total Requisitado</span>
                         <p className="text-xs font-black text-emerald-700 mt-0.5 font-mono">
-                          {originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                          {originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                         </p>
                       </div>
                     </div>
@@ -860,13 +860,13 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                           <div>
                             <span className="text-gray-500">Custo Unitário Calculado: </span>
                             <span className="font-black text-emerald-900">
-                              {item.calculatedCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.calculatedCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </span>
                           </div>
                           <div>
                             <span className="text-gray-500">Custo Total da Linha: </span>
                             <span className="font-black text-emerald-900">
-                              {(item.quantity * item.calculatedCost).toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {(item.quantity * item.calculatedCost).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </span>
                           </div>
                         </div>
@@ -909,7 +909,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
                         {lossQty} {originalProduct.baseUnit}
                       </p>
                       <p className="text-[10px] font-mono">
-                        ({lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT)
+                        ({lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT)
                       </p>
                     </div>
 

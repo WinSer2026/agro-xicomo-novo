@@ -22,8 +22,16 @@ export interface Product {
   expiryDate?: string; // ISO date YYYY-MM-DD
   imageUrl?: string;
   isService?: boolean;
-  /** Data/hora ISO da última actualização do registo (ajustes, contagens, correcções). */
-  updatedAt?: string;
+  /** Taxa de IVA aplicável, em percentagem (omissão: 16%). */
+  taxRate?: number;
+  /**
+   * ES-37: artigo desactivado (fora de venda) em vez de apagado.
+   * Ausente = activo — os artigos antigos continuam válidos sem migração.
+   */
+  isActive?: boolean;
+  deactivatedAt?: string;
+  deactivatedBy?: string;
+  deactivationReason?: string;
 }
 
 export interface SaleItem {
@@ -41,6 +49,16 @@ export interface SaleItem {
   discountType?: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total';
   discountValue?: number;
   sellingUnit?: 'Bulk' | 'Retail'; // 'Bulk' for wholesale/sacks, 'Retail' for kilograms/units
+  /** Taxa de IVA aplicada à linha, em percentagem (omissão: 16%). */
+  taxRate?: number;
+  /**
+   * Factor de conversão do produto no momento da venda.
+   *
+   * D-04: a anulação repunha o stock com o factor ACTUAL do catálogo. Se a
+   * conversão tivesse mudado (1 saco = 50 kg → 25 kg), o estorno devolvia a
+   * quantidade errada. Fica gravada a conversão usada.
+   */
+  conversionRate?: number;
 }
 
 export interface PaymentBreakdown {
@@ -52,6 +70,8 @@ export interface Sale {
   id: string;
   invoiceNumber: string; // Sequencial fac/rec (e.g., "FAC-2026-0001")
   date: string; // Real transaction date (ISO String or YYYY-MM-DD)
+  /** Dia de calendário local (Africa/Maputo) a que a venda pertence. */
+  dateKey?: string;
   createdAt?: string; // Timestamp when record was created in system
   customerName: string;
   customerNuit?: string;
@@ -62,10 +82,51 @@ export interface Sale {
   total: number;
   paymentMethod: 'Dinheiro' | 'Transferência' | 'M-Pesa' | 'E-Mola' | 'Crédito' | 'Múltiplo' | string;
   paymentBreakdown?: PaymentBreakdown[];
-  status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito';
+  /** Numerário entregue pelo cliente. Guardado para auditoria do troco. */
+  amountReceived?: number;
+  /** Troco devolvido ao cliente. Guardado para auditoria do troco. */
+  changeGiven?: number;
+  /** Estado anterior ao cancelamento, para que o restauro seja fiel. */
+  previousStatus?: 'Paga' | 'Pendente' | 'Crédito';
+  /** Número da nota de crédito emitida aquando da anulação (E-06). */
+  creditNoteNumber?: string;
+  /**
+   * O stock foi devolvido ao anular?
+   * `true`  — anulação clássica, a mercadoria volta ao inventário.
+   * `false` — corte de inventário: a contagem física já foi lançada e o produto
+   *           já não estava lá; devolver inflacionaria o saldo.
+   * Ausente — vendas antigas, tratadas como devolvidas.
+   */
+  stockReturned?: boolean;
+  /** Momento da anulação, para rasto documental. */
+  cancelledAt?: string;
+  /** Quem autorizou a anulação (utilizador que introduziu a palavra-passe). */
+  cancelledBy?: string;
+  /** Momento em que a factura foi efectivamente liquidada. */
+  paidAt?: string;
+  /** Quanto o cliente já pagou (vendas a crédito e cobranças parciais). */
+  amountPaid?: number;
+  /** Data limite de pagamento (vendas a crédito/pendentes). */
+  dueDate?: string;
+  /** Utilizador que registou a liquidação. */
+  paidBy?: string;
+  /**
+   * Meio pelo qual a dívida foi paga (dinheiro, transferência, M-Pesa...).
+   * Distinto de `paymentMethod`: uma factura emitida a crédito mantém
+   * "Crédito" no documento original, e o recibo diz por onde o dinheiro entrou.
+   */
+  settledPaymentMethod?: string;
+  /** Nº da factura cancelada que esta factura substitui (reemissão). */
+  reissuedFrom?: string;
+  /** Nº da factura definitiva emitida a partir desta proforma. */
+  convertedToInvoice?: string;
+  /** 'Proforma' = documento comercial sem efeito fiscal nem financeiro. */
+  status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito' | 'Proforma';
   documentType?: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';
   operatorId: string;
   operatorName: string;
+  /** Posto/caixa que emitiu a venda (B-05). */
+  terminalId?: string;
   synced: boolean; // For Online/Local dual mode syncing tracking
   includeIva?: boolean;
   ivaAmount?: number;
@@ -95,6 +156,11 @@ export interface PausedSale {
   documentType: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';
   includeIva: boolean;
   customSubtotalDiscount: number;
+  /** Quem pausou a venda (G-02: a pausa não tinha autor). */
+  operatorId?: string;
+  operatorName?: string;
+  /** Posto onde a venda foi pausada. */
+  terminalId?: string;
 }
 
 export interface LossRecord {
@@ -104,11 +170,26 @@ export interface LossRecord {
   quantity: number;
   unit: string;
   date: string;
-  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Deterioração' | 'Quebras de Inventário' | 'Perda em Transformação' | 'Outro';
+  reason:
+    | 'Fora de Prazo'
+    | 'Danos Físicos'
+    | 'Deterioração'
+    | 'Quebras de Inventário'
+    | 'Perda em Transformação'
+    | 'Diferença de Inventário'
+    | 'Outro';
   responsibleEmployeeId?: string;
   justification: string;
   costValue: number; // total cost lost in MT
   transformationId?: string;
+  /**
+   * ES-42: uma perda anulada (ex.: transformação revertida) não se apaga —
+   * fica com a marca e sai das somas. A prova de que existiu mantém-se.
+   */
+  annulled?: boolean;
+  annulledAt?: string;
+  annulledBy?: string;
+  annulledReason?: string;
 }
 
 // --- Product Transformation Module Types (Parte 4) ---
@@ -280,7 +361,9 @@ export interface ActiveSession {
   roles?: AppRole[];
   loginTime: string;
   ipAddress: string;
+  /** Identificador do computador/posto (para encerrar sessões antigas). */
   deviceId?: string;
+  /** Último sinal de vida — usado no bloqueio automático por inactividade. */
   lastHeartbeat?: string;
 }
 
@@ -321,9 +404,9 @@ export interface SystemSettings {
   companyNuit?: string;
   companyAddress?: string;
   criticalStockLevel?: number;
-  /** Minutos de inactividade antes de bloquear a sessão de balcão (predefinição: 15). */
+  /** Minutos de inactividade até o ecrã bloquear (0 = desligado). */
   sessionLockMinutes?: number;
-  /** Aviso exibido no ecrã de login (ex.: credenciais temporárias de instalação nova). */
+  /** Aviso mostrado ao arrancar (ex.: dia de inventário). */
   bootstrapNotice?: string;
   printerA4?: string;
   printerThermal?: string;
@@ -346,4 +429,103 @@ export interface UserCredentials {
   mustChangePassword?: boolean;
   /** Version of the credential reset already applied to this account (idempotency guard). */
   passwordResetVersion?: number;
+}
+
+
+/**
+ * Movimento de stock (F-05).
+ *
+ * O sistema alterava `stockQty` sem deixar rasto da razão: quando o saldo
+ * divergia, não havia forma de saber o que o moveu. Cada alteração passa a
+ * gravar aqui uma linha com o delta em unidades base.
+ */
+export interface StockMovement {
+  id: string;
+  date: string;
+  productId: string;
+  productName: string;
+  /** Venda | Estorno | Quebra | Ajuste | Transformação | Entrada */
+  type: 'Venda' | 'Estorno' | 'Quebra' | 'Ajuste' | 'Transformação' | 'Entrada';
+  /** Delta em unidades base, com sinal (negativo = saída). */
+  qtyDelta: number;
+  unit: string;
+  /** Documento que originou o movimento (fatura, quebra, transformação). */
+  reference?: string;
+  operatorName?: string;
+  terminalId?: string;
+  note?: string;
+}
+
+/**
+ * Movimento de caixa.
+ *
+ * Porque existe: até aqui, tudo o que saía de dinheiro do estabelecimento tinha
+ * documento — venda, recibo, nota de crédito, quebra. O reembolso ao cliente não
+ * tinha nenhum. O caixa fechava com falta exatamente igual ao devolvido e não
+ * havia forma de provar que saiu, para onde, nem com que autorização. Uma nota
+ * de crédito sem saída de caixa correspondente é, para um inspector, ou um
+ * cliente que não foi pago (NC falsa) ou um pagamento feito fora do sistema.
+ */
+export interface CashMovement {
+  id: string;
+  /** Momento do movimento (ISO). */
+  date: string;
+  /** Dia local de Maputo (AAAA-MM-DD), para relatórios por dia. */
+  day: string;
+  /**
+   * Reembolso = dinheiro que sai para o cliente.
+   * Sangria = retirada do operador. Entrada/Fundo = reposição.
+   */
+  type: 'Reembolso' | 'Sangria' | 'Entrada' | 'Fundo';
+  /** Valor em MT. Positivo entra, negativo sai. */
+  amount: number;
+  method: string;
+  operator: string;
+  /** Quem autorizou com a palavra-passe de gestor. */
+  authorizedBy?: string;
+  /** Factura que originou o movimento. */
+  reference?: string;
+  creditNoteNumber?: string;
+  receiptNumber?: string;
+  notes?: string;
+  terminalId?: string;
+}
+
+/**
+ * Dívida de cliente.
+ *
+ * Porque existe: uma venda a crédito ficava marcada com `status: 'Crédito'` e
+ * nada mais. Não havia prazo, nem histórico de cobranças parciais, nem forma de
+ * saber quem estava atrasado — a dívida existia só na cabeça de quem vendia.
+ *
+ * Um registo por factura em dívida, com o prazo e todos os pagamentos.
+ */
+export interface DebtPayment {
+  id: string;
+  date: string;
+  amount: number;
+  method: string;
+  operator: string;
+  receiptNumber?: string;
+  note?: string;
+}
+
+export interface Debt {
+  /** Igual ao id da venda: uma dívida por factura, sem duplicados. */
+  id: string;
+  saleId: string;
+  invoiceNumber: string;
+  customerName: string;
+  customerNuit?: string;
+  /** Data de emissão. */
+  date: string;
+  /** Prazo de pagamento. */
+  dueDate: string;
+  total: number;
+  paidAmount: number;
+  payments: DebtPayment[];
+  /** Derivado na leitura; gravado para consulta rápida. */
+  status: 'Aberta' | 'Paga' | 'Anulada';
+  operator: string;
+  notes?: string;
 }
