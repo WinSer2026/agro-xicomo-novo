@@ -24,6 +24,14 @@ export interface Product {
   isService?: boolean;
   /** Taxa de IVA aplicável, em percentagem (omissão: 16%). */
   taxRate?: number;
+  /**
+   * ES-37: artigo desactivado (fora de venda) em vez de apagado.
+   * Ausente = activo — os artigos antigos continuam válidos sem migração.
+   */
+  isActive?: boolean;
+  deactivatedAt?: string;
+  deactivatedBy?: string;
+  deactivationReason?: string;
 }
 
 export interface SaleItem {
@@ -174,6 +182,14 @@ export interface LossRecord {
   justification: string;
   costValue: number; // total cost lost in MT
   transformationId?: string;
+  /**
+   * ES-42: uma perda anulada (ex.: transformação revertida) não se apaga —
+   * fica com a marca e sai das somas. A prova de que existiu mantém-se.
+   */
+  annulled?: boolean;
+  annulledAt?: string;
+  annulledBy?: string;
+  annulledReason?: string;
 }
 
 // --- Product Transformation Module Types (Parte 4) ---

@@ -568,7 +568,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       await runPostCommitTasks([
         {
           label: 'atualizar o catálogo depois da venda antiga',
-          task: async () => setProducts(await dbService.getProducts())
+          task: async () => setProducts((await dbService.getProducts()).filter(p => p.isActive !== false))
         },
         {
           label: 'atualizar o histórico depois da venda antiga',
@@ -885,7 +885,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     // PDV deliberately keeps a complete live catalogue and sales cache: it
     // needs them for barcode lookup, stock validation and receipt sequencing.
     await dbService.enableLiveCatalogAndSalesSync();
-    const prodList = await dbService.getProducts();
+    // Artigos desactivados saem do balcão: continuam no histórico, não à venda.
+    const prodList = (await dbService.getProducts()).filter(p => p.isActive !== false);
     setProducts(prodList);
 
     const config = await dbService.getSettings();
@@ -1852,7 +1853,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       await runPostCommitTasks([
         {
           label: 'atualizar o catálogo depois da venda',
-          task: async () => setProducts(await dbService.getProducts())
+          task: async () => setProducts((await dbService.getProducts()).filter(p => p.isActive !== false))
         },
         {
           label: 'atualizar o histórico de vendas',
@@ -2246,6 +2247,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   };
 
   const filteredProducts = products.filter(p => {
+    if (p.isActive === false) return false;
     const matchCat = selectedCategory === 'Todas' || p.category === selectedCategory;
     const matchQuery =
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||

@@ -2,6 +2,7 @@ import { companyNuit, companyName } from '../utils/companyInfo';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
+import { countedLosses } from '../utils/losses';
 import { isFinancialSale, isDebtSale, isCancelledSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
 import { cashBalance, sumRefunds, CASH_METHODS, toCashDay } from '../utils/cashBox';
@@ -193,7 +194,9 @@ export default function FinanceModule({ currentUser }: FinanceModuleProps = {}) 
 
   // 1. Math formulas for calculations based on active Date Range (Parte 5 & Parte 7)
   const filteredSales = sales.filter(s => isFinancialSale(s) && isDateInRange(s.date, startDate, endDate));
-  const filteredLosses = losses.filter(l => isDateInRange(l.date, startDate, endDate));
+  // Perdas anuladas (ex.: transformação revertida) continuam em «Quebras»,
+  // mas não entram em nenhum total de prejuízo.
+  const filteredLosses = countedLosses(losses).filter(l => isDateInRange(l.date, startDate, endDate));
   const filteredTransformations = transformations.filter(t => t.status !== 'Cancelada' && isDateInRange(t.date || t.createdAt, startDate, endDate));
   const filteredPayroll = payrollPayments.filter(p => isDateInRange(p.paymentDate || (p.month + '-01'), startDate, endDate));
 

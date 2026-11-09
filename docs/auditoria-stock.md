@@ -210,6 +210,8 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 | 13 | Reversão de transformação devolve **as três quantidades** e **anula** a perda em vez de a apagar. | ES-40, ES-41, ES-42 |
 | 14 | Categorias passam a lista central (sem duplicados por espaços/maiúsculas). | ES-51 |
 
+*(12, 13 e 14 executadas em 2026-11-09 — ver secção 7.)*
+
 ### Fase 4 — acabamento · ~meio dia
 
 | # | Acção | Fecha |
@@ -227,15 +229,15 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 ## 6. Verificação disponível
 
 ```
-npm run test:all     → 257 asserções, 0 falhas
+npm run test:all     → 272 asserções, 0 falhas
 npx tsc --noEmit     → sem erros
 npx vite build       → sem erros
 ```
 
 A aritmética do inventário (conversão saco↔base, derivação de sacos/retalho, travão do saldo negativo,
 diferença de contagem, valor do prejuízo) vive agora em `src/utils/stockMath.ts` e é testada sem
-Firestore: 35 asserções novas em `test/stock_debts_test.ts` (25 de aritmética de stock, 10 de
-correspondência de artigo). O que **não** é testável daqui é o
+Firestore: 50 asserções novas em `test/stock_debts_test.ts` (25 de aritmética de stock, 10 de
+correspondência de artigo, 7 de perdas anuladas, 8 de categorias). O que **não** é testável daqui é o
 comportamento transaccional real (dois postos a ajustar ao mesmo tempo) — isso exige dois caixas.
 
 **O que não se pode provar daqui:** comportamentos com dois postos reais, impressão, e o efeito de
@@ -297,4 +299,22 @@ postos ao mesmo tempo e ver um dos dois recusado (saldo insuficiente) em vez de 
 contar 12,5 kg e ver o saldo ficar em 12,5; quebrar 1 saco e ver 50 kg no relatório; transformar 100 kg
 de um artigo que só tem 40 e ser recusado; dar duas transformações simultâneas do mesmo saco.
 
-### Fases 3–4 — por executar
+### Fase 3 — executada · 2026-11-09
+
+| # | Acção | Estado | Onde |
+|---|---|---|---|
+| 12 | Eliminação → desactivação quando há histórico | **feito** | `getProductUsage` conta vendas, quebras, movimentos e transformações; o modal mostra os números antes de decidir (ES-38). Com histórico → `deactivateProduct` (sai do PDV, fica nas facturas); sem histórico nem stock → eliminação. **Com stock > 0 recusa sempre** — mercadoria não sai do inventário por um botão de eliminar. Artigo desactivado aparece a cinzento com etiqueta «Inactivo» e botão «Reactivar» (ES-37) |
+| 13 | Reversão de transformação | **feito** | `cancelTransformationWithStockReversal` em `runTransaction`: devolve **as três quantidades** (base, sacos, retalho) ao artigo de origem, retira-as dos gerados, recusa anular se os gerados já foram vendidos, deixa movimento de devolução e auditoria. A perda fica **anulada**, não apagada (ES-40/41/42) |
+| 14 | Categorias como lista central | **feito** | `src/utils/categories.ts`: chave sem acentos/maiúsculas/espaços, rótulo mais usado, `canonicalCategory` ao gravar um artigo (ES-51) |
+
+**Perdas anuladas em três sítios:** `src/utils/losses.ts` (`countedLosses`, `totalLossValue`,
+`lossQuantityByProduct`). Aplicado no Financeiro (prejuízo total e gráficos), no Stock (cartões,
+exportações PDF/Excel e contagem no separador). Na lista de «Quebras» a perda anulada continua
+visível, riscada, com quem a anulou e porquê — é prova, não lixo.
+
+**Prova local que continua pendente:** eliminar um artigo com vendas antigas e confirmar que a factura
+antiga continua legível; anular uma transformação depois de já ter vendido um dos pacotes gerados
+(deve ser recusado, não deixar stock negativo); anular uma transformação intacta e ver a perda
+riscada em «Quebras» sem alterar o prejuízo total.
+
+### Fase 4 — por executar

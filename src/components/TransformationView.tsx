@@ -295,16 +295,11 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
 
     setIsReversing(trf.id);
     try {
-      await dbService.cancelTransformationWithStockReversal(trf);
-
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: currentUser.username,
-        ipAddress: await getClientIp().catch(() => 'desconhecido'),
-        action: 'Transformação de Produto Anulada',
-        status: 'Alerta',
-        details: `Anulação da transformação ${trf.code}. Stock original restaurado com sucesso.`
+      // A anulação grava stock, movimentos e auditoria numa só transacção —
+      // incluindo a perda, que passa a «anulada» em vez de desaparecer.
+      await dbService.cancelTransformationWithStockReversal(trf, {
+        operator: currentUser.username,
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
       showToast(`Transformação ${trf.code} anulada e stock reposto com sucesso!`);

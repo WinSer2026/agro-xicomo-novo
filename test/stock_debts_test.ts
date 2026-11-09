@@ -13,6 +13,8 @@ import {
   toBaseQty
 } from '../src/utils/stockMath';
 import { matchProduct, normalizeTerm } from '../src/utils/productMatch';
+import { isCountedLoss, countedLosses, totalLossValue, lossQuantityByProduct } from '../src/utils/losses';
+import { categoryKey, collectCategories, canonicalCategory } from '../src/utils/categories';
 import type { Debt } from '../src/types';
 
 let passou = 0, falhou = 0;
@@ -139,6 +141,32 @@ ok('nome repetido é ambíguo, não chute', matchProduct(catalogo, 'Semente de M
 ok('texto vazio não corresponde', matchProduct(catalogo, '   ').status === 'none');
 ok('normalização tira acentos', normalizeTerm('  Adúbo   NPK ') === 'adubo npk');
 ok('catálogo vazio não rebenta', matchProduct([], 'ADUBO NPK').status === 'none');
+
+// ------------------------------------------------ perdas anuladas (ES-42)
+const perda = (over: any = {}) => ({ id: 'l1', productId: 'p1', productName: 'Milho', quantity: 10, unit: 'kg', date: '2026-11-01', reason: 'Outro', justification: '', costValue: 500, ...over });
+ok('perda normal conta', isCountedLoss(perda()));
+ok('perda anulada não conta', !isCountedLoss(perda({ annulled: true })));
+ok('lista vazia não rebenta', countedLosses(undefined as any).length === 0);
+ok('total ignora anuladas', totalLossValue([perda(), perda({ id: 'l2', annulled: true })]) === 500);
+ok('total com valor inválido não é NaN', totalLossValue([perda({ costValue: NaN })]) === 0);
+ok('quantidade perdida somada por artigo', lossQuantityByProduct([perda(), perda({ id: 'l2', quantity: 5 }), perda({ id: 'l3', productId: 'p2', quantity: 3 })])['p1'] === 15);
+ok('anulada não soma quantidade', lossQuantityByProduct([perda({ annulled: true })])['p1'] === undefined);
+
+// ------------------------------------------------- categorias (ES-51)
+ok('chave ignora maiúsculas, espaços e acentos', categoryKey('  Adúbos  ' ) === 'adubos');
+ok('mesma categoria aparece uma vez', collectCategories([
+  { category: 'Adubos' }, { category: 'adubos ' }, { category: 'ADUBOS' }
+]).length === 1);
+ok('rótulo mais usado ganha', collectCategories([
+  { category: 'Adubos' }, { category: 'adubos ' }, { category: 'adubos' }
+])[0] === 'adubos');
+ok('empate fica com o que tem maiúscula', collectCategories([
+  { category: 'adubos' }, { category: 'Adubos' }
+])[0] === 'Adubos');
+ok('categorias base sem artigos aparecem', collectCategories([], ['Sementes'])[0] === 'Sementes');
+ok('categoria vazia é ignorada', collectCategories([{ category: '  ' }, { category: '' }]).length === 0);
+ok('escrita livre reaproveita a existente', canonicalCategory(' adubos', ['Adubos', 'Sementes']) === 'Adubos');
+ok('categoria nova mantém-se', canonicalCategory(' Irrigação ', ['Adubos']) === 'Irrigação');
 
 console.log(`\n--- RESULTADO: ${passou} testes passaram, ${falhou} falharam ---`);
 if (falhou > 0) process.exit(1);

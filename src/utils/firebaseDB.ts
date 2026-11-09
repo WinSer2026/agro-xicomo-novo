@@ -802,6 +802,153 @@ export class FirebaseDBService {
     this.productsCache = null;
   }
 
+  /**
+   * O que já aconteceu a este artigo (ES-37/38).
+   *
+   * Antes de apagar, é preciso saber se ele aparece em facturas, quebras,
+   * movimentos ou transformações. Um artigo com histórico não se apaga — as
+   * facturas antigas passariam a falar de um produto inexistente.
+   */
+  public async getProductUsage(productId: string): Promise<{
+    sales: number;
+    losses: number;
+    movements: number;
+    transformations: number;
+    stock: number;
+    name: string;
+  }> {
+    await this.ensureAuth();
+    const id = String(productId);
+
+    const [prodSnap, sales, losses, movements, transformations] = await Promise.all([
+      getDoc(doc(db, 'products', id)),
+      this.getAll<Sale>('sales'),
+      this.getAll<LossRecord>('losses'),
+      this.getAll<StockMovement>('stock_movements'),
+      this.getAll<ProductTransformation>('transformations')
+    ]);
+
+    const produto = prodSnap.exists() ? (prodSnap.data() as Product) : null;
+
+    return {
+      name: produto?.name || '',
+      stock: Number(produto?.stockQty) || 0,
+      sales: sales.filter(venda => (venda.items || []).some(item => String(item.productId) === id)).length,
+      losses: losses.filter(perda => String(perda.productId) === id).length,
+      movements: movements.filter(mov => String(mov.productId) === id).length,
+      transformations: transformations.filter(
+        trf => String(trf.originalProductId) === id ||
+          (trf.items || []).some(item => String(item.resultingProductId) === id)
+      ).length
+    };
+  }
+
+  /**
+   * Desactivação (ES-37): o artigo sai de venda, mas fica no catálogo e no
+   * histórico. Só é aceite com stock a zero — senão a mercadoria desaparecia
+   * do inventário sem sair do armazém.
+   */
+  public async deactivateProduct(input: {
+    productId: string;
+    operator: string;
+    ipAddress?: string;
+    reason?: string;
+  }): Promise<void> {
+    await this.ensureAuth();
+
+    const id = String(input.productId);
+    const ref = doc(db, 'products', id);
+    const auditoriaId = `log-desact-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const agora = new Date().toISOString();
+
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+
+      const produto = snap.data() as Product;
+      const stock = roundStock(Number(produto.stockQty) || 0);
+      if (stock > 0) {
+        throw new Error(
+          `${produto.name} ainda tem ${stock} ${produto.baseUnit || 'un'} em stock. ` +
+            'Dê baixa (venda, quebra ou contagem) antes de o desactivar.'
+        );
+      }
+
+      transaction.set(
+        ref,
+        {
+          isActive: false,
+          deactivatedAt: agora,
+          deactivatedBy: input.operator,
+          deactivationReason: input.reason || 'Eliminação pedida — desactivado por ter histórico',
+          updatedAt: agora
+        },
+        { merge: true }
+      );
+
+      transaction.set(
+        doc(db, 'audit_logs', auditoriaId),
+        this.sanitizeData({
+          id: auditoriaId,
+          timestamp: agora,
+          username: input.operator,
+          ipAddress: input.ipAddress || 'desconhecido',
+          action: 'Desactivação de Produto',
+          status: 'Alerta',
+          level: 'WARNING',
+          entity: 'products',
+          details:
+            `${produto.name} (código ${produto.code || '—'}) desactivado. ` +
+            `Motivo: ${input.reason || 'tem histórico de vendas/movimentos'}. Stock a zero.`
+        } as AuditLog)
+      );
+    });
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'deactivate' } }));
+  }
+
+  /** Reativação de um artigo desactivado. */
+  public async reactivateProduct(input: {
+    productId: string;
+    operator: string;
+    ipAddress?: string;
+  }): Promise<void> {
+    await this.ensureAuth();
+
+    const id = String(input.productId);
+    const ref = doc(db, 'products', id);
+    const auditoriaId = `log-react-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const agora = new Date().toISOString();
+
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+      const produto = snap.data() as Product;
+
+      transaction.set(ref, { isActive: true, updatedAt: agora }, { merge: true });
+
+      transaction.set(
+        doc(db, 'audit_logs', auditoriaId),
+        this.sanitizeData({
+          id: auditoriaId,
+          timestamp: agora,
+          username: input.operator,
+          ipAddress: input.ipAddress || 'desconhecido',
+          action: 'Reativação de Produto',
+          status: 'Sucesso',
+          level: 'INFO',
+          entity: 'products',
+          details: `${produto.name} (código ${produto.code || '—'}) voltou a estar activo.`
+        } as AuditLog)
+      );
+    });
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'reactivate' } }));
+  }
+
+
   // --- Sales ---
   public async getSales(): Promise<Sale[]> {
     if (this.salesCache && this.salesCache.length >= 0) {
@@ -2716,50 +2863,156 @@ export class FirebaseDBService {
   }
 
   /**
-   * Reverses / Cancels a transformation:
-   * Restores original product stock, decreases resulting product stock, and marks transformation as 'Cancelada'.
+   * Anulação de uma transformação — devolve mercadoria, não apaga prova.
+   *
+   * ES-40/41: a reversão devolvia apenas `stockQty`. Num artigo híbrido, o
+   * total voltava e os sacos/retalho ficavam errados para sempre.
+   * ES-42: a perda do fraccionamento era **apagada**. Agora fica marcada como
+   * anulada — continua visível, com autor e motivo, e sai das somas.
+   *
+   * A anulação é recusada se os artigos gerados já foram vendidos (o stock
+   * ficaria negativo): nesse caso a mercadoria existe, mas noutro lado.
    */
-  public async cancelTransformationWithStockReversal(transformation: ProductTransformation): Promise<void> {
+  public async cancelTransformationWithStockReversal(
+    transformation: ProductTransformation,
+    context?: { operator?: string; ipAddress?: string }
+  ): Promise<void> {
     if (transformation.status === 'Cancelada') return;
 
-    const batch = writeBatch(db);
+    await this.ensureAuth();
 
-    // 1. Restore Original Product Stock
-    const origDocRef = doc(db, 'products', transformation.originalProductId);
-    batch.update(origDocRef, {
-      stockQty: increment(transformation.originalQuantity)
-    });
+    const operator = context?.operator || transformation.operatorName || 'Operador';
+    const ipAddress = context?.ipAddress || 'desconhecido';
+    const agora = new Date().toISOString();
 
-    // 2. Deduct Resulting Products Stock
-    for (const item of transformation.items) {
-      const itemDocRef = doc(db, 'products', item.resultingProductId);
-      batch.update(itemDocRef, {
-        stockQty: increment(-item.quantity)
+    await runTransaction(db, async transaction => {
+      // --- Leituras ---
+      const origRef = doc(db, 'products', transformation.originalProductId);
+      const origSnap = await transaction.get(origRef);
+
+      const itemRefs = (transformation.items || []).map(item =>
+        doc(db, 'products', item.resultingProductId)
+      );
+      const itemSnaps = await Promise.all(itemRefs.map(ref => transaction.get(ref)));
+
+      const lossRef = doc(db, 'losses', 'loss-trf-' + transformation.id);
+      const lossSnap = transformation.lossQuantity > 0 ? await transaction.get(lossRef) : null;
+
+      // --- Variações por artigo (origem devolve, gerados entregam) ---
+      const variacoes = new Map<string, number>();
+      variacoes.set(
+        transformation.originalProductId,
+        (variacoes.get(transformation.originalProductId) || 0) + (Number(transformation.originalQuantity) || 0)
+      );
+      (transformation.items || []).forEach(item => {
+        const atual = variacoes.get(item.resultingProductId) || 0;
+        variacoes.set(item.resultingProductId, atual - (Number(item.quantity) || 0));
       });
-    }
 
-    // 3. Mark transformation as Cancelled
-    const updatedTrf: ProductTransformation = {
-      ...transformation,
-      status: 'Cancelada',
-      updatedAt: new Date().toISOString()
-    };
-    batch.set(doc(db, 'transformations', transformation.id), this.sanitizeData(updatedTrf));
+      const snapsPorId = new Map<string, any>();
+      if (origSnap.exists()) snapsPorId.set(transformation.originalProductId, origSnap);
+      (transformation.items || []).forEach((item, idx) => {
+        snapsPorId.set(item.resultingProductId, itemSnaps[idx]);
+      });
 
-    // 4. If loss was recorded, delete the loss record
-    if (transformation.lossQuantity > 0) {
-      const lossId = 'loss-trf-' + transformation.id;
-      batch.delete(doc(db, 'losses', lossId));
-    }
+      // Recusa se algum artigo gerado já não tem o que devolver.
+      for (const [productId, delta] of variacoes.entries()) {
+        if (delta >= 0) continue;
+        const snap = snapsPorId.get(productId);
+        if (!snap || !snap.exists()) continue;
+        const produto = snap.data() as Product;
+        const disponivel = roundStock(Number(produto.stockQty) || 0);
+        if (Math.abs(delta) > disponivel + 1e-6) {
+          throw new Error(
+            `Não é possível anular: ${produto.name} já só tem ${disponivel} ${produto.baseUnit || 'un'} ` +
+              `e esta transformação gerou ${Math.abs(delta)}. A mercadoria já foi vendida ou movimentada.`
+          );
+        }
+      }
 
-    await batch.commit();
+      // --- Escritas ---
+      Array.from(variacoes.entries()).forEach(([productId, delta]) => {
+        if (delta === 0) return;
+        const snap = snapsPorId.get(productId);
+        if (!snap || !snap.exists()) return;
+
+        const produto = snap.data() as Product;
+        const total = roundStock((Number(produto.stockQty) || 0) + delta);
+        const escritas: Record<string, unknown> = { stockQty: increment(delta), updatedAt: agora };
+        const split = splitHybrid(total, produto);
+        if (split.stockQtyBulk !== null) {
+          escritas.stockQtyBulk = split.stockQtyBulk;
+          escritas.stockQtyRetail = split.stockQtyRetail;
+        }
+        transaction.set(doc(db, 'products', productId), escritas, { merge: true });
+
+        // Movimento de devolução: o livro passa a explicar a anulação (ES-43).
+        const movId = `mov-trf-rev-${transformation.id}-${productId}`;
+        transaction.set(
+          doc(db, 'stock_movements', movId),
+          this.sanitizeData({
+            id: movId,
+            date: agora,
+            productId,
+            productName: produto.name,
+            type: 'Transformação',
+            qtyDelta: delta,
+            unit: produto.baseUnit || 'un',
+            reference: `${transformation.code} (anulada)`,
+            operatorName: operator,
+            note: `Anulação da transformação ${transformation.code}`
+          } as StockMovement)
+        );
+      });
+
+      // Perda anulada — não apagada.
+      if (lossSnap) {
+        transaction.set(
+          lossRef,
+          {
+            annulled: true,
+            annulledAt: agora,
+            annulledBy: operator,
+            annulledReason: `Transformação ${transformation.code} anulada`
+          },
+          { merge: true }
+        );
+      }
+
+      const updatedTrf: ProductTransformation = {
+        ...transformation,
+        status: 'Cancelada',
+        updatedAt: agora
+      };
+      transaction.set(doc(db, 'transformations', transformation.id), this.sanitizeData(updatedTrf));
+
+      transaction.set(
+        doc(db, 'audit_logs', `log-trf-rev-${transformation.id}`),
+        this.sanitizeData({
+          id: `log-trf-rev-${transformation.id}`,
+          timestamp: agora,
+          username: operator,
+          ipAddress,
+          action: 'Transformação de Produto Anulada',
+          status: 'Alerta',
+          level: 'WARNING',
+          entity: 'transformations',
+          details:
+            `Guia ${transformation.code} anulada. Devolvidos ${transformation.originalQuantity} ` +
+            `${transformation.originalUnit} a ${transformation.originalProductName} e retirados os artigos gerados. ` +
+            `Perda ${transformation.lossQuantity || 0} anulada (não apagada).`
+        } as AuditLog)
+      );
+    });
 
     this.productsCache = null;
     this.transformationsCache = null;
+    this.lossesCache = null;
 
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'transformation-reversal' } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations', id: transformation.id } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', action: 'transformation-reversal' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'stock_movements', action: 'transformation-reversal' } }));
   }
 
   // --- Employees ---

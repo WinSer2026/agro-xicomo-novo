@@ -19,8 +19,22 @@ import {
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
+import { countedLosses } from '../utils/losses';
+import { collectCategories, canonicalCategory } from '../utils/categories';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
+
+/** Categorias que existem mesmo sem artigos (lista inicial do sistema). */
+const CATEGORIAS_BASE = [
+  'Sementes',
+  'Químicos',
+  'Adubos',
+  'Ferramentas e Ferragens',
+  'Limpeza',
+  'Jardinagem e Irrigação',
+  'Máquinas e Equipamentos',
+  'Serviços'
+];
 
 interface StockModuleProps {
   currentUser?: { username: string; role: string } | null;
@@ -29,7 +43,7 @@ interface StockModuleProps {
 export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [products, setProducts] = useState<Product[]>([]);
   const [losses, setLosses] = useState<LossRecord[]>([]);
-  const [categories, setCategories] = useState<string[]>(['Sementes', 'Químicos', 'Adubos', 'Ferramentas e Ferragens', 'Limpeza', 'Jardinagem e Irrigação', 'Máquinas e Equipamentos', 'Serviços']);
+  const [categories, setCategories] = useState<string[]>(CATEGORIAS_BASE);
   
   // Stock Sub-tabs & Transformation States (Parte 4 & Parte 7)
   const [stockSubTab, setStockSubTab] = useState<'inventory' | 'transformations' | 'losses' | 'reconciliation'>('inventory');
@@ -168,6 +182,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteProductTarget, setDeleteProductTarget] = useState<Product | null>(null);
   const [deletePassword, setDeletePassword] = useState('');
+  /** Histórico do artigo a eliminar: decide entre desactivar e apagar (ES-37/38). */
+  const [deleteUsage, setDeleteUsage] = useState<{ sales: number; losses: number; movements: number; transformations: number; stock: number } | null>(null);
   const [deleteError, setDeleteError] = useState('');
 
   const handleConfirmDeleteProduct = async (e: React.FormEvent) => {
@@ -177,7 +193,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (!deleteProductTarget) return;
 
-    const currentSettings = settings || await dbService.getSettings();
+    const currentSettings = settings || (await dbService.getSettings());
 
     if (!(await verifyAuthorizationPassword(deletePassword, currentSettings))) {
       setDeleteError('Senha de Gestor de Stock incorreta!');
@@ -186,32 +202,70 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     setIsSubmitting(true);
     try {
+      const operador = currentUser?.username || 'Gestor de Stock';
+      const ip = await getClientIp().catch(() => 'desconhecido');
+      const uso = deleteUsage || (await dbService.getProductUsage(String(deleteProductTarget.id)));
+
+      // ES-38: a decisão é tomada com números à frente, não às cegas.
+      if (uso.stock > 0) {
+        setDeleteError(
+          `Este artigo ainda tem ${uso.stock} ${deleteProductTarget.baseUnit || 'un'} em stock. ` +
+            'Dê baixa do stock antes de o eliminar ou desactivar.'
+        );
+        return;
+      }
+
+      const temHistorico =
+        uso.sales > 0 || uso.losses > 0 || uso.movements > 0 || uso.transformations > 0;
+
+      if (temHistorico) {
+        // ES-37: com histórico não se apaga — desactiva-se e o histórico fica intacto.
+        await dbService.deactivateProduct({
+          productId: String(deleteProductTarget.id),
+          operator: operador,
+          ipAddress: ip,
+          reason:
+            `Pedido de eliminação com histórico ` +
+            `(${uso.sales} venda(s), ${uso.movements} movimento(s), ${uso.losses} quebra(s))`
+        });
+        await loadInventoryData();
+        setShowDeleteModal(false);
+        setDeleteProductTarget(null);
+        setDeletePassword('');
+        triggerToast(
+          `"${deleteProductTarget.name}" foi desactivado, não apagado: tem histórico ` +
+            `(${uso.sales} venda(s), ${uso.movements} movimento(s)). Sai do PDV, fica nas facturas.`,
+          'warning'
+        );
+        return;
+      }
+
       await dbService.deleteProduct(deleteProductTarget.id);
-      const updated = await dbService.getProducts();
-      setProducts(updated);
 
       void dbService.addAuditLog({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
-        username: currentUser?.username || 'Gestor de Stock',
-        ipAddress: await getClientIp().catch(() => 'desconhecido'),
+        username: operador,
+        ipAddress: ip,
         action: 'Eliminação de Produto',
         status: 'Alerta',
         level: 'WARNING',
         entity: 'products',
         details:
-          `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}, código ${deleteProductTarget.code || '—'}, ` +
-          `stock ${deleteProductTarget.stockQty} ${deleteProductTarget.baseUnit || 'un'}) eliminado com autorização de gestor.`
+          `Produto "${deleteProductTarget.name}" (ID: ${deleteProductTarget.id}, código ${deleteProductTarget.code || '—'}) ` +
+          `eliminado sem histórico nem stock, com autorização de gestor.`
       });
+
+      const updated = await dbService.getProducts();
+      setProducts(updated);
 
       setShowDeleteModal(false);
       setDeleteProductTarget(null);
       setDeletePassword('');
-      setToastMessage(`Produto "${deleteProductTarget.name}" eliminado com sucesso!`);
-      setTimeout(() => setToastMessage(''), 4000);
-    } catch (err) {
+      triggerToast(`Produto "${deleteProductTarget.name}" eliminado (não tinha histórico nem stock).`);
+    } catch (err: any) {
       console.error(err);
-      setDeleteError('Erro ao eliminar produto.');
+      setDeleteError(err?.message || 'Erro ao eliminar produto.');
     } finally {
       setIsSubmitting(false);
     }
@@ -522,12 +576,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setProducts(updatedProducts.sort((a, b) => a.name.localeCompare(b.name)));
     setLosses(lossList);
 
-    // Extract categories
-    const customCats = new Set<string>(categories);
-    updatedProducts.forEach(p => {
-      if (p.category) customCats.add(p.category);
-    });
-    setCategories(Array.from(customCats));
+    // ES-51: uma lista canónica — «Adubos», «adubos» e «adubos » são a mesma
+    // categoria; o rótulo mostrado é o mais usado.
+    setCategories(collectCategories(updatedProducts, CATEGORIAS_BASE));
   };
 
   /**
@@ -610,7 +661,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     try {
       const codeToUse = (newProdCode.trim() || generateBarcodeValue()).trim();
 
-      const cat = newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory;
+      // ES-51: reaproveita a categoria existente em vez de criar «Adubos » ao lado de «Adubos».
+      const cat = canonicalCategory(
+        newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory,
+        categories
+      );
 
       /**
        * ES-07: código único. Dois artigos com o mesmo código de barras fazem o
@@ -1686,7 +1741,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         ...selectedProduct,
         name: editName,
         code: codeToUse,
-        category: editCategory,
+        category: canonicalCategory(editCategory, categories),
         baseUnit: editBaseUnit,
         parentUnit: editParentUnit || undefined,
         conversionRate: editConversionRate > 1 ? Number(editConversionRate) : undefined,
@@ -2075,7 +2130,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           }`}
         >
           <span className="material-symbols-outlined text-[18px] text-red-500">warning</span>
-          Quebras & Perdas ({losses.length})
+          Quebras & Perdas ({countedLosses(losses).length})
         </button>
 
         <button
@@ -2186,7 +2241,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                     {/* Name & Code */}
                     <td className="px-6 py-4">
-                      <div className="font-bold text-gray-800 text-sm">{prod.name}</div>
+                      <div className={`font-bold text-sm flex items-center gap-1.5 ${prod.isActive === false ? 'text-slate-400 line-through' : 'text-gray-800'}`}>
+                        {prod.name}
+                        {prod.isActive === false && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-black uppercase no-underline">
+                            Inactivo
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-2 mt-1">
                         <div
                           onClick={() => setPreviewBarcodeProduct(prod)}
@@ -2361,12 +2423,38 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           ) : (
                             <div className="w-[72px]" />
                           )}
+                          {prod.isActive === false && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await dbService.reactivateProduct({
+                                    productId: String(prod.id),
+                                    operator: currentUser?.username || 'Gestor de Stock',
+                                    ipAddress: await getClientIp().catch(() => 'desconhecido')
+                                  });
+                                  triggerToast(`"${prod.name}" voltou a estar activo.`);
+                                  await loadInventoryData();
+                                } catch (erro: any) {
+                                  triggerToast(erro?.message || 'Falha ao reactivar o artigo.', 'error');
+                                }
+                              }}
+                              className="px-2 py-0.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold cursor-pointer w-[72px] text-center"
+                              title="Voltar a pôr o artigo à venda"
+                            >
+                              Reactivar
+                            </button>
+                          )}
                           <button
                             onClick={() => {
                               setDeleteProductTarget(prod);
                               setDeletePassword('');
                               setDeleteError('');
+                              setDeleteUsage(null);
                               setShowDeleteModal(true);
+                              void dbService
+                                .getProductUsage(String(prod.id))
+                                .then(uso => setDeleteUsage(uso))
+                                .catch(() => setDeleteUsage(null));
                             }}
                             className="px-2 py-0.5 text-[10px] bg-red-600 hover:bg-red-700 text-white rounded font-bold cursor-pointer w-[72px] text-center"
                             title="Eliminar produto (requer senha de gestor)"
@@ -2474,7 +2562,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               setToastMessage('Relatório PDF de Quebras gerado com sucesso!');
             }}
             onExportExcel={() => {
-              const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+              const filtered = countedLosses(losses).filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
               const data = filtered.map(l => ({
                 'Data': formatDatePT(l.date),
                 'Produto': l.productName,
@@ -2493,7 +2581,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
           {/* Loss Summary Bento Cards */}
           {(() => {
-            const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+            const filtered = countedLosses(losses).filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
             const totalQty = filtered.reduce((s, l) => s + (l.quantity || 0), 0);
             const totalVal = filtered.reduce((s, l) => s + (l.costValue || 0), 0);
             return (
@@ -2540,7 +2628,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {(() => {
-                    const filtered = losses.filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate));
+                    // Anuladas continuam na lista (prova), mas assinaladas.
+                    const filtered = losses
+                      .filter(l => isDateInRange(l.date, lossesStartDate, lossesEndDate))
+                      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
                     if (filtered.length === 0) {
                       return (
                         <tr>
@@ -2551,9 +2642,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       );
                     }
                     return filtered.map(loss => (
-                      <tr key={loss.id} className="hover:bg-red-50/70 hover:shadow-md transition-all border-b border-gray-100">
+                      <tr
+                        key={loss.id}
+                        className={`transition-all border-b border-gray-100 ${
+                          loss.annulled ? 'bg-slate-50 text-slate-400' : 'hover:bg-red-50/70 hover:shadow-md'
+                        }`}
+                      >
                         <td className="p-3 font-mono text-[11px]">{formatDatePT(loss.date)}</td>
-                        <td className="p-3 font-bold text-gray-800">{loss.productName}</td>
+                        <td className="p-3 font-bold text-gray-800">
+                          {loss.productName}
+                          {loss.annulled && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-black uppercase align-middle"
+                              title={`Anulada por ${loss.annulledBy || '—'}${loss.annulledReason ? ` · ${loss.annulledReason}` : ''}`}
+                            >
+                              Anulada
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 font-semibold">{loss.quantity} {loss.unit}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -2562,7 +2668,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                             {loss.reason}
                           </span>
                         </td>
-                        <td className="p-3 font-mono font-bold text-red-600">{(loss.costValue || 0).toLocaleString('pt-MZ')} MT</td>
+                        <td className={`p-3 font-mono font-bold ${loss.annulled ? 'text-slate-400 line-through' : 'text-red-600'}`}>
+                          {(loss.costValue || 0).toLocaleString('pt-MZ')} MT
+                        </td>
                         <td className="p-3 text-gray-500 italic truncate max-w-xs" title={loss.justification}>
                           {loss.justification}
                         </td>
@@ -3155,17 +3263,41 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             </div>
 
             <form onSubmit={handleConfirmDeleteProduct} className="p-6 space-y-4">
-              <div className="bg-red-50 border border-red-200 text-red-800 p-3 rounded text-xs space-y-1">
+              <div className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded text-xs space-y-1">
                 <p className="font-bold flex items-center gap-1 text-sm">
-                  <span className="material-symbols-outlined text-[18px]">warning</span>
-                  Atenção: Eliminação Definitiva
+                  <span className="material-symbols-outlined text-[18px]">inventory</span>
+                  Eliminar artigo <strong>{deleteProductTarget.name}</strong>
                 </p>
-                <p>
-                  Está a tentar eliminar o produto <strong>{deleteProductTarget.name}</strong> (Código: {deleteProductTarget.code || deleteProductTarget.id}).
+                <p className="text-[11px]">
+                  Código {deleteProductTarget.code || deleteProductTarget.id} ·{' '}
+                  {deleteProductTarget.stockQty} {deleteProductTarget.baseUnit || 'un'} em stock
                 </p>
-                <p className="text-[11px] text-red-600">
-                  Esta ação removerá o artigo do catálogo e não poderá ser desfeita.
-                </p>
+                {deleteUsage === null ? (
+                  <p className="text-[11px] text-amber-700 italic">A verificar histórico…</p>
+                ) : (
+                  <>
+                    <p className="text-[11px]">
+                      Histórico: <strong>{deleteUsage.sales}</strong> venda(s) ·{' '}
+                      <strong>{deleteUsage.movements}</strong> movimento(s) ·{' '}
+                      <strong>{deleteUsage.losses}</strong> quebra(s) ·{' '}
+                      <strong>{deleteUsage.transformations}</strong> transformação(ões)
+                    </p>
+                    {deleteUsage.stock > 0 ? (
+                      <p className="text-[11px] font-bold text-red-700">
+                        Tem stock: dê baixa primeiro. Mercadoria não sai do inventário por aqui.
+                      </p>
+                    ) : deleteUsage.sales + deleteUsage.movements + deleteUsage.losses + deleteUsage.transformations > 0 ? (
+                      <p className="text-[11px] font-bold text-amber-800">
+                        Tem histórico: o artigo vai ser <strong>desactivado</strong> (fora de venda) e não
+                        apagado — as facturas antigas continuam a apontar para ele.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] font-bold text-red-700">
+                        Sem histórico nem stock: o artigo pode mesmo ser apagado. A acção não é reversível.
+                      </p>
+                    )}
+                  </>
+                )}
               </div>
 
               {deleteError && (
@@ -3189,7 +3321,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   autoFocus
                 />
                 <p className="text-[11px] text-gray-500 mt-1">
-                  Insira a senha de validação de gestor (ex: 05082) para autorizar a remoção.
+                  Senha de gestor para autorizar a operação (desactivar ou apagar).
                 </p>
               </div>
 
