@@ -48,18 +48,39 @@ porta com a chave do lado de dentro.
 
 ## Publicar
 
-**Consola** (recomendado, não instala nada):
+**Consola** (recomendado, não instala nada). Atalho que salta os menus:
 
-1. Console → **Bancos de dados e armazenamento → Firestore → separador Regras**
-2. Copiar **todo** o `firestore.rules` e colar no editor
-3. **Publicar**
+<https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/rules>
 
-**Linha de comandos:**
+1. **Bancos de dados e armazenamento → Firestore**. Se o separador "Regras" não aparecer, é porque
+   falta escolher a base de dados: este projeto usa uma base **com nome**
+   (`ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`), não a `(default)`.
+   Use o seletor de base de dados no topo da página. Confirmação: na aba "Dados" veem-se
+   `products`, `sales`, `cash_movements`, `audit_logs`.
+2. Separador **Regras** (em inglês, *Rules*) — fica ao lado de "Dados", "Índices", "Utilização".
+   Antes de substituir, copie o texto atual para um ficheiro local (serve de reversão).
+3. Copiar **todo** o `REGRAS-FIRESTORE-PARA-COLAR.txt` (cópia exata do `firestore.rules`) e colar.
+4. **Publicar** (*Publish*) e esperar pela confirmação com hora.
+
+**Consola do Google Cloud** (só se tiver caído em `console.cloud.google.com`):
+
+`https://console.cloud.google.com/databases?project=gen-lang-client-0896153566` → clicar no ID da
+base de dados → **Segurança** → separador **Firestore Rules** → *New ruleset* / *Clone ruleset* →
+colar → **Publicar**.
+
+**Linha de comandos** (a documentação oficial confirma suporte a bases com nome, desde que o
+`firebase.json` as declare — e declara):
 
 ```bash
 npx firebase-tools login
-npx firebase-tools deploy --only firestore:rules   # tem de dizer "released rules"
+npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
+# ou, apenas para esta base:
+npx firebase-tools deploy --only firestore:ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335 --project gen-lang-client-0896153566
 ```
+
+Tem de terminar com `✔ firestore: released rules`. A propagação leva alguns minutos;
+em bases com nome, o histórico da consola pode não registar publicações feitas pela CLI — nesse caso
+a reversão faz-se repondo o texto guardado no passo 2.
 
 ## Provar depois de publicar — 6 testes
 

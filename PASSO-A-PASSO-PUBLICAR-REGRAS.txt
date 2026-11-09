@@ -1,273 +1,273 @@
 ══════════════════════════════════════════════════════════════════════════════
   PASSO A PASSO — PUBLICAR AS REGRAS DO FIRESTORE
-  AGRO - XICOMO & SERVIÇOS, LDA  ·  09/11/2026
-  Tempo estimado: 10 a 15 minutos. Não precisa de programar nada.
+  AGRO - XICOMO & SERVIÇOS, LDA  ·  versão 2 (09/11/2026)
+  Revista depois de o separador "Regras" não ter sido encontrado.
 ══════════════════════════════════════════════════════════════════════════════
 
-  O QUE É ISTO, EM LINGUAGEM DE BALCÃO
-  ------------------------------------
-  O Firestore é o armazém onde o programa guarda os dados (vendas, stock,
-  clientes, caixa). As "regras" são a fechadura desse armazém: dizem quem pode
-  entrar e o que pode levar.
+  PORQUE ESTA VERSÃO EXISTE
+  -------------------------
+  A consola do Firebase mudou. O separador "Regras" continua a existir — está
+  é noutro sítio e, neste projeto, aparece depois de se escolher a BASE DE
+  DADOS certa. Há três caminhos possíveis; use o primeiro que funcionar.
 
-  Publicar regras NÃO apaga dados, NÃO muda preços e NÃO mexe em vendas.
-  Só troca a fechadura. Se a fechadura nova estiver mal, volta-se atrás em
-  30 segundos (Passo 7).
+  O que NÃO mudou: o projeto, a base de dados, o ficheiro de regras e o facto
+  de publicar regras não tocar nos dados.
 
-  PORQUE TEM DE SER AGORA
-  -----------------------
-  Os turnos de caixa que acabei de instalar gravam numa gaveta nova chamada
-  `cash_sessions`. As regras que estão publicadas neste momento não conhecem
-  essa gaveta e o Firestore recusa tudo o que não conhece. Resultado: o botão
-  "Trocar de turno" aparece, mas o fecho falha com "permission-denied".
+    Projeto .......: gen-lang-client-0896153566
+    Base de dados ..: ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
+                      (não é a base "por omissão"; é esta a que o sistema usa)
+    Ficheiro .......: REGRAS-FIRESTORE-PARA-COLAR.txt  (na pasta do sistema)
 
-  ATENÇÃO — A ORDEM DOS PASSOS NÃO É NEGOCIÁVEL
-  ---------------------------------------------
-  Primeiro confirma-se que o login "Anónimo" está ligado; só depois se publica.
-  Se publicar as regras com o login anónimo desligado, o programa deixa de
-  conseguir ler os dados e a loja fica parada. É o único risco real de todo
-  este processo.
+  ⚠ ANTES DE TUDO: confirme que o login "Anónimo" está ligado
+    https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers
+    Se estiver desligado, ligue e guarde. Publicar as regras com este login
+    desligado deixa o sistema sem acesso aos dados.
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  PASSO 1 — ENTRAR NA CONSOLA DO FIREBASE  (2 minutos)
+  DIAGNÓSTICO RÁPIDO — O QUE ESTÁ A VER?
 ══════════════════════════════════════════════════════════════════════════════
 
-  1.1  Abra o navegador (Chrome ou Edge) e vá a:
-
-           https://console.firebase.google.com
-
-  1.2  Entre com a conta Google que criou o sistema.
-       Se não souber qual é: é a mesma conta que aparece no canto superior
-       direito da consola quando o projeto abre.
-
-  1.3  Na lista de projetos, escolha:
-
-           gen-lang-client-0896153566
-
-       (É um nome feio, gerado automaticamente. É o projeto certo — está
-       escrito no ficheiro firebase-applet-config.json do sistema.)
-
-  ✔ Se vir o menu lateral com "Bancos de dados e armazenamento",
-    "Authentication", "Rules", está no sítio certo.
-
-
-══════════════════════════════════════════════════════════════════════════════
-  PASSO 2 — CONFIRMAR QUE O LOGIN "ANÓNIMO" ESTÁ LIGADO  (2 minutos)
-══════════════════════════════════════════════════════════════════════════════
-
-  Sem este login ligado, o programa não tem como provar ao Firestore que é o
-  programa da empresa — e passa a ser tratado como estranho.
-
-  2.1  Atalho direto (cole no navegador):
-
-           https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers
-
-       (Se preferir clicar: menu lateral → Authentication → separador
-        "Sign-in method" / "Método de início de sessão".)
-
-  2.2  Procure na lista o fornecedor "Anónimo" (Anonymous).
-
-  2.3  Estados possíveis:
-
-        • "Ativado" ou interruptor azul/verde  → está bem. Siga para o Passo 3.
-
-        • "Desativado" ou interruptor cinzento → CLIQUE em "Anónimo",
-          ligue o interruptor "Ativar" e clique em "Guardar". Espere a
-          mensagem de confirmação e só então avance.
-
-  2.4  (Só para confirmar) Abra o separador "Users" / "Utilizadores". Deve
-       ver utilizadores anónimos criados ao longo do tempo, um por posto ou
-       navegador. Se estiver vazio e a loja já usa o sistema, pare aqui e
-       avise-me: significa que o sistema está a trabalhar de outra forma.
+  ┌─────────────────────────────────────────────┬───────────────────────────┐
+  │ O que vê no ecrã                            │ O que fazer               │
+  ├─────────────────────────────────────────────┼───────────────────────────┤
+  │ Menu lateral com "Bancos de dados e         │ Siga o CAMINHO A          │
+  │ armazenamento" e dentro "Firestore"         │                           │
+  │                                             │                           │
+  │ Página do Firestore com abas "Dados",       │ Siga o CAMINHO A          │
+  │ mas sem "Regras"                            │ (escolher a base primeiro)│
+  │                                             │                           │
+  │ Endereço começa por console.cloud.google.com│ Siga o CAMINHO B          │
+  │ (fundo azul Google Cloud, "Firestore"       │                           │
+  │  Studio", "Bases de dados")                 │                           │
+  │                                             │                           │
+  │ Não tem browser/consola à mão, mas tem      │ Siga o CAMINHO C          │
+  │ alguém que saiba abrir uma janela de        │                           │
+  │ comandos (terminal)                         │                           │
+  │                                             │                           │
+  │ Outra coisa / página de boas-vindas do      │ Use o CAMINHO A com o      │
+  │ projeto / lista de projetos                 │ atalho direto (colar no    │
+  │                                             │ endereço o link do passo A1│
+  └─────────────────────────────────────────────┴───────────────────────────┘
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  PASSO 3 — CONFIRMAR QUE O PROGRAMA AINDA FUNCIONA AGORA  (3 minutos)
+  CAMINHO A — CONSOLA DO FIREBASE (recomendado)
 ══════════════════════════════════════════════════════════════════════════════
 
-  Este passo é a rede de segurança: provamos que o sistema abre com os dados
-  ANTES de trocar a fechadura. Se falhar aqui, o problema NÃO é das regras.
+  A1. COLE ESTE ENDEREÇO NO NAVEGADOR (é o atalho que salta os menus):
 
-  3.1  Abra o sistema no navegador (o endereço normal que usa todos os dias).
-  3.2  Entre com o seu utilizador.
-  3.3  Confirme que vê:
-        • a lista de produtos no PDV;
-        • as vendas/faturas do dia;
-        • o nome da empresa e os dados bancários nas Configurações.
-  3.4  Carregue em F12 → separador "Console". Não deve aparecer, em vermelho,
-       a frase:
+        https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/rules
 
-           Missing or insufficient permissions
+       Se a página não abrir ou der "não encontrado", cole este outro e
+       navegue a partir dele (o endereço é o mesmo, sem a parte final):
 
-       Se aparecer: pare. O login anónimo do Passo 2 não ficou ativo (por
-       vezes a consola diz "Guardado" mas o interruptor volta atrás) ou a
-       conta usada não é a dona do projeto. Resolva isso primeiro.
+        https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore
 
+       Truque: se os nomes em português o baralharem, acrescente ?hl=en ao
+       endereço para ver a consola em inglês (Rules = Regras, Publish =
+       Publicar, Data = Dados).
 
-══════════════════════════════════════════════════════════════════════════════
-  PASSO 4 — ABRIR O FIRESTORE E ESCOLHER A BASE CERTA  (2 minutos)
-══════════════════════════════════════════════════════════════════════════════
+  A2. ESCOLHA A BASE DE DADOS (o passo que faltava).
 
-  Aqui há uma armadilha: este projeto tem uma base de dados com nome
-  comprido, não a base "por omissão". É preciso escolher a certa.
+       Este projeto tem uma base de dados com nome comprido. A consola abre
+       muitas vezes na base "por omissão", que aqui não tem os dados.
 
-  4.1  Atalho direto:
+       • Procure no topo da página um seletor de base de dados — costuma
+         aparecer como um menu com o nome da base, ou a indicação
+         "(default)" / "Selecionar base de dados".
+       • Escolha:
 
-           https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore
+             ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
 
-  4.2  Se aparecer uma lista/dropdown de bases de dados no topo da página,
-       escolha:
+       • Confirmação de que está na base certa: no separador "Dados" tem de
+         ver as coleções products, sales, cash_movements, audit_logs. Se vir
+         uma base vazia, mudou para a errada.
 
-           ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
+       Nota: em algumas versões, o seletor de base de dados aparece na lista
+       lateral (menu próprio com o ícone de base de dados), antes de se entrar
+       no Firestore.
 
-       (Se só existir uma base, ela já está escolhida — siga.)
+  A3. ABRA O SEPARADOR "REGRAS".
 
-  4.3  Confirme que está na base certa: no separador "Dados"/"Data" deve
-       reconhecer as coleções do sistema — products, sales, cash_movements,
-       audit_logs. Se vir uma base vazia, está na base errada; volte a 4.2.
+       Depois de a base certa estar escolhida, a barra de separadores tem:
 
-  NOTA: se o menu tiver mudado de nome, o caminho alternativo é
-  menu lateral → "Bancos de dados e armazenamento" → Firestore.
+             Dados  |  Regras  |  Índices  |  Utilização
+             (Data) |  (Rules) |  (Indexes)|  (Usage)
 
+       "Regras" fica ao lado de "Dados". Se vir "Dados" mas não "Regras",
+       quase sempre é porque a base de dados ainda não foi escolhida (A2) ou
+       porque a página está a meio de carregar — recarregue com F5.
 
-══════════════════════════════════════════════════════════════════════════════
-  PASSO 5 — COLAR E PUBLICAR AS REGRAS  (3 minutos — o passo principal)
-══════════════════════════════════════════════════════════════════════════════
+  A4. GUARDE AS REGRAS ANTIGAS ANTES DE AS TROCAR (1 minuto, evita sobressaltos)
 
-  5.1  Na mesma página, abra o separador "Regras" ("Rules").
+       • No editor, clique dentro do texto e faça Ctrl+A (seleciona tudo),
+         depois Ctrl+C (copia).
+       • Abra o Notepad / Bloco de notas, cole (Ctrl+V) e grave como
+         REGRAS-ANTERIORES.txt no Ambiente de Trabalho.
+       • Serve para voltar ao que estava, exatamente, se algo correr mal.
 
-  5.2  Vai aparecer um editor de texto com as regras que estão publicadas
-       agora. NÃO TENTE LER AQUILO — é linguagem de programação.
+  A5. COLE AS REGRAS NOVAS.
 
-  5.3  Abra, no seu computador, o ficheiro que preparei:
+       • Abra, na pasta do sistema, o ficheiro:
 
-           REGRAS-FIRESTORE-PARA-COLAR.txt
+             REGRAS-FIRESTORE-PARA-COLAR.txt
 
-       (Está na pasta do sistema, ao lado de MELHORIAS-APLICADAS.txt. Se não
-       o encontrar: abra primeiro a pasta do projeto e procure pelo nome.)
+       • Nesse ficheiro: Ctrl+A e Ctrl+C. (Tem um cabeçalho de explicação
+         dentro de um comentário — pode copiar tudo, o Firestore ignora
+         comentários.)
+       • No editor da consola: Ctrl+A (seleciona as antigas) e Ctrl+V.
+       • Antes de publicar, confirme:
+            – a primeira instrução é   rules_version = '2';
+            – existe a linha           match /cash_sessions/{docId}
+            – a última linha é         }
 
-  5.4  Nesse ficheiro: Ctrl+A (seleciona tudo) e Ctrl+C (copia).
-       O ficheiro tem um cabeçalho de explicação no início — pode e deve
-       copiar tudo; esse cabeçalho são comentários e o Firestore ignora-os.
-       A última linha tem de ser  }
+  A6. PUBLICAR.
 
-  5.5  No editor da consola: clique dentro do texto, Ctrl+A (seleciona as
-       regras antigas) e Ctrl+V (cola as novas). O texto antigo tem de
-       desaparecer por completo.
+       • Botão "Publicar" / "Publish", no canto superior direito do editor.
+       • Espera-se a mensagem "Regras publicadas" / "Rules published", com a
+         hora.
+       • Se der erro de sintaxe: o texto foi colado incompleto (quase sempre
+         falta o fim). Repita A5 com atenção ao Ctrl+A.
+       • Enquanto não for aceite, as regras antigas continuam a valer. Não há
+         risco de ficar a meio.
 
-  5.6  Antes de publicar, confirme três coisas no texto colado:
-        • a primeira linha é  rules_version = '2';
-        • existe a linha  match /cash_sessions/{docId}  (é a novidade);
-        • a última linha é  }
+  A7. PROVAR (não salte).
 
-  5.7  Clique no botão "Publicar" ("Publish"), no canto superior direito.
+       No próprio editor de Regras existe o "Simulador de regras"
+       ("Rules Playground"), normalmente num botão/painel do lado direito:
+          a) products · operação get · SEM autenticação  → DENIED
+          b) products · operação get · COM autenticação  → ALLOWED
 
-  5.8  Espere pela confirmação. Deve aparecer uma mensagem do tipo
-       "Regras publicadas" / "Rules published successfully", com a hora.
+       No programa:
+          c) abrir o sistema → botão do turno → abrir turno com a contagem
+             da gaveta → deve abrir sem erro;
+          d) fechar o turno com a mesma contagem → diferença 0,00 MT e turno
+             seguinte aberto.
 
-       • Se aparecer erro de sintaxe: o texto foi colado incompleto (quase
-         sempre falta o fim). Volte a 5.4 e repita com atenção ao Ctrl+A.
-       • Nada foi publicado enquanto o botão não disser que sim. As regras
-         antigas continuam a valer até a publicação ser aceite.
-
-  ✔ FIM DA OPERAÇÃO PRINCIPAL. As regras estão publicadas.
-
-
-══════════════════════════════════════════════════════════════════════════════
-  PASSO 6 — PROVAR QUE FICOU BEM  (3 minutos — não salte este passo)
-══════════════════════════════════════════════════════════════════════════════
-
-  6.1  PROVA NO SIMULADOR (dentro da consola, separador "Regras")
-       Procure o "Simulador de regras" / "Rules Playground" (por vezes está
-       num botão do lado direito). Teste dois casos:
-
-        a) Coleção: products · Operação: get · Autenticação: NÃO autenticado
-           Resultado esperado: DENIED (recusado).
-           Se der "Allowed", as regras antigas ainda estão publicadas.
-
-        b) A mesma coleção products · Operação: get · Autenticação: SIM
-           Resultado esperado: ALLOWED (permitido).
-
-  6.2  PROVA NO PROGRAMA (a que interessa para o dinheiro)
-        a) Abra o sistema e entre.
-        b) No topo do ecrã deve ver o botão "Turno de caixa" (ou "Sem turno
-           aberto").
-        c) Carregue no botão → escreva quanto tem na gaveta → "Abrir turno".
-           Resultado esperado: mensagem de turno aberto.
-        d) Carregue outra vez no botão → conte o mesmo dinheiro → "Fechar
-           turno e abrir o seguinte".
-           Resultado esperado: fecho gravado, diferença 0,00 MT, e um turno
-           novo já aberto com o mesmo dinheiro.
-
-       Se (c) ou (d) falharem com "permission-denied" em F12 → a regra
-       cash_sessions NÃO ficou publicada (colou o ficheiro antigo). Volte ao
-       Passo 5.
-
-  6.3  PROVA DE QUE NADA SE PERDEU
-        Vá a Faturas e confirme que as vendas do dia continuam lá; vá a Stock
-        e confirme o stock dos artigos. Publicar regras não toca nos dados,
-        mas ver com os olhos evita sustos.
+       Se (c) ou (d) derem "permission-denied" no F12 → as regras de
+       cash_sessions não foram publicadas. Volte a A5.
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  PASSO 7 — SE ALGO CORRER MAL: REVERTER EM 30 SEGUNDOS
+  CAMINHO B — CONSOLA DO GOOGLE CLOUD (se foi parar ao sítio errado)
 ══════════════════════════════════════════════════════════════════════════════
 
-  Sintoma: o sistema abre, mas as listas vêm vazias e o F12 mostra
-  "Missing or insufficient permissions".
+  Se o endereço começa por console.cloud.google.com, está na consola do
+  Google Cloud e não na do Firebase. Aí o caminho é outro:
 
-  7.1  Consola → Firestore → separador "Regras".
-  7.2  Procure o ícone de histórico/versões (um relógio ou "Ver histórico de
-       versões"), no canto do editor.
-  7.3  Escolha a versão imediatamente anterior (a que estava publicada antes
-       de hoje) → "Restaurar" / "Publicar".
-  7.4  Recarregue o sistema. Tudo volta ao estado anterior, porque as regras
-       não alteram dados — só quem pode entrar.
+  B1. Abra:  https://console.cloud.google.com/databases?project=gen-lang-client-0896153566
+  B2. Clique no ID da base de dados:
 
-  Depois disso, diga-me o que aconteceu antes de tentar outra vez. Quase
-  sempre a causa é uma de duas: login anónimo desligado, ou texto colado
-  incompleto.
+          ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
+
+  B3. No menu dessa base, clique em "Segurança" ("Security").
+  B4. Abra o separador "Firestore Rules".
+  B5. Para editar: "Novo conjunto de regras" ("New ruleset") ou
+      "Clonar conjunto de regras" ("Clone ruleset").
+  B6. Cole o conteúdo de REGRAS-FIRESTORE-PARA-COLAR.txt e clique "Publicar".
+
+  NOTA: nesta consola a edição é mais confusa e há funções que só existem na
+  consola do Firebase. Se conseguir, prefira o CAMINHO A.
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  ALTERNATIVA — PELA LINHA DE COMANDOS  (só se alguém souber usar terminal)
+  CAMINHO C — LINHA DE COMANDOS  (confirmado: suporta bases com nome)
 ══════════════════════════════════════════════════════════════════════════════
 
-  Na pasta do sistema:
+  A documentação oficial confirma que o firebase-tools publica regras em bases
+  de dados com nome, desde que o firebase.json as declare — e o nosso declara.
+
+  Na pasta do sistema (onde está o firebase.json):
 
       npx firebase-tools login
-      npx firebase-tools deploy --only firestore:rules
+      npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
 
-  Tem de terminar com "released rules" / "✔ firestore: released rules".
+  Se quiser publicar apenas para esta base de dados (mais explícito):
 
-  TRÊS AVISOS SÉRIOS:
-   1. Este projeto usa uma base de dados com NOME (não a "por omissão"). Só
-      versões recentes do firebase-tools respeitam o campo "database" do
-      firebase.json. Numa versão antiga, o comando pode falhar ou publicar no
-      sítio errado. Se aparecer erro a falar de "database", use a consola
-      (Passos 4-5): é o caminho seguro.
-   2. `npx firebase-tools` descarrega o programa na hora; precisa de internet
-      e de Node.js instalado na máquina.
-   3. Nunca publique o ficheiro firestore.rules.legacy-open: é a versão ABERTA
-      que estamos a corrigir. Se alguma vez for publicado, a base fica sem
-      fechadura e qualquer pessoa com o endereço do projeto lê tudo.
+      npx firebase-tools deploy --only firestore:ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335 --project gen-lang-client-0896153566
+
+  Tem de terminar com  ✔  firestore: released rules
+
+  Requisitos e avisos:
+   • Precisa de Node.js instalado na máquina e de internet.
+   • O login abre o navegador para autenticar a conta Google dona do projeto.
+   • Nunca publique firestore.rules.legacy-open (é a versão aberta).
+   • A publicação leva alguns minutos a chegar a todos os servidores. Se logo
+     a seguir der erro, espere 2-3 minutos e repita o teste.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  SE ALGO CORRER MAL — VOLTAR ATRÁS
+══════════════════════════════════════════════════════════════════════════════
+
+  Sintoma: o sistema abre mas as listas vêm vazias e o F12 mostra
+  "Missing or insufficient permissions".
+
+  Opção 1 (a mais segura): repor o texto que guardou em A4.
+     Consola → Firestore → Regras → Ctrl+A → colar o REGRAS-ANTERIORES.txt →
+     Publicar.
+
+  Opção 2: usar o histórico da consola.
+     No editor de Regras há um ícone de histórico/relógio com as versões
+     anteriores → escolher a anterior → Publicar.
+     AVISO: em bases de dados com nome, o histórico pode não registar as
+     publicações feitas por linha de comandos. Se só vir uma versão ou nenhuma,
+     use a Opção 1.
+
+  ATENÇÃO: se as regras que estavam publicadas eram as antigas e abertas
+  ("allow read, write: if true"), repor essas reabre a base a qualquer pessoa.
+  Nesse caso, é preferível corrigir o problema e publicar as regras novas, em
+  vez de ficar com a base aberta.
+
+  Causas mais frequentes de falha:
+   1. login "Anónimo" desligado (verifique primeiro, sempre);
+   2. texto colado incompleto;
+   3. regras publicadas na base "(default)" em vez da base com nome;
+   4. regras ainda a propagar (esperar 2-3 minutos).
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  DEPOIS DE PUBLICAR — O QUE MUDA NO DIA A DIA
+  DE ONDE VEM ESTA VERSÃO (para quem quiser conferir)
 ══════════════════════════════════════════════════════════════════════════════
 
-  • Nada de visível, excepto isto: o botão de turno passa a gravar.
-  • Cada fecho de turno fica guardado para sempre: quem contou, quem conferiu,
-    contagem por método, esperado e diferença. Não se edita nem se apaga.
-  • Um erro num fecho corrige-se com um movimento contrário (entrada/sangria
-    no Livro de Caixa), com nota — nunca reescrevendo o fecho.
-  • Se um dia for criada uma coleção nova no programa, as regras têm de ser
-    publicadas outra vez. Há um teste automático (`npm run test:all`) que
-    avisa quando isso acontece — não é preciso adivinhar.
+  [CONFIRMADO] Documentação oficial do Firebase, página "Manage Cloud Firestore
+  with the Firebase Console", actualizada em 05/11/2026:
+      https://firebase.google.com/docs/firestore/using-console
+      → as regras editam-se em "Databases & Storage > Firestore > Rules".
+
+  [CONFIRMADO] Documentação oficial do Firestore (Google Cloud), página
+  "Getting started with security rules", actualizada em 20/08/2026:
+      https://docs.cloud.google.com/firestore/native/docs/security/get-started
+      → "In the Firebase console, use the database selector to switch between
+         the default database and any additional databases" (é o seletor que
+         faltava no passo A2);
+      → na consola do Google Cloud: Databases → ID da base → Security →
+         Firestore Rules → New/Clone ruleset → Publish.
+
+  [CONFIRMADO] Documentação oficial, "Manage and deploy Firebase Security
+  Rules":
+      https://firebase.google.com/docs/rules/manage-deploy
+      → a CLI publica por base: firebase deploy --only firestore:<databaseId>
+      → "released rules" é a confirmação de sucesso.
+
+  O que NÃO consegui verificar: o aspecto exato do ecrã que está à sua frente.
+  As três rotas acima são as que a documentação actual descreve; se nenhuma
+  corresponder ao que vê, use a secção seguinte.
+
 
 ══════════════════════════════════════════════════════════════════════════════
-  FIM. Se travar em algum passo, diga em qual número parou e o que apareceu
-  no ecrã — não continue às escuras.
+  SE NENHUM CAMINHO FUNCIONAR
+══════════════════════════════════════════════════════════════════════════════
+
+  Diga-me, com estas três informações, e eu digo-lhe o passo exato seguinte:
+
+   1. O endereço que aparece na barra do navegador (pode copiar).
+   2. O que está escrito no menu lateral esquerdo (duas ou três linhas).
+   3. Se aparece algum menu a pedir para escolher a base de dados, e o que
+      diz esse menu.
+
+  Não avance às cegas: publicar as regras no sítio errado, ou com o login
+  anónimo desligado, é o único passo desta operação que pode parar a loja.
+
 ══════════════════════════════════════════════════════════════════════════════

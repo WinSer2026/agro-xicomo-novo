@@ -88,21 +88,32 @@ Se houver esse erro aqui, o problema é do login anónimo — volte ao Passo 1 a
 
 **Opção A — pela consola (sem instalar nada, recomendada):**
 
-1. Console Firebase → **Firestore Database** → separador **Rules**.
-2. Abra o ficheiro `firestore.rules` do projecto, copie **todo** o conteúdo e cole no editor,
-   substituindo o que lá está.
-3. Clique em **Publish** (publicar).
-4. Confirme que o painel mostra a data/hora da publicação e que o conteúdo é o novo.
+Atalho: <https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/rules>
+
+1. **Bancos de dados e armazenamento → Firestore**. Este projecto usa uma base **com nome**
+   (`ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`): se o separador "Rules" não
+   aparecer, falta escolher a base no seletor de base de dados. Em caso de dúvida sobre o caminho,
+   ver `PASSO-A-PASSO-PUBLICAR-REGRAS.txt`.
+2. Antes de substituir, copie o conteúdo actual para um ficheiro local (é a reversão de reserva).
+3. Cole **todo** o conteúdo de `REGRAS-FIRESTORE-PARA-COLAR.txt` (cópia exacta do `firestore.rules`).
+4. Clique em **Publish** e confirme a data/hora da publicação.
+
+Se tiver caído na consola do Google Cloud (`console.cloud.google.com`), o caminho é
+**Bases de dados → ID da base → Segurança → Firestore Rules → New/Clone ruleset → Publish**.
 
 **Opção B — pela linha de comandos:**
 
 ```bash
 npx firebase-tools login           # abre o browser; autentique-se com a conta do projeto
-npx firebase-tools deploy --only firestore:rules
+npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
+# ou apenas esta base:
+npx firebase-tools deploy --only firestore:ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335 --project gen-lang-client-0896153566
 ```
 
-O `firebase.json` já define a base de dados nomeada, por isso o comando publica no sítio certo.
-No fim deve aparecer `✔ firestore: released rules` com o nome da base.
+O `firebase.json` já define a base de dados nomeada, por isso o comando publica no sítio certo; a
+documentação oficial confirma o suporte a bases com nome (o `--only firestore:rules` publica todas
+as bases declaradas no `firebase.json`). No fim deve aparecer `✔ firestore: released rules`.
+Em bases com nome, o histórico da consola pode não registar publicações feitas pela CLI.
 
 ### Passo 4 — Provar que ficou seguro e funcional
 
