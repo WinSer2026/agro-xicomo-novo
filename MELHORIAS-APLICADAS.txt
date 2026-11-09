@@ -150,7 +150,14 @@
        (não há tolerância de 50 MT nem de 5 MT);
     4. exige "quem contou" e "quem conferiu" — pode ser a mesma pessoa, mas
        fica escrito no documento do fecho que foi a mesma;
-    5. grava o fecho (não se altera depois) e abre logo o turno seguinte.
+    5. grava o fecho (não se altera depois) e, no fim, o operador escolhe:
+         • "Fechar turno e abrir o seguinte" — troca de turno normal, com
+            alguém a receber a caixa;
+         • "Só fechar o turno (não abrir outro)" — a caixa fica fechada até
+            alguém carregar em "Abrir turno" (fim do dia, pausa, ou quando
+            ainda não se sabe quem fica).
+       Em ambos os casos a contagem, a diferença e as assinaturas são gravadas
+       da mesma maneira. O que muda é só se nasce um turno novo.
 
   REGRA DO DINHEIRO QUE TRANSITA: o turno seguinte começa com o que foi
   CONTADO, não com um fundo fixo inventado. Não há fundo de maneio de 5.000 MT.
