@@ -49,23 +49,94 @@ VITE_SYNC_API_TOKEN=<segredo>       # build do frontend
 
 Sem `SYNC_API_TOKEN`, o servidor avisa no arranque e aceita apenas pedidos da mesma origem.
 
-## 3. Regras do Firestore — ficheiro pronto, publicação é decisão sua
+## 3. Regras do Firestore — passo a passo da publicação
 
-`firestore.rules` deixou de ser `allow read, write: if true` (que expunha vendas, credenciais e
-salários a qualquer pessoa com o *projectId*, que está no bundle) e passa a exigir
-`request.auth != null`, com auditoria imutável e credenciais sem eliminação.
+O ficheiro `firestore.rules` deixou de ser `allow read, write: if true` (que expunha vendas,
+credenciais e salários a qualquer pessoa com o *projectId*, que está no bundle) e passa a exigir
+`request.auth != null`.
 
-**O ficheiro não é publicado automaticamente.** Antes de correr
-`firebase deploy --only firestore:rules`:
+**A ordem importa.** Se publicar as regras antes de ativar o login anónimo, a aplicação deixa de
+conseguir ler e escrever no Firestore.
 
-1. Firebase Console → Authentication → *Sign‑in method* → ativar **Anónimo**.
-2. Confirmar que a app arranca e sincroniza (a sessão anónima é criada em `firebaseDB.ts`).
-3. Só então publicar as regras.
+- Projecto: `gen-lang-client-0896153566`
+- Base de dados Firestore (nomeada): `ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`
+- Ficheiro de regras: `firestore.rules` (o `firebase.json` já aponta para esta base)
 
-As regras antigas ficaram em `firestore.rules.legacy-open`, apenas para consulta. Não publicar.
+### Passo 1 — Ativar o login anónimo
 
-Se publicar as regras antes de ativar o login anónimo, a sincronização com o Firestore para de
-funcionar (a aplicação cai para os fallbacks locais).
+1. Abra <https://console.firebase.google.com> e escolha o projecto **gen-lang-client-0896153566**.
+2. No menu lateral: **Authentication** (criar utilizadores e sessões).
+3. Separador **Sign-in method** (método de início de sessão).
+4. Na lista de fornecedores, clique em **Anónimo**.
+5. Ligue o interruptor **Ativar** e clique em **Guardar**.
+
+Fica a **Authentication → Users** com um utilizador anónimo novo por cada navegador/posto. É normal:
+a aplicação cria a sessão no arranque e reutiliza-a.
+
+### Passo 2 — Confirmar que a aplicação continua a funcionar (ainda com as regras antigas)
+
+1. Abra a aplicação e entre com um utilizador.
+2. Confirme que produtos, vendas e definições aparecem.
+3. Abra as ferramentas do programador (F12) → **Console**. Não deve haver
+   `Missing or insufficient permissions`.
+
+Se houver esse erro aqui, o problema é do login anónimo — volte ao Passo 1 antes de continuar.
+
+### Passo 3 — Publicar as regras
+
+**Opção A — pela consola (sem instalar nada, recomendada):**
+
+1. Console Firebase → **Firestore Database** → separador **Rules**.
+2. Abra o ficheiro `firestore.rules` do projecto, copie **todo** o conteúdo e cole no editor,
+   substituindo o que lá está.
+3. Clique em **Publish** (publicar).
+4. Confirme que o painel mostra a data/hora da publicação e que o conteúdo é o novo.
+
+**Opção B — pela linha de comandos:**
+
+```bash
+npx firebase-tools login           # abre o browser; autentique-se com a conta do projeto
+npx firebase-tools deploy --only firestore:rules
+```
+
+O `firebase.json` já define a base de dados nomeada, por isso o comando publica no sítio certo.
+No fim deve aparecer `✔ firestore: released rules` com o nome da base.
+
+### Passo 4 — Provar que ficou seguro e funcional
+
+Na consola do Firebase → Firestore → **Rules** existe um **simulador** (Rules Playground):
+
+- Pedido **não autenticado** a `products` → deve dar **Denied**. É a prova de que a base deixou de
+  estar aberta.
+- Pedido **autenticado** (simular autenticação) a `products` → **Allowed**.
+
+Na aplicação, faça o teste completo:
+
+1. Entrar, abrir o PDV, registar uma venda de teste.
+2. Confirmar que a venda aparece nas Faturas e que o stock baixou.
+3. Stock → **Movimentos** num artigo → deve aparecer a linha da venda (livro de movimentos).
+4. Módulo técnico → **Verificar numeração** (deve abrir sem erro) e **Arquivar lote seguro**
+   de auditoria (usa permissão de eliminação em `audit_logs`).
+
+### Passo 5 — Se algo falhar (reverter)
+
+Sintoma típico: a aplicação abre mas listas vazias e o console mostra `permission-denied`.
+
+1. Console → Firestore → **Rules** → ícone de histórico (versões) → restaurar a versão anterior →
+   **Publish**.
+2. Corrigir a causa (normalmente: login anónimo não ativado, ou uma coleção nova sem regra) e
+   repetir.
+
+O ficheiro `firestore.rules.legacy-open` tem as regras antigas **apenas para consulta** — não deve
+ser publicado, porque é exatamente a configuração insegura que se está a corrigir.
+
+### Regras que exigem atenção quando se cria uma coleção nova
+
+Qualquer coleção nova usada pela aplicação tem de ser acrescentada a `firestore.rules`, senão as
+escritas passam a ser recusadas. Já estão cobertas: `products`, `sales`, `losses`,
+`transformations`, `employees`, `attendance`, `customers`, `paused_sales`, `active_cart`,
+`settings`, `counters`, `deletions`, `payroll_payments`, `active_sessions`, `credentials`,
+`audit_logs`, `audit_logs_archive`, `stock_movements`.
 
 ## 4. Ainda por fazer
 

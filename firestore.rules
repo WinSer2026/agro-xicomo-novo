@@ -2,14 +2,15 @@ rules_version = '2';
 // ---------------------------------------------------------------------------
 // Regras do Firestore — AGRO-XICOMO
 //
-// ATENÇÃO: estas regras exigem autenticação (Firebase Anonymous Auth ligado no
-// projeto). A versão anterior era `allow read, write: if true`, o que expunha
-// TODA a base — vendas, credenciais (mesmo em hash), salários — a qualquer
-// pessoa que tivesse o projectId (que está no bundle do frontend).
+// ATENÇÃO: exigem autenticação (Firebase Anonymous Auth ligado no projeto).
+// A versão anterior era `allow read, write: if true`, o que expunha TODA a
+// base — vendas, credenciais (mesmo em hash), salários — a qualquer pessoa que
+// tivesse o projectId (que está no bundle do frontend).
 //
 // Antes de publicar (`firebase deploy --only firestore:rules`):
 //   1. Console Firebase → Authentication → Sign-in method → ativar "Anónimo".
-//   2. Ver docs/seguranca.md.
+//   2. Abrir a aplicação e confirmar que os dados aparecem.
+//   3. Só então publicar. Ver docs/seguranca.md.
 //
 // O ficheiro com as regras antigas está em firestore.rules.legacy-open, apenas
 // para consulta/histórico. NÃO o publique.
@@ -17,45 +18,55 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Tudo o resto: negado por omissão.
+    // Negado por omissão a tudo o que não esteja listado abaixo.
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Operação normal: qualquer utilizador autenticado (anónimo incluído) lê e
-    // escreve os documentos operacionais.
-    match /products/{docId}      { allow read, write: if request.auth != null; }
-    match /sales/{docId}         { allow read, write: if request.auth != null; }
-    match /losses/{docId}        { allow read, write: if request.auth != null; }
-    match /transformations/{docId} { allow read, write: if request.auth != null; }
-    match /employees/{docId}     { allow read, write: if request.auth != null; }
-    match /attendance/{docId}    { allow read, write: if request.auth != null; }
-    match /customers/{docId}     { allow read, write: if request.auth != null; }
-    match /paused_sales/{docId}  { allow read, write: if request.auth != null; }
-    match /active_cart/{docId}   { allow read, write: if request.auth != null; }
-    match /settings/{docId}      { allow read, write: if request.auth != null; }
-    match /counters/{docId}      { allow read, write: if request.auth != null; }
-    match /deletions/{docId}     { allow read, write: if request.auth != null; }
+    // --- Operação normal -----------------------------------------------------
+    match /products/{docId}         { allow read, write: if request.auth != null; }
+    match /sales/{docId}            { allow read, write: if request.auth != null; }
+    match /losses/{docId}           { allow read, write: if request.auth != null; }
+    match /transformations/{docId}  { allow read, write: if request.auth != null; }
+    match /employees/{docId}        { allow read, write: if request.auth != null; }
+    match /attendance/{docId}       { allow read, write: if request.auth != null; }
+    match /customers/{docId}        { allow read, write: if request.auth != null; }
+    match /paused_sales/{docId}     { allow read, write: if request.auth != null; }
+    match /active_cart/{docId}      { allow read, write: if request.auth != null; }
+    match /settings/{docId}         { allow read, write: if request.auth != null; }
+    match /counters/{docId}         { allow read, write: if request.auth != null; }
+    match /deletions/{docId}        { allow read, write: if request.auth != null; }
     match /payroll_payments/{docId} { allow read, write: if request.auth != null; }
     match /active_sessions/{docId}  { allow read, write: if request.auth != null; }
 
-    // Credenciais: leitura apenas para verificação de login (o cliente precisa
-    // de comparar o hash). Escrita restrita — só criação/atualização autenticada.
+    // --- Credenciais da aplicação -------------------------------------------
+    // O login é feito na aplicação (não no Firebase Auth): o cliente lê o hash
+    // para o comparar. A gestão de utilizadores (criar, alterar, eliminar) é
+    // uma função do módulo técnico, por isso a eliminação é permitida a
+    // sessões autenticadas.
     match /credentials/{docId} {
-      allow read: if request.auth != null;
-      allow create, update: if request.auth != null;
-      allow delete: if false;
+      allow read, create, update, delete: if request.auth != null;
     }
 
-    // Auditoria: registos imutáveis depois de criados.
+    // --- Auditoria -----------------------------------------------------------
+    // Os registos não podem ser EDITADOS, mas têm de poder ser ARQUIVADOS: o
+    // arquivo move o documento para `audit_logs_archive` e apaga o original
+    // (src/utils/firebaseDB.ts, archiveAuditLogs). Negar o delete aqui
+    // partiria o arquivo — foi verificado antes de escrever estas regras.
     match /audit_logs/{docId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if false;
+      allow read, create: if request.auth != null;
+      allow delete: if request.auth != null;
+      allow update: if false;
     }
     match /audit_logs_archive/{docId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de movimentos de stock (F-05) ---------------------------------
+    // Escrito pela aplicação a cada venda/quebra/estorno; nunca reescrito.
+    match /stock_movements/{docId} {
+      allow read, create: if request.auth != null;
       allow update, delete: if false;
     }
   }

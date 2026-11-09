@@ -203,6 +203,10 @@ export class FirebaseDBService {
       return this.initPromise;
     }
     console.log('[FirebaseDBService] Initializing Firestore real-time listeners and caching...');
+    // Com as regras do Firestore a exigirem autenticação, os listeners em tempo
+    // real têm de arrancar depois da sessão anónima — senão o primeiro snapshot
+    // é recusado e o canal fica morto até recarregar.
+    await this.ensureAuth();
     this.initPromise = Promise.resolve();
 
     // Clear previous listeners if any
@@ -437,7 +441,24 @@ export class FirebaseDBService {
   }
 
   // Generic DB methods
+  /**
+   * Espera pela sessão anónima antes de tocar no Firestore.
+   *
+   * Com as regras novas (`request.auth != null`), uma leitura feita antes de a
+   * sessão anónima estar criada é recusada com permission-denied. Esta espera
+   * é central e nunca bloqueia: se a autenticação anónima estiver desactivada,
+   * `authReady` resolve `false` e o pedido segue como antes.
+   */
+  private async ensureAuth(): Promise<void> {
+    try {
+      await authReady;
+    } catch {
+      /* nunca impede a tentativa */
+    }
+  }
+
   private async getAll<T>(colName: string): Promise<T[]> {
+    await this.ensureAuth();
     try {
       console.log(`[FirebaseDBService] getAll() fetching collection: ${colName}`);
       const snapshot = await getDocs(collection(db, colName));
@@ -517,6 +538,7 @@ export class FirebaseDBService {
   }
 
   private async upsert(colName: string, id: string, data: any): Promise<void> {
+    await this.ensureAuth();
     try {
       const validId = String(id || data?.id || data?.invoiceNumber || Date.now());
       const sanitized = this.sanitizeData(data);
@@ -555,6 +577,7 @@ export class FirebaseDBService {
   }
 
   private async deleteRow(colName: string, id: string): Promise<void> {
+    await this.ensureAuth();
     try {
       const validId = String(id);
       console.log(`[FirebaseDBService] deleteRow() from collection: ${colName}, ID: ${validId}`);
@@ -822,6 +845,7 @@ export class FirebaseDBService {
     year: number,
     fallbackMax = 0
   ): Promise<string> {
+    await this.ensureAuth();
     const prefixByKind: Record<typeof kind, string> = {
       FaturaDefinitiva: `FAC-${year}-`,
       FaturaProforma: `FP-${year}-`,
@@ -883,6 +907,7 @@ export class FirebaseDBService {
    * recusada com `InsufficientStockError` e nada é escrito.
    */
   public async addSaleWithStockDeduction(sale: Sale, deductionItems: any[]): Promise<void> {
+    await this.ensureAuth();
     const saleId = String(sale.id || sale.invoiceNumber || Date.now());
 
     // Custo histórico: lido fora da transacção (não interfere com as escritas).
@@ -1028,6 +1053,7 @@ export class FirebaseDBService {
   }
 
   public async cancelSaleWithStockRestoration(sale: Sale, restockItems: any[]): Promise<void> {
+    await this.ensureAuth();
     const saleId = String(sale.id || sale.invoiceNumber || Date.now());
     const batch = writeBatch(db);
     // 1. Restock products atomically
@@ -1092,6 +1118,7 @@ export class FirebaseDBService {
    * Os movimentos são gravados em lote e ficam em fila local se a rede cair.
    */
   public async recordStockMovements(movements: StockMovement[]): Promise<void> {
+    await this.ensureAuth();
     const validos = (movements || []).filter(m => m && m.productId && Number.isFinite(m.qtyDelta) && m.qtyDelta !== 0);
     if (validos.length === 0) return;
 
@@ -1409,6 +1436,7 @@ export class FirebaseDBService {
     cutoffDate: string,
     requestedBatchSize?: number
   ): Promise<AuditArchiveResult> {
+    await this.ensureAuth();
     const cutoffTimestamp = getArchiveCutoffTimestamp(cutoffDate);
     const batchSize = getSafeArchiveBatchSize(requestedBatchSize);
     const sourceQuery = query(
