@@ -29,16 +29,35 @@
     Base de dados ...: ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
     Ficheiro a colar .: REGRAS-FIRESTORE-PARA-COLAR.txt  (pasta do sistema)
 
-  ⚠ ANTES DE TUDO: confirme o login "Anónimo"
-    https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers
-    Se estiver desligado, ligue e guarde. Publicar as regras com este login
-    desligado deixa o sistema sem acesso aos dados.
-    (Na mesma linha do menu lateral onde está o Firestore, existe
-     "Authentication" — é o mesmo sítio.)
+  ✔ LOGIN "ANÓNIMO" — CONFIRMADO LIGADO PELO DONO EM 09/11/2026.
+    Pré-requisito cumprido: pode publicar. (Se algum dia desligar este
+    fornecedor, o sistema perde acesso aos dados — é a única dependência
+    externa das regras.)
+    Verificação, se precisar: Authentication → Sign-in method → Anónimo.
 
 
 ══════════════════════════════════════════════════════════════════════════════
-  OS 8 PASSOS
+  CHECKLIST CURTA — PARA FAZER AGORA (login anónimo já confirmado)
+══════════════════════════════════════════════════════════════════════════════
+
+  [ ] 1. Está na página do Firestore, base ai-studio-remixagroxicomoe-…
+  [ ] 2. Separador do TOPO "Segurança" (não o menu lateral)
+  [ ] 3. Botão azul "Desenvolver e testar" → entra em modo de edição
+  [ ] 4. Guardar o texto atual: Ctrl+A, Ctrl+C → Notepad → REGRAS-ANTERIORES.txt
+  [ ] 5. Abrir REGRAS-FIRESTORE-PARA-COLAR.txt → Ctrl+A, Ctrl+C
+  [ ] 6. No editor: Ctrl+A, Ctrl+V
+  [ ] 7. Conferir: rules_version = '2';  ·  match /cash_sessions/{docId}  ·  última linha }
+  [ ] 8. Publicar → confirmar versão nova com a data de hoje no histórico
+  [ ] 9. Provar: products sem auth = Denied / com auth = Allowed
+  [ ] 10. No programa: abrir turno, fechar turno com a mesma contagem,
+           diferença 0,00 MT e turno seguinte aberto
+
+  Depois de publicar: recarregue o sistema com Ctrl+Shift+R (limpa a versão
+  antiga da página que está em cache).
+
+
+══════════════════════════════════════════════════════════════════════════════
+  OS 8 PASSOS (detalhe)
 ══════════════════════════════════════════════════════════════════════════════
 
   PASSO 1 — Abrir a página onde já está.
