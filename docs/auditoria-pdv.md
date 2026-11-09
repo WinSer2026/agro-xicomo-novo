@@ -1088,14 +1088,13 @@ Registo do que já foi corrigido no código, fase a fase. Cada fase foi verifica
 
 ### Estado final
 
-- **Fechados:** 82 de 97.
-- **Parciais:** 3 (G‑02, F2‑03, K‑08).
-- **Não procedem:** 3 (I‑01, K‑02, L‑09).
-- **Abertos:** 9 — `L‑03` (publicação das regras), `L‑07` e `L‑10` (autenticação server‑side e credenciais
-  de arranque no bundle), `N‑06` (módulo de despesas), `H‑04`, `J‑04`, `J‑05`, `F‑07`, `F‑08`.
-  As razões estão em §18.
-
----
+- **Fechados: 82 de 97.**
+- **Parciais: 3** — F2‑03 (composição de stock é detectada e sinalizada, mas o total ainda não é derivado),
+  F2‑04 e K‑08 (`key={index}` substituído nas tabelas principais; restam listas estáticas).
+- **Pendente de publicação: 1** — L‑03 (regras escritas; falta ativar o login anónimo e publicar).
+- **Não procedem: 3** — I‑01 (existe bloqueio por inactividade de 5 minutos), K‑02 (quantidade vazia tratada
+  no submit), L‑09 (não existe alias de conta no código).
+- **Abertos: 8** — F‑07, F‑08, H‑04, J‑04, J‑05, L‑07, L‑10, N‑06. Razões na tabela seguinte.
 
 ## 18. O que continua aberto, e porquê
 
