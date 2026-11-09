@@ -1,0 +1,44 @@
+════════════════════════════════════════════════════════════════
+  COMO PUBLICAR AS REGRAS — VERSÃO SIMPLES
+  (faça só isto, pela ordem; são 6 passos)
+════════════════════════════════════════════════════════════════
+
+PASSO 1
+  Clique no botão azul "Desenvolver e testar"
+  (está em cima, do lado direito).
+
+PASSO 2
+  Vai aparecer uma caixa com texto.
+  Clique dentro do texto.
+  Aperte Ctrl+A  e depois Ctrl+C   (isto copia o texto que lá está).
+
+PASSO 3
+  Abra o Bloco de Notas.
+  Cole com Ctrl+V  e grave com o nome:  regras-antigas
+  (É só uma cópia de segurança. Não mexa mais nela.)
+
+PASSO 4
+  Abra o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt  (está na pasta do sistema).
+  Aperte Ctrl+A  e depois Ctrl+C.
+
+PASSO 5
+  Volte à consola do Firebase.
+  Clique dentro do texto e aperte Ctrl+A   (isto apaga o texto antigo).
+  Aperte Ctrl+V                            (isto coloca o texto novo).
+
+PASSO 6
+  Olhe para a última linha do texto. Tem de ser:   }
+  Se for, clique em "Publicar".
+
+
+DEPOIS
+  Espere a mensagem a dizer que publicou.
+  Abra o programa, aperte Ctrl+Shift+R (para atualizar).
+  Clique no botão do turno e abra um turno.
+  Se abrir, está feito.
+
+
+SE DER ERRO
+  Copie a mensagem de erro e envie-me.
+  Se não encontrar o botão "Publicar", tire uma foto do ecrã e envie.
+════════════════════════════════════════════════════════════════
