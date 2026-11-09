@@ -42,7 +42,9 @@ import {
   PausedSale,
   ProductTransformation,
   StockMovement,
-  CashMovement
+  CashMovement,
+  Debt,
+  DebtPayment
 } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage, safeSessionStorage } from './safeStorage';
@@ -257,6 +259,7 @@ export class FirebaseDBService {
   private settingsCache: SystemSettings | null = null;
   private lossesCache: LossRecord[] | null = null;
   private cashMovementsCache: CashMovement[] | null = null;
+  private debtsCache: Debt[] | null = null;
   private payrollCache: PayrollPayment[] | null = null;
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
@@ -1520,6 +1523,212 @@ export class FirebaseDBService {
       this.cashMovementsCache = null;
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_movements', action: 'cutoff-refund' } }));
     }
+    return resultado;
+  }
+
+  // --- Dívidas de clientes (vendas a crédito) ---
+
+  /** Lê uma única vez o stock de um artigo. Sem cache: é guarda, não relatório. */
+  public async getProductStock(productId: string): Promise<number | null> {
+    try {
+      const snap = await getDoc(doc(db, 'products', String(productId)));
+      if (!snap.exists()) return null;
+      return Number((snap.data() as Product).stockQty) || 0;
+    } catch (erro) {
+      console.error('[FirebaseDB] Falha ao ler stock do artigo:', erro);
+      return null;
+    }
+  }
+
+  public async getDebts(): Promise<Debt[]> {
+    if (this.debtsCache) return this.debtsCache;
+    const lista = await this.getAll<Debt>('debts');
+    this.debtsCache = lista.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    return this.debtsCache;
+  }
+
+  /**
+   * Cria o registo de dívida de uma venda não paga.
+   *
+   * Idempotente: o id é o da venda, por isso repetir não duplica. Grava-se
+   * apenas o necessário — prazo e zero pagamentos.
+   */
+  public async createDebtFromSale(sale: Sale, termDays = 30): Promise<Debt | null> {
+    const estado = String(sale.status || '');
+    // Só dívidas reais: uma venda cancelada ou proforma nunca gera registo.
+    if (estado !== 'Crédito' && estado !== 'Pendente') return null;
+
+    await this.ensureAuth();
+    const id = String(sale.id || sale.invoiceNumber);
+    const existente = await getDoc(doc(db, 'debts', id));
+    if (existente.exists()) return existente.data() as Debt;
+
+    const emissao = sale.date || new Date().toISOString();
+    const prazo = new Date(emissao);
+    prazo.setDate(prazo.getDate() + (Number.isFinite(termDays) ? termDays : 30));
+
+    const divida: Debt = {
+      id,
+      saleId: id,
+      invoiceNumber: sale.invoiceNumber,
+      customerName: sale.customerName || 'Cliente Geral',
+      customerNuit: sale.customerNuit,
+      date: emissao,
+      dueDate: prazo.toISOString(),
+      total: Number(sale.total) || 0,
+      paidAmount: Number(sale.amountPaid) || 0,
+      payments: [],
+      status: 'Aberta',
+      operator: sale.operatorName || sale.operatorId || 'Sistema'
+    };
+
+    await setDoc(doc(db, 'debts', id), this.sanitizeData(divida));
+    this.debtsCache = null;
+    return divida;
+  }
+
+  /**
+   * Recebe dinheiro de uma factura em dívida — total ou parcial.
+   *
+   * Uma só transacção escreve: o pagamento na dívida, o estado da venda, o
+   * número do recibo e a entrada no livro de caixa. Antes não havia nada disto:
+   * a venda ficava «Paga» a 100% ou não se registava pagamento nenhum.
+   */
+  public async settleDebt(input: {
+    saleId: string;
+    amount: number;
+    method: string;
+    operator: string;
+    fallbackMax?: number;
+    note?: string;
+  }): Promise<{ debt: Debt; sale: Sale; receiptNumber: string; full: boolean; remaining: number }> {
+    await this.ensureAuth();
+
+    const saleId = String(input.saleId);
+    const valor = Math.round((Number(input.amount) || 0) * 100) / 100;
+    if (!(valor > 0)) throw new Error('O valor do pagamento tem de ser maior que zero.');
+
+    const saleRef = doc(db, 'sales', saleId);
+    const debtRef = doc(db, 'debts', saleId);
+    const counterRef = doc(db, 'counters', 'document_numbers');
+    const prefix = `REC-A4-${new Date().getFullYear()}-`;
+
+    const resultado = await runTransaction(db, async transaction => {
+      const saleSnap = await transaction.get(saleRef);
+      if (!saleSnap.exists()) throw new Error('Factura não encontrada. Actualize a lista.');
+      const venda = saleSnap.data() as Sale;
+      const estado = String(venda.status || '');
+
+      if (estado === 'Cancelada' || estado === 'canceled') {
+        throw new Error(`A factura ${venda.invoiceNumber} está anulada.`);
+      }
+      if (estado === 'Paga') {
+        throw new Error(`A factura ${venda.invoiceNumber} já está paga.`);
+      }
+      if (estado !== 'Pendente' && estado !== 'Crédito') {
+        throw new Error(`A factura ${venda.invoiceNumber} não é uma dívida (estado: ${estado || 'desconhecido'}).`);
+      }
+
+      const debtSnap = await transaction.get(debtRef);
+      const dividaExistente = debtSnap.exists() ? (debtSnap.data() as Debt) : null;
+      const total = Number(dividaExistente?.total ?? venda.total) || 0;
+      const jaPago = Number(dividaExistente?.paidAmount ?? venda.amountPaid) || 0;
+      const restante = Math.round((total - jaPago) * 100) / 100;
+
+      if (valor > restante + 0.01) {
+        throw new Error(
+          `O valor (${valor.toFixed(2)} MT) excede o que falta pagar (${restante.toFixed(2)} MT).`
+        );
+      }
+
+      const counterSnap = await transaction.get(counterRef);
+      const guardado = counterSnap.exists()
+        ? Number((counterSnap.data() as Record<string, number>)[prefix] || 0)
+        : 0;
+      const safeFallback = Number.isFinite(input.fallbackMax) ? Math.max(0, Math.floor(input.fallbackMax!)) : 0;
+      const proximo = Math.max(guardado, safeFallback) + 1;
+      const receiptNumber = `${prefix}${String(proximo).padStart(4, '0')}`;
+
+      const agora = new Date().toISOString();
+      const pagoTotal = Math.round((jaPago + valor) * 100) / 100;
+      const liquidada = pagoTotal >= total - 0.01;
+
+      const pagamento: DebtPayment = {
+        id: `pay-${Date.now()}-${proximo}`,
+        date: agora,
+        amount: valor,
+        method: input.method || 'Dinheiro',
+        operator: input.operator,
+        receiptNumber,
+        note: input.note
+      };
+
+      const divida: Debt = {
+        id: saleId,
+        saleId,
+        invoiceNumber: venda.invoiceNumber,
+        customerName: venda.customerName || 'Cliente Geral',
+        customerNuit: venda.customerNuit,
+        date: dividaExistente?.date || venda.date || agora,
+        dueDate:
+          dividaExistente?.dueDate ||
+          new Date(new Date(venda.date || agora).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        total,
+        paidAmount: pagoTotal,
+        payments: [...(dividaExistente?.payments || []), pagamento],
+        status: 'Aberta',
+        operator: venda.operatorName || venda.operatorId || input.operator
+      };
+
+      const vendaAtualizada: Sale = this.sanitizeData({
+        ...venda,
+        amountPaid: pagoTotal,
+        ...(liquidada
+          ? { status: 'Paga' as const, paidAt: agora, paidBy: input.operator, settledPaymentMethod: input.method }
+          : {}),
+        receiptNumber: liquidada ? receiptNumber : venda.receiptNumber
+      });
+
+      transaction.set(saleRef, vendaAtualizada, { merge: true });
+      transaction.set(counterRef, { [prefix]: proximo, updatedAt: agora }, { merge: true });
+
+      // Dinheiro que entra na gaveta: sem isto, o caixa fechava com sobra.
+      const diaCaixa = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Maputo', year: 'numeric', month: '2-digit', day: '2-digit'
+      }).format(new Date());
+      const movimentoId = `cx-cobranca-${saleId}-${proximo}`;
+      const movimento: CashMovement = {
+        id: movimentoId,
+        date: agora,
+        day: diaCaixa,
+        type: 'Entrada',
+        amount: valor,
+        method: input.method || 'Dinheiro',
+        operator: input.operator,
+        authorizedBy: input.operator,
+        reference: venda.invoiceNumber,
+        receiptNumber,
+        notes: liquidada
+          ? `Liquidação de ${venda.invoiceNumber}`
+          : `Cobrança parcial de ${venda.invoiceNumber} (falta ${Math.max(0, total - pagoTotal).toFixed(2)} MT)`
+      };
+      transaction.set(doc(db, 'cash_movements', movimentoId), movimento);
+      transaction.set(debtRef, { ...divida, status: liquidada ? 'Paga' : 'Aberta' });
+
+      return {
+        debt: { ...divida, status: liquidada ? 'Paga' as const : 'Aberta' as const },
+        sale: vendaAtualizada,
+        receiptNumber,
+        full: liquidada,
+        remaining: Math.max(0, Math.round((total - pagoTotal) * 100) / 100)
+      };
+    });
+
+    this.debtsCache = null;
+    this.salesCache = null;
+    this.cashMovementsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'debts', action: 'settle' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'settle' } }));
     return resultado;
   }
 

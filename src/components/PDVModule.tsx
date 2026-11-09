@@ -19,6 +19,7 @@ import { appAlert, appPrompt, appConfirm } from '../utils/confirmDialog';
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
 import { getClientIp } from '../utils/clientInfo';
+import { checkStockAddition, lineBaseQty } from '../utils/stockGuard';
 import { findDuplicateSale, describeDuplicateRisk } from '../utils/saleDuplicates';
 import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
@@ -1239,7 +1240,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     }
   };
 
-  const addToCart = (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
+  const addToCart = async (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
     // Determine default selling unit
     const hasConversion = !!(product.parentUnit && product.conversionRate && product.conversionRate > 1);
     // O cartão do catálogo mostra o preço de atacado nos híbridos; a unidade por
@@ -1253,36 +1254,33 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     const existingQty = currentCartItem ? currentCartItem.quantity : 0;
     const requestedQty = existingQty + customQty;
 
-    // Check stock availability based on selected unit
+    /**
+     * Stock verificado **aqui**, não só ao gravar.
+     *
+     * Antes: a verificação usava o stock da última sincronização do ecrã — que
+     * podia ter horas — e, nos artigos híbridos, olhava para sacos e quilos como
+     * se fossem pools separados. O resultado era descobrir a falta no fim, com o
+     * carrinho montado, ou deixar passar uma venda que já não tinha mercadoria.
+     *
+     * Agora lê-se o stock do servidor neste instante e a conta é feita em
+     * unidade base, somando as duas formas de venda.
+     */
     if (!product.isService) {
-      if (hasConversion) {
-        if (selectedUnit === 'Bulk') {
-          const availableBulk = product.stockQtyBulk || 0;
-          if (requestedQty > availableBulk) {
-            showToast(
-              `Quantidade de revenda insuficiente. Disponível: ${availableBulk} ${product.parentUnit}`,
-              'error'
-            );
-            return;
-          }
-        } else {
-          const availableRetail = product.stockQtyRetail || 0;
-          if (requestedQty > availableRetail) {
-            showToast(
-              `Quantidade de retalho insuficiente. Disponível: ${availableRetail} ${product.baseUnit}`,
-              'error'
-            );
-            return;
-          }
-        }
-      } else {
-        if (requestedQty > product.stockQty) {
-          showToast(
-            `Quantidade insuficiente em stock. Stock disponível: ${product.stockQty} ${product.baseUnit}`,
-            'error'
-          );
-          return;
-        }
+      const stockServidor = await dbService.getProductStock(String(product.id));
+      const outrosNoCarrinho = cart
+        .filter(item => item.productId === product.id && item.sellingUnit !== selectedUnit)
+        .reduce((acc, item) => acc + lineBaseQty(product, item.quantity, item.sellingUnit), 0);
+
+      const veredicto = checkStockAddition({
+        product,
+        serverStock: stockServidor ?? (Number(product.stockQty) || 0),
+        inCartBase: outrosNoCarrinho,
+        quantity: requestedQty,
+        sellingUnit: selectedUnit
+      });
+      if (!veredicto.allowed) {
+        showToast(veredicto.message, 'error');
+        return;
       }
     }
 
@@ -1750,6 +1748,26 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       salePersisted = true;
+
+      /**
+       * Venda a crédito: cria o registo de dívida **antes** de libertar a
+       * operação. Sem este registo não há prazo, não há cobranças parciais e a
+       * dívida não aparece em lado nenhum — o dinheiro do cliente fica só na
+       * memória de quem vendeu.
+       */
+      if (newSale.status === 'Crédito' || newSale.status === 'Pendente') {
+        try {
+          await dbService.createDebtFromSale(newSale, Number((settings as any)?.creditTermDays) || 30);
+        } catch (erroDivida) {
+          console.error('[PDV] Falha ao criar o registo de dívida:', erroDivida);
+          void appAlert(
+            `A venda ${newSale.invoiceNumber} ficou gravada, mas o registo de dívida NÃO foi criado.\n\n` +
+              'A factura continua a aparecer como pendente, mas sem prazo nem histórico de cobrança. ' +
+              'Avise o responsável antes de fechar o dia.'
+          );
+        }
+      }
+
       // Clear the cart as soon as the transaction is committed. A later PDF or
       // refresh issue must never tempt the operator to submit the same sale.
       clearCompletedCheckout();
@@ -1888,11 +1906,19 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           const candidato = generateNextReceiptNumber(todasAsVendas, 'ReciboA4');
           const ultimoRecibo = parseInt(candidato.slice(candidato.lastIndexOf('-') + 1), 10) - 1 || 0;
 
-          const payment = await dbService.payInvoiceWithReceipt(String(sale.id), {
-            paidBy: currentUser.username,
-            settledPaymentMethod: sale.paymentMethod || 'Dinheiro',
+          /**
+           * Mesma rotina das Faturas: liquida a dívida, emite recibo e registra
+           * a entrada em caixa. Uma venda a crédito cobrada no PDV passa a
+           * aparecer no Livro de Caixa como dinheiro recebido.
+           */
+          const resultado = await dbService.settleDebt({
+            saleId: String(sale.id),
+            amount: Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0)),
+            method: sale.paymentMethod || 'Dinheiro',
+            operator: currentUser.username,
             fallbackMax: ultimoRecibo
           });
+          const payment = { sale: resultado.sale, receiptNumber: resultado.receiptNumber };
 
           paymentSaved = true;
           setInvoiceToPrint(payment.sale);

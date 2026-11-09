@@ -96,6 +96,10 @@ export interface Sale {
   cancelledBy?: string;
   /** Momento em que a factura foi efectivamente liquidada. */
   paidAt?: string;
+  /** Quanto o cliente já pagou (vendas a crédito e cobranças parciais). */
+  amountPaid?: number;
+  /** Data limite de pagamento (vendas a crédito/pendentes). */
+  dueDate?: string;
   /** Utilizador que registou a liquidação. */
   paidBy?: string;
   /**
@@ -454,4 +458,43 @@ export interface CashMovement {
   receiptNumber?: string;
   notes?: string;
   terminalId?: string;
+}
+
+/**
+ * Dívida de cliente.
+ *
+ * Porque existe: uma venda a crédito ficava marcada com `status: 'Crédito'` e
+ * nada mais. Não havia prazo, nem histórico de cobranças parciais, nem forma de
+ * saber quem estava atrasado — a dívida existia só na cabeça de quem vendia.
+ *
+ * Um registo por factura em dívida, com o prazo e todos os pagamentos.
+ */
+export interface DebtPayment {
+  id: string;
+  date: string;
+  amount: number;
+  method: string;
+  operator: string;
+  receiptNumber?: string;
+  note?: string;
+}
+
+export interface Debt {
+  /** Igual ao id da venda: uma dívida por factura, sem duplicados. */
+  id: string;
+  saleId: string;
+  invoiceNumber: string;
+  customerName: string;
+  customerNuit?: string;
+  /** Data de emissão. */
+  date: string;
+  /** Prazo de pagamento. */
+  dueDate: string;
+  total: number;
+  paidAmount: number;
+  payments: DebtPayment[];
+  /** Derivado na leitura; gravado para consulta rápida. */
+  status: 'Aberta' | 'Paga' | 'Anulada';
+  operator: string;
+  notes?: string;
 }

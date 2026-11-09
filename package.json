@@ -10,7 +10,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx test/master_plan_test.ts",
-    "test:all": "tsc --noEmit && tsx test/master_plan_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/cash_box_test.ts && tsx test/reporting_test.ts && tsx test/sale_duplicates_test.ts && tsx test/rules_coverage_test.ts && tsx test/pdv_consistency_test.ts"
+    "test:all": "tsc --noEmit && tsx test/master_plan_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/cash_box_test.ts && tsx test/reporting_test.ts && tsx test/sale_duplicates_test.ts && tsx test/rules_coverage_test.ts && tsx test/pdv_consistency_test.ts && tsx test/stock_debts_test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

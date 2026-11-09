@@ -41,5 +41,14 @@ ok('saldo = entradas − saídas', saldo.balance === 650);
 ok('venda anulada não conta como entrada', cashBalance([anulada], [], '2026-11-09', '2026-11-09').inflow === 0);
 ok('dia em Maputo, não UTC', toCashDay('2026-11-09T23:30:00.000Z') === '2026-11-10');
 
+// Cobrança de uma factura a crédito: entra na gaveta sem ser venda do dia.
+const comCobranca = cashBalance([vendaPaga], [
+  ...movimentos,
+  { id: 'd', date: '2026-11-09T15:00:00.000Z', day: '2026-11-09', type: 'Entrada', amount: 400, method: 'Dinheiro', operator: 'Ana' }
+], '2026-11-09', '2026-11-09');
+ok('entrada de cobrança soma ao que entrou', comCobranca.inflow === 1400);
+ok('entrada não é saída', comCobranca.outflow === 350);
+ok('saldo inclui a cobrança', comCobranca.balance === 1050);
+
 console.log(`\n--- RESULTADO: ${passou} testes passaram, ${falhou} falharam ---`);
 if (falhou > 0) process.exit(1);

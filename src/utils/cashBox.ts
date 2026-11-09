@@ -66,9 +66,16 @@ export function cashBalance(
     .filter(sale => String((sale as any).paymentMethod || 'Dinheiro').toLowerCase().includes('dinheiro'))
     .reduce((total, sale) => total + (Number(sale.total) || 0), 0);
 
+  // Entradas registadas à parte (cobrança de facturas em dívida) também são
+  // dinheiro na gaveta. Sem isto, o caixa fechava com sobra que ninguém sabia
+  // explicar — o problema ao contrário do reembolso.
+  const entradasExtra = movements
+    .filter(m => m && m.day >= startDay && m.day <= endDay && Number(m.amount) > 0)
+    .reduce((total, m) => total + Number(m.amount), 0);
+
   const outflow = movements
     .filter(m => m && m.day >= startDay && m.day <= endDay)
     .reduce((total, m) => total + (Number(m.amount) < 0 ? Math.abs(Number(m.amount)) : 0), 0);
 
-  return { inflow, outflow, balance: inflow - outflow };
+  return { inflow: inflow + entradasExtra, outflow, balance: inflow + entradasExtra - outflow };
 }

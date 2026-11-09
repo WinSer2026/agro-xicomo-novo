@@ -75,6 +75,15 @@ service cloud.firestore {
     // para a inspecção e para o fecho do dia: uma vez escrita, não se corrige
     // nem se apaga. Um erro corrige-se com um movimento contrário, que fica
     // também registado.
+    // --- Dívidas de clientes ------------------------------------------------
+    // Um registo por factura em dívida, com prazo e todos os pagamentos. O
+    // histórico de cobranças só cresce: apagar uma dívida apagaria a prova de
+    // que o cliente deve.
+    match /debts/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
     match /cash_movements/{docId} {
       allow read, create: if request.auth != null;
       allow update, delete: if false;

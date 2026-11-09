@@ -14,6 +14,8 @@ import {
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
+import { describeDebt, summarizeDebts } from '../utils/debts';
+import type { Debt } from '../types';
 import { Sale, SystemSettings } from '../types';
 import {
   downloadInvoiceA4,
@@ -57,6 +59,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   // Preview / Print state
   const [invoiceToPrint, setInvoiceToPrint] = useState<Sale | null>(null);
+  /** Dívidas por id de venda: prazo, pagamentos e atraso. */
+  const [debtsById, setDebtsById] = useState<Record<string, Debt>>({});
+  const [debtSummary, setDebtSummary] = useState({ openCount: 0, openValue: 0, overdueCount: 0, overdueValue: 0 });
   const [showCutoffTool, setShowCutoffTool] = useState(false);
   const [printType, setPrintType] = useState<'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'Proforma' | null>(null);
 
@@ -87,6 +92,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     refund?: boolean;
     /** Valor devolvido, em texto para o operador poder corrigir. */
     refundAmount?: string;
+    /** Valor a cobrar agora (pode ser parcial), em texto. */
+    payAmount?: string;
     refundMethod?: string;
   }>({ show: false, action: 'cancel', sale: null, password: '', error: '' });
 
@@ -152,7 +159,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     try {
       await dbService.init();
       const queryOptions = getCurrentSalesQuery();
-      const [salesPage, globalSettings, summary] = await Promise.all([
+      const [salesPage, globalSettings, summary, dividas] = await Promise.all([
         dbService.getSalesPage({ ...queryOptions, pageSize: 30 }),
         dbService.getSettings(),
         // A summary is helpful, but a temporary aggregate/offline error must
@@ -160,6 +167,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         dbService.getSalesSummary({ startDate, endDate }).catch(error => {
           console.warn('[FaturasModule] Could not refresh sales summary:', error);
           return null;
+        }),
+        // As dívidas são informação de apoio: uma falha aqui não pode esconder
+        // as facturas.
+        dbService.getDebts().catch(error => {
+          console.warn('[FaturasModule] Could not refresh debts:', error);
+          return [] as Debt[];
         })
       ]);
 
@@ -169,6 +182,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       setHasMoreSales(salesPage.hasMore);
       setSettings(globalSettings);
       setSalesSummary(summary);
+      const mapaDividas: Record<string, Debt> = {};
+      for (const divida of dividas || []) mapaDividas[divida.saleId || divida.id] = divida;
+      setDebtsById(mapaDividas);
+      setDebtSummary(summarizeDebts(dividas || []));
     } catch (err) {
       console.error('Error loading invoices data:', err);
       if (notifyOnError) {
@@ -255,7 +272,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       sale,
       password: '',
       error: '',
-      paymentMethod: sale.paymentMethod && sale.paymentMethod !== 'Crédito' ? sale.paymentMethod : 'Dinheiro'
+      paymentMethod: sale.paymentMethod && sale.paymentMethod !== 'Crédito' ? sale.paymentMethod : 'Dinheiro',
+      // Valor em falta pré-preenchido: o operador só o altera para cobrar parte.
+      payAmount: Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0)).toFixed(2)
     });
   };
 
@@ -395,7 +414,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         const settledPaymentMethod = securityModal.paymentMethod || 'Dinheiro';
         const operator = currentUser?.username || 'Gestor';
 
-        let payment: { sale: Sale; receiptNumber: string };
+        let payment: { sale: Sale; receiptNumber: string; full: boolean; remaining: number };
         try {
           // Semeia o contador com o maior recibo já emitido: se o contador
           // estiver vazio, o próximo número não pode repetir um recibo existente.
@@ -403,11 +422,28 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           const ultimoReciboConhecido =
             parseInt(candidatoRecibo.slice(candidatoRecibo.lastIndexOf('-') + 1), 10) - 1 || 0;
 
-          payment = await dbService.payInvoiceWithReceipt(sale.id, {
-            paidBy: operator,
-            settledPaymentMethod,
+          const emFalta = Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0));
+          const pedido = String(securityModal.payAmount ?? '').trim();
+          const valor = pedido ? Number(pedido.replace(',', '.')) : emFalta;
+
+          if (!Number.isFinite(valor) || valor <= 0) {
+            setSecurityModal(prev => ({ ...prev, error: 'Indique um valor maior que zero.' }));
+            return;
+          }
+
+          const resultado = await dbService.settleDebt({
+            saleId: String(sale.id),
+            amount: valor,
+            method: settledPaymentMethod,
+            operator,
             fallbackMax: ultimoReciboConhecido
           });
+          payment = {
+            sale: resultado.sale,
+            receiptNumber: resultado.receiptNumber,
+            full: resultado.full,
+            remaining: resultado.remaining
+          };
         } catch (err: any) {
           // Erros esperados: factura já paga, anulada, inexistente. Ficam no
           // próprio modal — o utilizador tem de perceber por que não gravou.
@@ -428,9 +464,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           timestamp: new Date().toISOString(),
           username: operator,
           ipAddress: '127.0.0.1',
-          action: 'Liquidação de Factura',
+          action: payment.full ? 'Liquidação de Factura' : 'Cobrança Parcial de Factura',
           status: 'Sucesso',
-          details: `Factura ${sale.invoiceNumber} liquidada por ${settledPaymentMethod} no valor de ${paidSale.total} MT. Recibo emitido: ${payment.receiptNumber}.`
+          details: payment.full
+            ? `Factura ${sale.invoiceNumber} liquidada por ${settledPaymentMethod} no valor de ${paidSale.total} MT. Recibo emitido: ${payment.receiptNumber}.`
+            : `Cobrança parcial da factura ${sale.invoiceNumber} (${settledPaymentMethod}). ` +
+              `Continua em dívida ${payment.remaining.toFixed(2)} MT. Recibo: ${payment.receiptNumber}.`
         });
 
         openPreview(paidSale, 'ReciboA4');
@@ -443,10 +482,17 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           task: () => loadData(false)
         });
 
-        if (receiptGenerated) {
-          showToast(`Factura ${sale.invoiceNumber} liquidada (${settledPaymentMethod}). Recibo ${payment.receiptNumber}.`, 'success');
+        if (payment.full) {
+          if (receiptGenerated) {
+            showToast(`Factura ${sale.invoiceNumber} liquidada (${settledPaymentMethod}). Recibo ${payment.receiptNumber}.`, 'success');
+          } else {
+            showToast(`Factura ${sale.invoiceNumber} liquidada. Recibo ${payment.receiptNumber} pode ser reimpresso pelo histórico.`, 'warning');
+          }
         } else {
-          showToast(`Factura ${sale.invoiceNumber} liquidada. Recibo ${payment.receiptNumber} pode ser reimpresso pelo histórico.`, 'warning');
+          showToast(
+            `Cobrança parcial registada. Continuam em dívida ${payment.remaining.toFixed(2)} MT (recibo ${payment.receiptNumber}).`,
+            'warning'
+          );
         }
         return;
       }
@@ -1009,6 +1055,26 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         onExportExcel={handleExportInvoicesExcel}
       />
 
+      {/* Dívidas: prazo e atraso — fora dos totais de faturação */}
+      {debtSummary.openCount > 0 && (
+        <div
+          className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-3 ${
+            debtSummary.overdueCount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'
+          }`}
+        >
+          <p className={`text-[11px] font-bold ${debtSummary.overdueCount > 0 ? 'text-rose-800' : 'text-amber-800'}`}>
+            <span className="material-symbols-outlined text-[14px] align-middle mr-1">schedule</span>
+            {debtSummary.openCount} factura(s) em dívida · {debtSummary.openValue.toFixed(2)} MT
+            {debtSummary.overdueCount > 0 && (
+              <span className="ml-2 font-black text-rose-700">
+                {debtSummary.overdueCount} vencida(s): {debtSummary.overdueValue.toFixed(2)} MT
+              </span>
+            )}
+          </p>
+          <span className="text-[9.5px] text-slate-500 shrink-0">Liquidação parcial disponível no botão «Pagar»</span>
+        </div>
+      )}
+
       {/* Invoice Dashboard Header Summary cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
@@ -1206,6 +1272,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                             {sale.creditNoteNumber}
                           </p>
                         )}
+                        {(() => {
+                          const divida = debtsById[String(sale.id)];
+                          if (!divida || isCancelledSale(sale) || sale.status === 'Paga') return null;
+                          const vista = describeDebt(divida);
+                          if (vista.remaining <= 0) return null;
+                          return (
+                            <p
+                              className={`text-[9px] font-bold mt-0.5 ${
+                                vista.state === 'Vencida' ? 'text-rose-600' : 'text-slate-500'
+                              }`}
+                              title={`Em dívida ${vista.remaining.toFixed(2)} MT · prazo ${new Date(divida.dueDate).toLocaleDateString('pt-MZ')}`}
+                            >
+                              {vista.label}
+                              {vista.paid > 0 ? ` · pago ${vista.paid.toFixed(2)}` : ''}
+                            </p>
+                          );
+                        })()}
                       </td>
 
                       {/* Operations */}
@@ -2134,6 +2217,28 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       </button>
                     ))}
                   </div>
+
+                  {/* Cobrança parcial: o valor em falta vem preenchido. */}
+                  <label className="block text-[10px] font-black uppercase text-gray-500 pt-1">
+                    Valor a receber agora
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={securityModal.payAmount ?? ''}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, payAmount: e.target.value, error: '' }))}
+                      className="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <span className="text-[11px] font-bold text-gray-500">MT</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    Em falta:{' '}
+                    <strong className="text-slate-700">
+                      {Math.max(0, (Number(securityModal.sale.total) || 0) - (Number(securityModal.sale.amountPaid) || 0)).toFixed(2)} MT
+                    </strong>
+                    {' · '}um valor menor regista uma <strong>cobrança parcial</strong> e emite recibo na mesma.
+                  </p>
                 </div>
               ) : securityModal.action === 'cancel' && canRefund(securityModal.sale) ? (
                 <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} className="space-y-2">
