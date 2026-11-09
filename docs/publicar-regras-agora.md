@@ -7,19 +7,24 @@ Tudo o que precisa para fechar a base de dados, na ordem certa. O detalhe comple
 
 ## O que mudou agora
 
-As regras passaram a cobrir **`cash_movements`** — a colecção nova do Livro de Caixa (reembolsos e
-sangrias). Sem esta regra publicada, o registo de dinheiro falha com `permission-denied` em
-produção.
+As regras passaram a cobrir **`cash_sessions`** — a colecção nova dos turnos de caixa (abertura e
+fecho). Sem esta regra publicada, o botão "Trocar de turno" abre mas o fecho falha com
+`permission-denied`: o Firestore recusa tudo o que não esteja listado.
 
 ```javascript
-match /cash_movements/{docId} {
+match /cash_sessions/{docId} {
   allow read, create: if request.auth != null;
-  allow update, delete: if false;   // dinheiro não se reescreve
+  // Fecho imutável: só se actualiza enquanto o turno estiver aberto.
+  allow update: if request.auth != null && resource.data.status == 'Aberto';
+  allow delete: if false;
 }
 ```
 
-Um movimento errado corrige-se com outro movimento contrário — nunca editando o original. É isso
-que faz do livro de caixa prova utilizável.
+O fecho de um turno é prova assinada (contagem por método, diferença, quem contou, quem conferiu).
+Um erro corrige-se com um movimento contrário em `cash_movements` — nunca reescrevendo o fecho.
+
+Anteriormente (e continua válido) ficou coberta a `cash_movements`: dinheiro que sai ou entra sem
+venda, também só de leitura e criação.
 
 ## Antes de publicar — 3 verificações
 
@@ -27,9 +32,10 @@ que faz do livro de caixa prova utilizável.
 npm run test:all
 ```
 
-Tem de dar, no fim: **44 · 49 · 15 · 35 · 16 · 12**, zero falhas. O último (`rules_coverage_test`)
-varre o código, lista as colecções usadas e compara com `firestore.rules` — se uma colecção nova
-não estiver protegida, falha ali e não em produção.
+Todas as suites têm de terminar com **0 falhas** (o número de verificações muda a cada entrega —
+o que interessa é não haver linha `FALHOU:` nem `FAIL`). O `rules_coverage_test` varre o código,
+lista as colecções usadas e compara com `firestore.rules` — se uma colecção nova não estiver
+protegida, falha ali e não em produção.
 
 | # | Verificação | Como |
 |---|---|---|
@@ -65,9 +71,11 @@ npx firebase-tools deploy --only firestore:rules   # tem de dizer "released rule
 | 4 | Stock → Movimentos | A linha da venda está lá |
 | 5 | Faturas → anular factura paga **com devolução** | Livro de Caixa mostra a saída |
 | 6 | Contabilidade → Livro de Caixa → sangria de 100 MT | Saldo desce 100 MT; auditoria regista |
+| 7 | Botão "Trocar de turno" → abrir turno com a contagem da gaveta | Turno aberto, sem erro |
+| 8 | Fechar o turno com a mesma contagem | Diferença 0,00 MT e turno seguinte aberto |
 
-Os testes 5 e 6 são os novos: **se falharem com `permission-denied`, a regra de `cash_movements`
-não foi publicada** (copiou o ficheiro antigo).
+Os testes 7 e 8 são os novos: **se falharem com `permission-denied`, a regra de `cash_sessions` não
+foi publicada** (copiou o ficheiro antigo). Os testes 5 e 6 confirmam `cash_movements`.
 
 ## Se algo falhar — reverter em 30 segundos
 
@@ -78,11 +86,15 @@ Depois corrigir a causa — quase sempre: login anónimo desligado, ou colecçã
 Nunca publicar `firestore.rules.legacy-open`: é exatamente a configuração aberta que se está a
 corrigir.
 
-## Colecções cobertas (18)
+## Colecções cobertas (21)
 
 `products` · `sales` · `losses` · `transformations` · `employees` · `attendance` · `customers` ·
 `paused_sales` · `active_cart` · `settings` · `counters` · `deletions` · `payroll_payments` ·
 `active_sessions` · `credentials` · `audit_logs` · `audit_logs_archive` · `stock_movements` ·
-`cash_movements`
+`cash_movements` · `debts` · `cash_sessions`
+
+Para copiar sem risco de ficar a meio, use `REGRAS-FIRESTORE-PARA-COLAR.txt` (cópia exacta do
+`firestore.rules`, com cabeçalho de instruções). O passo a passo do dono está em
+`PASSO-A-PASSO-PUBLICAR-REGRAS.txt`.
 
 Tudo o que não está nesta lista é **negado** — é esse o objetivo.

@@ -8,7 +8,7 @@ Documento operacional. Complementa `docs/auditoria-pdv.md` (achados L‑01 a L�
 |---|---|---|
 | Login | `Mazive` / `admin` entravam com `0147`, `admin` ou `05082` | Removido. Só entra quem tiver a palavra‑passe guardada em hash na credencial. |
 | Desbloqueio de sessão | Mesma chave mestra | Removido. Valida a palavra‑passe do utilizador da sessão. |
-| Autorização de stock (eliminar produto, inventário físico, ajuste manual) | `settings.stockPasswordHash` em texto simples **ou** `05082` **ou** `0147` | `verifyAuthorizationPassword()`: hash com salt quando existe, texto simples legado caso contrário. As palavras‑passe universais `05082`/`0147` deixaram de ser aceites. |
+| Autorização de stock (eliminar produto, inventário físico, ajuste manual) | `settings.stockPasswordHash` em texto simples **ou** `05082` **ou** `0147` | `verifyAuthorizationPassword()`: aceita `pbkdf2:` (actual) e `sha256:` (legado), migrando para hash ao gravar no Painel Técnico. **Não há código por omissão**: sem código definido, a operação é recusada. As palavras‑passe universais `05082`/`0147` deixaram de ser aceites (09/11/2026). |
 | Cancelamento de fatura | Idem | Idem. |
 | Ecrã de esquema da base | `INSERT ... '0147'` | Removido. |
 
@@ -122,6 +122,9 @@ Na aplicação, faça o teste completo:
 5. **Dinheiro:** Faturas → anular uma factura paga com devolução → o Livro de Caixa tem de
    mostrar a saída. Contabilidade → **Livro de Caixa** → registar uma sangria de 100 MT.
    Se estas duas falharem com `permission-denied`, a colecção `cash_movements` não ficou publicada.
+6. **Turnos:** botão **Trocar de turno** → abrir turno com a contagem da gaveta → fechar com a mesma
+   contagem. Tem de fechar com diferença 0,00 MT e abrir o turno seguinte. Se falhar com
+   `permission-denied`, a colecção `cash_sessions` não ficou publicada.
 
 ### Passo 5 — Se algo falhar (reverter)
 
@@ -138,10 +141,10 @@ ser publicado, porque é exatamente a configuração insegura que se está a cor
 ### Regras que exigem atenção quando se cria uma coleção nova
 
 Qualquer coleção nova usada pela aplicação tem de ser acrescentada a `firestore.rules`, senão as
-escritas passam a ser recusadas. Já estão cobertas: `products`, `sales`, `losses`,
+escritas passam a ser recusadas. Já estão cobertas (21): `products`, `sales`, `losses`,
 `transformations`, `employees`, `attendance`, `customers`, `paused_sales`, `active_cart`,
 `settings`, `counters`, `deletions`, `payroll_payments`, `active_sessions`, `credentials`,
-`audit_logs`, `audit_logs_archive`, `stock_movements`, `cash_movements`.
+`audit_logs`, `audit_logs_archive`, `stock_movements`, `cash_movements`, `debts`, `cash_sessions`.
 
 **Há um teste para isto:** `npm run test:all` inclui `test/rules_coverage_test.ts`, que varre o
 código à procura de nomes de colecção e falha se alguma não estiver nas regras. Também recusa o
@@ -153,10 +156,15 @@ regresso de `allow read, write: if true`. Corra-o antes de cada publicação.
 errado corrige-se com outro movimento contrário — nunca editando o original. É isso que torna o
 livro de caixa utilizável como prova numa inspecção.
 
+`cash_sessions` (turnos) admite criação e leitura, e actualização **apenas enquanto o turno estiver
+`Aberto`** — é o que permite fechá-lo uma vez. Depois de fechado, o documento com a contagem, a
+diferença e as assinaturas de quem contou e conferiu fica imutável; a eliminação é sempre negada.
+
 ## 4. Ainda por fazer
 
 - `window.prompt()` nas confirmações destrutivas (K‑01) — em iframe/ambiente embebido devolve
   `null` e a operação desaparece sem aviso. Deve passar a modal próprio.
-- Palavras‑passe por omissão (`05082`) quando não existe nenhuma configurada: primeiro arranque
-  deve obrigar à definição de uma.
+- ~~Palavras‑passe por omissão (`05082`)~~ — **corrigido em 09/11/2026**: deixou de existir código
+  por omissão (sem código definido, as operações sensíveis são recusadas) e o código de gestor é
+  guardado em hash. Ver `MELHORIAS-APLICADAS.txt` §5.
 - Bloqueio de conta após N tentativas (existe limitação de ritmo, mas não bloqueio persistente).

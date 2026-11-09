@@ -1,0 +1,130 @@
+/*
+================================================================================
+  COPIA DAS REGRAS DO FIRESTORE — PARA COLAR NA CONSOLA
+  AGRO - XICOMO & SERVICOS, LDA · gerado em 09/11/2026
+================================================================================
+
+  Este ficheiro e uma copia EXACTA de firestore.rules (a fonte de verdade).
+  Serve para copiar tudo (Ctrl+A, Ctrl+C) e colar no editor de Regras da
+  consola do Firebase.
+
+  Este cabecalho esta dentro de um comentario de bloco de proposito: as regras
+  do Firestore ignoram-no, por isso pode colar o ficheiro inteiro sem editar
+  nada. A parte executavel comeca em rules_version e termina na ultima chave.
+
+  Se alterar firestore.rules, este ficheiro tem de ser regenerado. Ha um teste
+  (test/rules_coverage_test.ts) que falha quando os dois deixam de coincidir.
+--------------------------------------------------------------------------------
+  O QUE ESTA COPIA PROTEGE (21 coleccoes)
+  products, sales, losses, transformations, employees, attendance, customers,
+  paused_sales, active_cart, settings, counters, deletions, payroll_payments,
+  active_sessions, credentials, audit_logs, audit_logs_archive,
+  stock_movements, cash_movements, debts, cash_sessions
+  -- tudo o resto e NEGADO.
+--------------------------------------------------------------------------------
+*/
+
+rules_version = '2';
+// ---------------------------------------------------------------------------
+// Regras do Firestore — AGRO-XICOMO
+//
+// ATENÇÃO: exigem autenticação (Firebase Anonymous Auth ligado no projeto).
+// A versão anterior era `allow read, write: if true`, o que expunha TODA a
+// base — vendas, credenciais (mesmo em hash), salários — a qualquer pessoa que
+// tivesse o projectId (que está no bundle do frontend).
+//
+// Antes de publicar (`firebase deploy --only firestore:rules`):
+//   1. Console Firebase → Authentication → Sign-in method → ativar "Anónimo".
+//   2. Abrir a aplicação e confirmar que os dados aparecem.
+//   3. Só então publicar. Ver docs/seguranca.md.
+//
+// O ficheiro com as regras antigas está em firestore.rules.legacy-open, apenas
+// para consulta/histórico. NÃO o publique.
+// ---------------------------------------------------------------------------
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Negado por omissão a tudo o que não esteja listado abaixo.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Operação normal -----------------------------------------------------
+    match /products/{docId}         { allow read, write: if request.auth != null; }
+    match /sales/{docId}            { allow read, write: if request.auth != null; }
+    match /losses/{docId}           { allow read, write: if request.auth != null; }
+    match /transformations/{docId}  { allow read, write: if request.auth != null; }
+    match /employees/{docId}        { allow read, write: if request.auth != null; }
+    match /attendance/{docId}       { allow read, write: if request.auth != null; }
+    match /customers/{docId}        { allow read, write: if request.auth != null; }
+    match /paused_sales/{docId}     { allow read, write: if request.auth != null; }
+    match /active_cart/{docId}      { allow read, write: if request.auth != null; }
+    match /settings/{docId}         { allow read, write: if request.auth != null; }
+    match /counters/{docId}         { allow read, write: if request.auth != null; }
+    match /deletions/{docId}        { allow read, write: if request.auth != null; }
+    match /payroll_payments/{docId} { allow read, write: if request.auth != null; }
+    match /active_sessions/{docId}  { allow read, write: if request.auth != null; }
+
+    // --- Credenciais da aplicação -------------------------------------------
+    // O login é feito na aplicação (não no Firebase Auth): o cliente lê o hash
+    // para o comparar. A gestão de utilizadores (criar, alterar, eliminar) é
+    // uma função do módulo técnico, por isso a eliminação é permitida a
+    // sessões autenticadas.
+    match /credentials/{docId} {
+      allow read, create, update, delete: if request.auth != null;
+    }
+
+    // --- Auditoria -----------------------------------------------------------
+    // Os registos não podem ser EDITADOS, mas têm de poder ser ARQUIVADOS: o
+    // arquivo move o documento para `audit_logs_archive` e apaga o original
+    // (src/utils/firebaseDB.ts, archiveAuditLogs). Negar o delete aqui
+    // partiria o arquivo — foi verificado antes de escrever estas regras.
+    match /audit_logs/{docId} {
+      allow read, create: if request.auth != null;
+      allow delete: if request.auth != null;
+      allow update: if false;
+    }
+    match /audit_logs_archive/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de movimentos de stock (F-05) ---------------------------------
+    // Escrito pela aplicação a cada venda/quebra/estorno; nunca reescrito.
+    match /stock_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de caixa (reembolsos e sangrias) ------------------------------
+    // Cada linha é dinheiro que saiu (ou entrou) da gaveta sem venda. É prova
+    // para a inspecção e para o fecho do turno: uma vez escrita, não se corrige
+    // nem se apaga. Um erro corrige-se com um movimento contrário, que fica
+    // também registado.
+    // --- Dívidas de clientes ------------------------------------------------
+    // Um registo por factura em dívida, com prazo e todos os pagamentos. O
+    // histórico de cobranças só cresce: apagar uma dívida apagaria a prova de
+    // que o cliente deve.
+    match /debts/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    match /cash_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Turnos de caixa (fecho por turno, D5) -------------------------------
+    // Um turno nasce 'Aberto' e é fechado UMA vez. A actualização só é
+    // permitida enquanto estiver aberto; a partir do momento em que está
+    // 'Fechado', o documento — contagem, diferença, quem contou e quem
+    // conferiu — é prova assinada e não se altera nem se apaga. Uma correcção
+    // faz-se com movimento contrário em cash_movements.
+    match /cash_sessions/{docId} {
+      allow read, create: if request.auth != null;
+      allow update: if request.auth != null && resource.data.status == 'Aberto';
+      allow delete: if false;
+    }
+  }
+}

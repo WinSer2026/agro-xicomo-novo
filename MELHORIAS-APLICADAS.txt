@@ -308,9 +308,9 @@
 
   2) PUBLICAR AS REGRAS DO FIRESTORE
      As regras novas (que incluem os turnos de caixa) só valem depois de
-     publicadas. No computador onde o sistema foi instalado:
-         npm run build
-         npx firebase-tools deploy --only firestore:rules
+     publicadas. O passo a passo completo, com verificação e forma de reverter,
+     está em PASSO-A-PASSO-PUBLICAR-REGRAS.txt. Para colar na consola, use a
+     cópia exacta em REGRAS-FIRESTORE-PARA-COLAR.txt.
      Antes de publicar, confirme no Firebase que a autenticação "Anónimo" está
      activada. Se não estiver, o programa fica sem acesso aos dados.
 
