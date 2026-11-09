@@ -840,12 +840,15 @@ export class FirebaseDBService {
       };
     };
 
-    const [paid, pending, credit, canceled, proforma] = await Promise.all([
+    const [paid, pending, credit, canceled, proforma, legacyCanceled] = await Promise.all([
       statusAggregate('Paga'),
       statusAggregate('Pendente'),
       statusAggregate('Crédito'),
       statusAggregate('Cancelada'),
-      statusAggregate('Proforma')
+      statusAggregate('Proforma'),
+      // Registos antigos com o estado em inglês: sem esta agregação, os
+      // cartões de "Cancelado" não batiam com a lista (FT-07).
+      statusAggregate('canceled' as Sale['status'])
     ]);
 
     return {
@@ -858,14 +861,14 @@ export class FirebaseDBService {
       creditInvoiced: credit.total,
       debtInvoiced: pending.total + credit.total,
       proformaInvoiced: proforma.total,
-      canceledInvoiced: canceled.total,
+      canceledInvoiced: canceled.total + legacyCanceled.total,
       totalCount: paid.count + pending.count + credit.count + canceled.count + proforma.count,
       paidCount: paid.count,
       pendingCount: pending.count,
       creditCount: credit.count,
       debtCount: pending.count + credit.count,
       proformaCount: proforma.count,
-      canceledCount: canceled.count
+      canceledCount: canceled.count + legacyCanceled.count
     };
   }
 
@@ -909,6 +912,79 @@ export class FirebaseDBService {
     });
 
     return `${prefix}${String(next).padStart(4, '0')}`;
+  }
+
+  /**
+   * Liquidação de uma factura, com número de recibo atribuído na MESMA
+   * transacção.
+   *
+   * Porquê uma transacção: antes o pagamento era um `addSale` cego. Dois postos
+   * a liquidar a mesma factura queimavam dois números de recibo e o segundo
+   * apagava o primeiro; e se a factura tivesse sido anulada entretanto, o
+   * pagamento "ressuscitava" uma venda anulada sem aviso. Aqui a factura é lida
+   * dentro da transacção, o estado é validado e o contador avança ao mesmo
+   * tempo — ou fica tudo gravado, ou nada fica.
+   */
+  public async payInvoiceWithReceipt(
+    saleId: string,
+    payment: { paidBy: string; settledPaymentMethod: string }
+  ): Promise<{ sale: Sale; receiptNumber: string }> {
+    await this.ensureAuth();
+    const saleRef = doc(db, 'sales', String(saleId));
+    const counterRef = doc(db, 'counters', 'document_numbers');
+    const year = new Date().getFullYear();
+    const prefix = `REC-A4-${year}-`;
+
+    const result = await runTransaction(db, async transaction => {
+      const saleSnapshot = await transaction.get(saleRef);
+      if (!saleSnapshot.exists()) {
+        throw new Error('Factura não encontrada. Actualize a lista.');
+      }
+      const current = saleSnapshot.data() as Sale;
+      const status = String(current.status || '');
+
+      if (status === 'Cancelada' || status === 'canceled') {
+        throw new Error(`A factura ${current.invoiceNumber} está anulada e não pode ser liquidada.`);
+      }
+      if (status === 'Paga') {
+        throw new Error(`A factura ${current.invoiceNumber} já está paga.`);
+      }
+      if (status !== 'Pendente' && status !== 'Crédito') {
+        throw new Error(
+          `A factura ${current.invoiceNumber} não é uma dívida (estado: ${status || 'desconhecido'}).`
+        );
+      }
+
+      const counterSnapshot = await transaction.get(counterRef);
+      const stored = counterSnapshot.exists()
+        ? Number((counterSnapshot.data() as Record<string, number>)[prefix] || 0)
+        : 0;
+      const next = stored + 1;
+      const receiptNumber = `${prefix}${String(next).padStart(4, '0')}`;
+      const now = new Date().toISOString();
+
+      const updated: Sale = {
+        ...current,
+        status: 'Paga',
+        receiptNumber,
+        paidAt: now,
+        paidBy: payment.paidBy,
+        settledPaymentMethod: payment.settledPaymentMethod,
+      };
+
+      transaction.set(saleRef, this.sanitizeData(updated), { merge: true });
+      transaction.set(
+        counterRef,
+        { [prefix]: next, updatedAt: now },
+        { merge: true }
+      );
+
+      return { sale: updated, receiptNumber };
+    });
+
+    this.salesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId, action: 'paid' } }));
+    return result;
   }
 
   public async addSale(s: Sale): Promise<void> {
@@ -1899,17 +1975,52 @@ export class FirebaseDBService {
     }
   }
 
-  public async clearSystemData(): Promise<void> {
+  /**
+   * Apaga dados operacionais. **Só para limpeza de dados de teste antes de
+   * entrar em produção.**
+   *
+   * Nunca deve ser usada para "fechar exercício": a legislação obriga a
+   * conservar o registo de vendas e de documentos fiscais, e o fecho de ano
+   * resolve-se pela numeração por ano (já implementada em `counters`), não
+   * apagando o histórico. Ver `handleNovoAno` no módulo técnico.
+   *
+   * Devolve a contagem por coleção para que a operação possa ser auditada com
+   * números reais em vez de "concluído".
+   */
+  public async clearSystemData(): Promise<Record<string, number>> {
     console.log('[FirebaseDBService] clearSystemData requested');
-    // We intentionally keep credentials and settings for safety
-    const collectionsToClear = ['sales', 'losses', 'attendance', 'payroll_payments', 'paused_sales', 'transformations'];
+    // Credenciais e definições ficam intactas de propósito.
+    const collectionsToClear = [
+      'sales',
+      'losses',
+      'attendance',
+      'payroll_payments',
+      'paused_sales',
+      'transformations',
+      // O livro de stock referencia vendas: se as vendas desaparecem e os
+      // movimentos ficam, a reconciliação passa a acusar diferenças eternas.
+      'stock_movements'
+    ];
+    const deleted: Record<string, number> = {};
+
     for (const col of collectionsToClear) {
       const docs = await this.getAll<{ id: string }>(col);
-      for (const d of docs) {
-        await this.deleteRow(col, d.id);
+      deleted[col] = 0;
+      for (let i = 0; i < docs.length; i += 400) {
+        const lote = docs.slice(i, i + 400);
+        const batch = writeBatch(db);
+        lote.forEach(d => {
+          if (!d || !d.id) return;
+          batch.delete(doc(db, col, String(d.id)));
+        });
+        await batch.commit();
+        deleted[col] += lote.length;
       }
     }
+
+    this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'all', action: 'clear' } }));
+    return deleted;
   }
 
   // --- Stock Reconciliation Engine (Parte 7) ---

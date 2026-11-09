@@ -2,11 +2,25 @@ import { companyNuit, MISSING_NUIT_LABEL } from '../utils/companyInfo';
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
-import { isFinancialSale, saleStatusLabel, settlementDisclaimer } from '../utils/saleStatus';
+import {
+  isFinancialSale,
+  isCancelledSale,
+  isProformaSale,
+  isDebtSale,
+  isSettledSale,
+  saleStatusLabel,
+  settlementDisclaimer
+} from '../utils/saleStatus';
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { Sale, SystemSettings } from '../types';
-import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
-import { generateNextReceiptNumber } from '../utils/sequenceHelper';
+import {
+  downloadInvoiceA4,
+  downloadDuplicatedInvoiceA4,
+  downloadThermalReceipt,
+  downloadReceiptA4,
+  downloadCreditNoteA4
+} from '../utils/pdfGenerator';
+import { sumTaxAmount } from '../utils/taxHelper';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask } from '../utils/postCommit';
@@ -57,11 +71,31 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   const [securityModal, setSecurityModal] = useState<{
     show: boolean;
-    action: 'cancel' | 'restore';
+    // 'pay' = liquidação (não pede palavra-passe); 'cancel'/'restore' = acções
+    // destrutivas, essas sim protegidas por palavra-passe de gestor.
+    action: 'cancel' | 'restore' | 'pay';
     sale: Sale | null;
     password: string;
     error: string;
+    /** Meio de pagamento escolhido na liquidação (só usado com action 'pay'). */
+    paymentMethod?: string;
   }>({ show: false, action: 'cancel', sale: null, password: '', error: '' });
+
+  const PAYMENT_METHODS = ['Dinheiro', 'Transferência', 'M-Pesa', 'E-Mola'] as const;
+
+  /** Definições para documentos; nunca inventa NUIT se ainda não estiverem carregadas. */
+  const resolveSettings = (): SystemSettings =>
+    settings ||
+    ({ companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings);
+
+  /**
+   * Abre a pré-visualização garantindo que `items` existe. Sem esta guarda, uma
+   * venda antiga sem linhas rebentava o modal (FT-58).
+   */
+  const openPreview = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'Proforma') => {
+    setInvoiceToPrint({ ...sale, items: sale.items || [] });
+    setPrintType(format);
+  };
 
   const askConfirmation = (title: string, message: string, onConfirm: () => void) => {
     setConfirmModal({
@@ -83,10 +117,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     }, 4000);
   };
 
+  /**
+   * Estados que podem ser filtrados pelo Firestore tal e qual.
+   *
+   * 'Cancelada' fica de fora de propósito: existem registos antigos com o
+   * estado legado `'canceled'` que uma consulta `status == 'Cancelada'` nunca
+   * devolveria (FT-07). Nesse separador a consulta traz o período e o filtro
+   * fino é feito em memória, onde as duas grafias são reconhecidas.
+   */
+  const SERVER_STATUS_TABS = ['Paga', 'Pendente', 'Crédito', 'Proforma'];
+
   const getCurrentSalesQuery = () => ({
     startDate,
     endDate,
-    status: faturasFilter === 'Todas' ? undefined : faturasFilter
+    status:
+      faturasFilter !== 'Todas' && SERVER_STATUS_TABS.includes(faturasFilter)
+        ? (faturasFilter as Sale['status'])
+        : undefined
   });
 
   const loadData = async (notifyOnError = true) => {
@@ -181,70 +228,116 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     };
   }, []);
 
-  const handleClearAllHistory = () => {
-    askConfirmation(
-      'Eliminar Histórico de Teste (Vendas, Facturas e Recibos)',
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.',
-      async () => {
-        try {
-          await dbService.clearSystemData();
-          await runPostCommitTask({
-            label: 'atualizar a lista após limpar o histórico',
-            task: () => loadData(false)
-          });
-          showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.', 'success');
-        } catch (err) {
-          console.error(err);
-          showToast('Erro ao limpar histórico.', 'error');
-        }
-      }
-    );
-  };
-
   const handlePayInvoice = (sale: Sale) => {
     if (isProcessing) return;
+    if (isCancelledSale(sale)) {
+      showToast('Esta factura está anulada: não pode ser liquidada.', 'error');
+      return;
+    }
+    if (!isDebtSale(sale)) {
+      showToast('Só facturas pendentes ou a crédito podem ser liquidadas.', 'warning');
+      return;
+    }
+    // A forma de pagamento é escolhida agora: a factura pode ter sido emitida a
+    // crédito e ser paga em dinheiro, e o recibo tem de dizer a verdade (FT-23).
+    setSecurityModal({
+      show: true,
+      action: 'pay',
+      sale,
+      password: '',
+      error: '',
+      paymentMethod: sale.paymentMethod && sale.paymentMethod !== 'Crédito' ? sale.paymentMethod : 'Dinheiro'
+    });
+  };
+
+  /**
+   * Converte uma proforma numa factura definitiva (FT-79).
+   *
+   * A proforma não deduz stock nem conta como receita: é uma proposta. Sem esta
+   * acção, o único caminho era repetir a venda de raiz no PDV — com risco de
+   * preços ou quantidades diferentes do que o cliente autorizou por escrito.
+   */
+  const handleIssueInvoiceFromProforma = (sale: Sale) => {
+    if (isProcessing) return;
+    if (!isProformaSale(sale) || sale.convertedToInvoice) return;
+
     askConfirmation(
-      'Liquidar Fatura',
-      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString('pt-MZ')} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
+      'Emitir Factura Definitiva',
+      `A proforma ${sale.invoiceNumber} vai originar uma factura definitiva com número novo, no valor de ` +
+        `${sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT. ` +
+        `O stock é deduzido agora. A proforma mantém-se no histórico, marcada como convertida.`,
       async () => {
-        if (isProcessing) return;
         setIsProcessing(true);
-        let paymentSaved = false;
+        let issuedNumber: string | null = null;
         try {
-          const allSales = await dbService.getSales();
-          const candidate = generateNextReceiptNumber(allSales, 'ReciboA4');
-          const receiptNum = await dbService.nextDocumentNumber(
-            'ReciboA4',
-            new Date().getFullYear(),
-            parseInt(candidate.slice(candidate.lastIndexOf('-') + 1), 10) - 1 || 0
-          );
-          const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
-          await dbService.addSale(updatedSale);
-          paymentSaved = true;
+          const products = await dbService.getProducts();
+          const deductionItems: any[] = [];
+          for (const item of (sale.items || [])) {
+            if (!item) continue;
+            const prod = products.find(p => String(p.id) === String(item.productId));
+            if (!prod || prod.isService) continue;
 
-          setInvoiceToPrint(updatedSale);
-          setPrintType('ReciboA4');
-          const receiptGenerated = await runPostCommitTask({
-            label: 'gerar o recibo da fatura liquidada',
-            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
-          });
+            const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+            const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+            const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+            const hasConversion = conversaoEfetiva !== undefined;
+            const qty = Number(item.quantity) || 0;
+            if (qty <= 0) continue;
+
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              deductionItems.push({
+                productId: String(prod.id),
+                hasConversion: true,
+                sellingUnit: 'Bulk',
+                qtyToReduce: qty,
+                equivalentBaseQty: qty * conversaoEfetiva
+              });
+            } else if (hasConversion) {
+              deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce: qty });
+            } else {
+              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce: qty });
+            }
+          }
+
+          issuedNumber = await dbService.nextDocumentNumber('FaturaDefinitiva', new Date().getFullYear(), 0);
+
+          const invoice: Sale = {
+            ...sale,
+            id: `conv-${String(sale.id || sale.invoiceNumber).slice(0, 40)}-${Date.now()}`,
+            invoiceNumber: issuedNumber,
+            date: new Date().toISOString(),
+            status: 'Pendente',
+            documentType: 'FaturaDefinitiva',
+            receiptNumber: undefined,
+            paidAt: undefined,
+            paidBy: undefined,
+            settledPaymentMethod: undefined,
+            convertedToInvoice: undefined,
+            reissuedFrom: undefined
+          };
+
+          await dbService.addSaleWithStockDeduction(invoice, deductionItems);
           await runPostCommitTask({
-            label: 'atualizar as faturas depois da liquidação',
-            task: () => loadData(false)
+            label: 'marcar a proforma como convertida',
+            task: () => dbService.addSale({ ...sale, convertedToInvoice: issuedNumber as string })
           });
 
-          if (receiptGenerated) {
-            showToast(`Factura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
-          } else {
-            showToast(`Factura ${sale.invoiceNumber} foi liquidada com sucesso. Pode reimprimir o recibo pelo histórico.`, 'warning');
-          }
-        } catch (err) {
-          console.error('Error paying invoice:', err);
-          if (paymentSaved) {
-            showToast(`A factura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
-          } else {
-            showToast('Erro ao liquidar factura.', 'error');
-          }
+          void dbService.addAuditLog({
+            id: 'log-' + Date.now(),
+            timestamp: new Date().toISOString(),
+            username: currentUser?.username || 'Gestor',
+            ipAddress: '127.0.0.1',
+            action: 'Conversão de Proforma',
+            status: 'Sucesso',
+            details: `Proforma ${sale.invoiceNumber} convertida na factura definitiva ${issuedNumber} (${sale.total} MT).`
+          });
+
+          openPreview(invoice, 'A4');
+          await runPostCommitTask({ label: 'atualizar as faturas', task: () => loadData(false) });
+          showToast(`Proforma ${sale.invoiceNumber} convertida na factura ${issuedNumber}. Estado: Pendente.`, 'success');
+        } catch (err: any) {
+          console.error('[FaturasModule] Erro ao converter proforma:', err);
+          showToast(err?.message || 'Não foi possível emitir a factura definitiva.', 'error');
         } finally {
           setIsProcessing(false);
         }
@@ -277,39 +370,110 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     const sale = securityModal.sale;
     if (!sale) return;
 
-    const inputPw = (securityModal.password || '').trim();
-    const isValidPassword = await verifyAuthorizationPassword(inputPw, settings);
-    if (!isValidPassword) {
-      setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
-      return;
-    }
-
     setIsProcessing(true);
     setSecurityModal(prev => ({ ...prev, error: '' }));
     let actionPersisted = false;
 
     try {
+      // ── Liquidação ────────────────────────────────────────────────────
+      if (securityModal.action === 'pay') {
+        const settledPaymentMethod = securityModal.paymentMethod || 'Dinheiro';
+        const operator = currentUser?.username || 'Gestor';
+
+        let payment: { sale: Sale; receiptNumber: string };
+        try {
+          payment = await dbService.payInvoiceWithReceipt(sale.id, {
+            paidBy: operator,
+            settledPaymentMethod
+          });
+        } catch (err: any) {
+          // Erros esperados: factura já paga, anulada, inexistente. Ficam no
+          // próprio modal — o utilizador tem de perceber por que não gravou.
+          setSecurityModal(prev => ({
+            ...prev,
+            show: true,
+            error: err?.message || 'Falha ao registar o pagamento.'
+          }));
+          return;
+        }
+
+        actionPersisted = true;
+        const paidSale = payment.sale;
+        setSecurityModal({ show: false, action: 'pay', sale: null, password: '', error: '' });
+
+        void dbService.addAuditLog({
+          id: 'log-' + Date.now(),
+          timestamp: new Date().toISOString(),
+          username: operator,
+          ipAddress: '127.0.0.1',
+          action: 'Liquidação de Factura',
+          status: 'Sucesso',
+          details: `Factura ${sale.invoiceNumber} liquidada por ${settledPaymentMethod} no valor de ${paidSale.total} MT. Recibo emitido: ${payment.receiptNumber}.`
+        });
+
+        openPreview(paidSale, 'ReciboA4');
+        const receiptGenerated = await runPostCommitTask({
+          label: 'gerar o recibo da factura liquidada',
+          task: () => downloadReceiptA4(paidSale, resolveSettings())
+        });
+        await runPostCommitTask({
+          label: 'atualizar as faturas depois da liquidação',
+          task: () => loadData(false)
+        });
+
+        if (receiptGenerated) {
+          showToast(`Factura ${sale.invoiceNumber} liquidada (${settledPaymentMethod}). Recibo ${payment.receiptNumber}.`, 'success');
+        } else {
+          showToast(`Factura ${sale.invoiceNumber} liquidada. Recibo ${payment.receiptNumber} pode ser reimpresso pelo histórico.`, 'warning');
+        }
+        return;
+      }
+
+      // ── Anulação e reemissão: exigem palavra-passe de gestor ──────────
+      const inputPw = (securityModal.password || '').trim();
+      const isValidPassword = await verifyAuthorizationPassword(inputPw, settings);
+      if (!isValidPassword) {
+        setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
+        return;
+      }
+
+      const operator = currentUser?.username || 'Gestor';
+
       if (securityModal.action === 'cancel') {
-        // E-06: a anulação de uma fatura exige documento de rectificação. A
-        // nota de crédito passa a ser numerada pelo contador e guardada na
-        // venda, em vez de a anulação ser só uma mudança de estado sem papel.
-        const creditNoteNumber = await dbService.nextDocumentNumber(
-          'NotaCredito',
-          new Date(sale.date || Date.now()).getFullYear(),
-          0
-        );
-        const cancellationMeta = {
-          creditNoteNumber,
-          cancelledAt: new Date().toISOString()
+        if (isCancelledSale(sale)) {
+          setSecurityModal(prev => ({ ...prev, error: 'Esta factura já está anulada.' }));
+          return;
+        }
+
+        // Só uma factura definitiva gera nota de crédito. Anular uma proforma
+        // consumia um número NC-AAAA-NNNN para um documento que nunca existiu
+        // (FT-31).
+        const isDefinitiveInvoice = !sale.documentType || sale.documentType === 'FaturaDefinitiva';
+        const creditNoteNumber = isDefinitiveInvoice
+          ? await dbService.nextDocumentNumber('NotaCredito', new Date().getFullYear(), 0)
+          : undefined;
+
+        const cancellationMeta: Partial<Sale> = {
+          cancelledAt: new Date().toISOString(),
+          cancelledBy: operator,
+          ...(creditNoteNumber ? { creditNoteNumber } : {})
         };
 
-        if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
+        const missingProducts: string[] = [];
+
+        if (isDefinitiveInvoice) {
           const products = await dbService.getProducts();
           const restockItems: any[] = [];
           for (const item of (sale.items || [])) {
             if (!item) continue;
             const prod = products.find(p => String(p.id) === String(item.productId));
-            if (!prod || prod.isService) continue;
+            if (prod?.isService) continue;
+            if (!prod) {
+              // Devolver stock a um produto que já não existe é impossível:
+              // dizer o nome em voz alta é o mínimo (FT-39).
+              missingProducts.push(item.name || String(item.productId));
+              continue;
+            }
 
             // D-04: usa-se a conversão registada na linha da venda; só se ela
             // não existir (vendas antigas) se recorre ao catálogo actual.
@@ -319,20 +483,29 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             const hasConversion = conversaoEfetiva !== undefined;
             const qtyToAdd = Number(item.quantity) || 0;
             if (qtyToAdd <= 0) continue;
+
+            const base = {
+              productId: String(prod.id),
+              // O livro de movimentos imprimia o ID em vez do nome nos estornos (FT-40).
+              productName: prod.name || item.name || String(prod.id),
+              unit: item.unit || prod.baseUnit || 'un'
+            };
+
             if (hasConversion && item.sellingUnit === 'Bulk') {
               restockItems.push({
-                productId: String(prod.id),
+                ...base,
                 hasConversion: true,
                 sellingUnit: 'Bulk',
                 qtyToAdd,
                 equivalentBaseQty: qtyToAdd * conversaoEfetiva
               });
             } else if (hasConversion) {
-              restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+              restockItems.push({ ...base, hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
             } else {
-              restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
+              restockItems.push({ ...base, hasConversion: false, qtyToAdd });
             }
           }
+
           await dbService.cancelSaleWithStockRestoration(
             { ...sale, ...cancellationMeta, previousStatus: sale.status as Sale['previousStatus'] },
             restockItems
@@ -349,79 +522,139 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
+
+        const cancelledSale: Sale = { ...sale, ...cancellationMeta, status: 'Cancelada' };
+        if (creditNoteNumber) {
+          // O número existia mas o documento não: agora existe (FT-32).
+          setInvoiceToPrint(null);
+          void runPostCommitTask({
+            label: 'gerar a nota de crédito',
+            task: () => downloadCreditNoteA4(cancelledSale, resolveSettings())
+          });
+        }
+
+        const receiptNote = sale.receiptNumber
+          ? ` O recibo ${sale.receiptNumber} fica anulado por esta nota de crédito; o reembolso tem de ser registado em caixa.`
+          : '';
+
         void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
-          username: currentUser?.username || 'Gestor',
+          username: operator,
           ipAddress: '127.0.0.1',
           action: 'Anulação de Venda (Autorizada)',
           status: 'Sucesso',
-          details: `Venda ${sale.invoiceNumber} anulada com palavra-passe de autorização. Nota de crédito emitida: ${creditNoteNumber}.`
+          details:
+            `Venda ${sale.invoiceNumber} (${sale.total} MT) anulada por ${operator}. ` +
+            (creditNoteNumber ? `Nota de crédito emitida: ${creditNoteNumber}.` : 'Documento não definitivo: sem nota de crédito.') +
+            receiptNote
         });
         void runPostCommitTask({
           label: 'atualizar as faturas depois da anulação',
           task: () => loadData(false)
         });
-        showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
-      } else {
-        // Restaurar devolve a fatura ao estado que tinha antes do cancelamento
-        // (hoje guardado em `previousStatus`); 'Pendente' é apenas o legado.
-        const restoredStatus: Sale['status'] =
-          sale.previousStatus === 'Paga' || sale.previousStatus === 'Crédito' || sale.previousStatus === 'Pendente'
-            ? sale.previousStatus
-            : 'Pendente';
-        const updatedSale: Sale = {
-          ...sale,
-          id: String(sale.id || Date.now()),
-          status: restoredStatus,
-          previousStatus: undefined
-        };
-        if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
-          const products = await dbService.getProducts();
-          const deductionItems: any[] = [];
-          for (const item of (sale.items || [])) {
-            if (!item) continue;
-            const prod = products.find(p => String(p.id) === String(item.productId));
-            if (!prod || prod.isService) continue;
 
-            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-            const qtyToReduce = Number(item.quantity) || 0;
-            if (qtyToReduce <= 0) continue;
-            if (hasConversion && item.sellingUnit === 'Bulk') {
-              deductionItems.push({
-                productId: String(prod.id),
-                hasConversion: true,
-                sellingUnit: 'Bulk',
-                qtyToReduce,
-                equivalentBaseQty: qtyToReduce * (Number(prod.conversionRate) || 1)
-              });
-            } else if (hasConversion) {
-              deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce });
-            } else {
-              deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce });
-            }
+        const missingNote = missingProducts.length
+          ? ` Atenção: sem stock reposto em ${missingProducts.join(', ')} (artigo já não existe no catálogo).`
+          : '';
+        showToast(
+          `Venda ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}.` + missingNote,
+          missingProducts.length ? 'warning' : 'success'
+        );
+      } else {
+        // ── Reemissão ───────────────────────────────────────────────────
+        // Uma factura anulada não volta a viver: o documento cancelado é nulo
+        // para efeitos fiscais. Reemitir cria uma factura NOVA, com número
+        // novo, e deixa o cancelamento e a nota de crédito intactos no
+        // histórico (corrige FT-33, FT-35 e evita "ressuscitar" papel).
+        const newInvoiceNumber = await dbService.nextDocumentNumber(
+          'FaturaDefinitiva',
+          new Date().getFullYear(),
+          0
+        );
+
+        const reissued: Sale = {
+          ...sale,
+          id: `reemit-${String(sale.id || sale.invoiceNumber).slice(0, 40)}-${Date.now()}`,
+          invoiceNumber: newInvoiceNumber,
+          date: new Date().toISOString(),
+          status: 'Pendente',
+          receiptNumber: undefined,
+          creditNoteNumber: undefined,
+          cancelledAt: undefined,
+          cancelledBy: undefined,
+          previousStatus: undefined,
+          paidAt: undefined,
+          paidBy: undefined,
+          settledPaymentMethod: undefined,
+          reissuedFrom: sale.invoiceNumber
+        };
+
+        const products = await dbService.getProducts();
+        const deductionItems: any[] = [];
+        const missingProducts: string[] = [];
+        for (const item of (sale.items || [])) {
+          if (!item) continue;
+          const prod = products.find(p => String(p.id) === String(item.productId));
+          if (prod?.isService) continue;
+          if (!prod) {
+            missingProducts.push(item.name || String(item.productId));
+            continue;
           }
-          await dbService.addSaleWithStockDeduction(updatedSale, deductionItems);
-        } else {
-          await dbService.addSale(updatedSale);
+
+          // Simetria com a anulação: a conversão vem da linha da venda, não do
+          // catálogo actual (FT-34). Sem isso, mudar o factor saco→quilo entre
+          // a venda e a reemissão deixava o stock permanentemente errado.
+          const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+          const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+          const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+          const hasConversion = conversaoEfetiva !== undefined;
+          const qty = Number(item.quantity) || 0;
+          if (qty <= 0) continue;
+
+          if (hasConversion && item.sellingUnit === 'Bulk') {
+            deductionItems.push({
+              productId: String(prod.id),
+              hasConversion: true,
+              sellingUnit: 'Bulk',
+              qtyToReduce: qty,
+              equivalentBaseQty: qty * conversaoEfetiva
+            });
+          } else if (hasConversion) {
+            deductionItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToReduce: qty });
+          } else {
+            deductionItems.push({ productId: String(prod.id), hasConversion: false, qtyToReduce: qty });
+          }
         }
+
+        await dbService.addSaleWithStockDeduction(reissued, deductionItems);
 
         actionPersisted = true;
         setSecurityModal({ show: false, action: 'restore', sale: null, password: '', error: '' });
+
         void dbService.addAuditLog({
           id: 'log-' + Date.now(),
           timestamp: new Date().toISOString(),
-          username: currentUser?.username || 'Gestor',
+          username: operator,
           ipAddress: '127.0.0.1',
-          action: 'Restauração de Venda (Autorizada)',
+          action: 'Reemissão de Factura (Autorizada)',
           status: 'Sucesso',
-          details: `Factura ${sale.invoiceNumber} restaurada para o estado Pendente com palavra-passe de autorização.`
+          details:
+            `Factura anulada ${sale.invoiceNumber} reemitida como ${newInvoiceNumber} por ${operator}. ` +
+            `Estado: Pendente. O documento anulado mantém-se no histórico.`
         });
         void runPostCommitTask({
-          label: 'atualizar as faturas depois da restauração',
+          label: 'atualizar as faturas depois da reemissão',
           task: () => loadData(false)
         });
-        showToast(`Factura ${sale.invoiceNumber} restaurada para o estado Pendente com sucesso!`, 'success');
+
+        const missingNote = missingProducts.length
+          ? ` Sem linhas de ${missingProducts.join(', ')} (artigo já não existe).`
+          : '';
+        showToast(
+          `Factura ${sale.invoiceNumber} reemitida como ${newInvoiceNumber} (Pendente). O documento anulado fica no histórico.` + missingNote,
+          missingProducts.length ? 'warning' : 'success'
+        );
       }
     } catch (err: any) {
       console.error('[FaturasModule] Error in handleExecuteSecurityAction:', err);
@@ -430,23 +663,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         showToast('A ação foi gravada com sucesso. Alguns dados visuais serão atualizados em seguida.', 'warning');
       } else {
         const errMsg = err?.message || 'Falha ao processar a operação.';
-        setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação de segurança: ${errMsg}` }));
+        setSecurityModal(prev => ({ ...prev, show: true, error: `Erro ao executar a ação: ${errMsg}` }));
       }
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  const downloadInvoicePDF = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4') => {
-    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
-    if (format === 'Thermal') {
-      downloadThermalReceipt(sale, s);
-    } else if (format === 'DoubleA5') {
-      downloadDuplicatedInvoiceA4(sale, s);
-    } else if (format === 'ReciboA4') {
-      downloadReceiptA4(sale, s);
-    } else {
-      downloadInvoiceA4(sale, s, false);
     }
   };
 
@@ -468,33 +688,59 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     return Boolean(matchInvoice || matchCustomer || matchOperator || matchPayment || matchNuit || matchTotal || matchItem);
   };
 
+  /**
+   * Um estado só é "o mesmo estado" se as regras de negócio o disserem.
+   * Comparar `sale.status` em bruto mostrava proformas como dívida e não
+   * reconhecia o estado legado 'canceled' (FT-06, FT-07).
+   */
+  const matchesStatusTab = (sale: Sale, tab: typeof faturasFilter): boolean => {
+    switch (tab) {
+      case 'Todas':
+        return true;
+      case 'Cancelada':
+        return isCancelledSale(sale);
+      case 'Proforma':
+        return isProformaSale(sale);
+      case 'Paga':
+      case 'Pendente':
+      case 'Crédito':
+        return !isCancelledSale(sale) && !isProformaSale(sale) && sale.status === tab;
+      default:
+        return true;
+    }
+  };
+
   const filteredSales = sales.filter(sale => {
     // These redundant guards avoid showing a stale previous page while the
     // server query for a newly selected period/status is in flight.
     if (!isDateInRange(sale.date, startDate, endDate)) return false;
-    if (faturasFilter !== 'Todas' && sale.status !== faturasFilter) return false;
+    if (!matchesStatusTab(sale, faturasFilter)) return false;
     return matchesInvoiceSearch(sale);
   });
 
-  const sumByStatus = (status: Sale['status']) =>
-    sales.filter(sale => sale.status === status).reduce((sum, sale) => sum + sale.total, 0);
-  const countByStatus = (status: Sale['status']) => sales.filter(sale => sale.status === status).length;
+  const financialSales = sales.filter(isFinancialSale);
+  const sumOf = (subset: Sale[]) => subset.reduce((sum, sale) => sum + (Number(sale.total) || 0), 0);
+  const paidSales = financialSales.filter(sale => sale.status === 'Paga');
+  const pendingSales = financialSales.filter(sale => sale.status === 'Pendente');
+  const creditSales = financialSales.filter(sale => sale.status === 'Crédito');
+  const proformaSales = sales.filter(isProformaSale);
+  const cancelledSales = sales.filter(isCancelledSale);
 
   const pageSummary: SalesSummary = {
-    totalInvoiced: sales.filter(isFinancialSale).reduce((sum, sale) => sum + sale.total, 0),
-    paidInvoiced: sumByStatus('Paga'),
-    pendingInvoiced: sumByStatus('Pendente'),
-    creditInvoiced: sumByStatus('Crédito'),
-    debtInvoiced: sumByStatus('Pendente') + sumByStatus('Crédito'),
-    proformaInvoiced: sumByStatus('Proforma'),
-    canceledInvoiced: sumByStatus('Cancelada'),
+    totalInvoiced: sumOf(financialSales),
+    paidInvoiced: sumOf(paidSales),
+    pendingInvoiced: sumOf(pendingSales),
+    creditInvoiced: sumOf(creditSales),
+    debtInvoiced: sumOf(pendingSales) + sumOf(creditSales),
+    proformaInvoiced: sumOf(proformaSales),
+    canceledInvoiced: sumOf(cancelledSales),
     totalCount: sales.length,
-    paidCount: countByStatus('Paga'),
-    pendingCount: countByStatus('Pendente'),
-    creditCount: countByStatus('Crédito'),
-    debtCount: countByStatus('Pendente') + countByStatus('Crédito'),
-    proformaCount: countByStatus('Proforma'),
-    canceledCount: countByStatus('Cancelada')
+    paidCount: paidSales.length,
+    pendingCount: pendingSales.length,
+    creditCount: creditSales.length,
+    debtCount: pendingSales.length + creditSales.length,
+    proformaCount: proformaSales.length,
+    canceledCount: cancelledSales.length
   };
   const periodSummary = salesSummary || pageSummary;
 
@@ -540,13 +786,23 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       const exportSales = await getSalesForExport();
       const data = exportSales.map(sale => ({
         'Nº Factura': sale.invoiceNumber,
+        // Um NUIT inventado num relatório fiscal é pior do que um campo vazio (FT-47).
+        'NUIT': sale.customerNuit || '',
         'Data': formatDatePT(sale.date),
         'Cliente': sale.customerName || 'Consumidor Final',
-        'NUIT': sale.customerNuit || '999999999',
+        'Tipo': isProformaSale(sale) ? 'Proforma' : 'Factura definitiva',
         'Operador': sale.operatorName || 'Caixa',
+        'Posto': sale.terminalId || '',
         'Método Pagamento': sale.paymentMethod,
+        'Meio de Liquidação': sale.settledPaymentMethod || '',
+        'Subtotal (MT)': sale.subtotal,
+        'Desconto (MT)': sale.discount,
+        'IVA (MT)': sale.includeIva ? (sale.ivaAmount ?? sumTaxAmount(sale.items || [], [])) : 0,
         'Total (MT)': sale.total,
-        'Estado': sale.status
+        'Estado': saleStatusLabel(sale),
+        'Nº Recibo': sale.receiptNumber || '',
+        'Nº Nota de Crédito': sale.creditNoteNumber || '',
+        'Data Liquidação': sale.paidAt ? new Date(sale.paidAt).toLocaleString('pt-MZ') : ''
       }));
       const ws = XLSX.utils.json_to_sheet(data);
       const wb = XLSX.utils.book_new();
@@ -566,9 +822,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     setIsExporting(true);
     try {
       const exportSales = await getSalesForExport();
+      // Proformas não são facturação e canceladas não são receita: o mapa
+      // somava as proformas e contradizia o ecrã (FT-46).
       const exportTotal = exportSales
-        .filter(sale => sale.status !== 'Cancelada')
-        .reduce((sum, sale) => sum + sale.total, 0);
+        .filter(isFinancialSale)
+        .reduce((sum, sale) => sum + (Number(sale.total) || 0), 0);
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
       const nuit = companyNuit(settings?.companyNuit);
@@ -619,6 +877,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       setIsExporting(false);
     }
   };
+
+  // IVA do documento: o valor gravado manda; se não existir (vendas antigas),
+  // calcula-se pelas taxas das linhas em vez de assumir 16 % cego (FT-57).
+  const previewIva = invoiceToPrint
+    ? Number(invoiceToPrint.ivaAmount ?? sumTaxAmount(invoiceToPrint.items || [], []))
+    : 0;
 
   return (
     <div className="space-y-6" id="faturas_module_container">
@@ -711,6 +975,20 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
       </div>
 
+      {/* Se a agregação do servidor falhou, os cartões estão a somar só a
+          página carregada. Dizer isso é obrigatório: antes os números
+          apareciam com o mesmo ar de "totais do período" (FT-01). */}
+      {!salesSummary && !isLoadingSales && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-[11px] font-semibold text-amber-900 flex items-start gap-2">
+          <span className="material-symbols-outlined text-[16px]">warning</span>
+          <span>
+            Os totais abaixo referem-se apenas às {sales.length} factura(s) carregadas nesta página — a soma do período
+            não está disponível (rede ou índice). Use «Carregar mais facturas» e confirme com a exportação antes de
+            fechar decisões de dinheiro.
+          </span>
+        </div>
+      )}
+
       {/* Main Filter and Invoice Grid Search area */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
         <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
@@ -793,9 +1071,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   </td>
                 </tr>
               ) : (
-                filteredSales.map(sale => {
+                filteredSales.map((sale, rowIdx) => {
                   return (
-                    <tr key={sale.id} className="hover:bg-slate-50/50 transition-colors">
+                    <tr key={sale.id || sale.invoiceNumber || `linha-${rowIdx}`} className="hover:bg-slate-50/50 transition-colors">
                       {/* Invoice Number */}
                       <td className="p-2 font-mono font-black text-slate-700 text-[10.5px]">{sale.invoiceNumber}</td>
                       
@@ -854,84 +1132,127 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       {/* Operations */}
                       <td className="p-2 text-right">
                         <div className="flex justify-end gap-1 flex-wrap">
-                          {/* Liquidate payment buttons */}
-                          {(sale.status === 'Pendente' || sale.status === 'Crédito') && (
+                          {/* Liquidar: só dívida real, nunca proforma ou anulada */}
+                          {isDebtSale(sale) && !isCancelledSale(sale) && (
                             <button
                               type="button"
                               onClick={() => handlePayInvoice(sale)}
                               className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[9.5px] uppercase px-1.5 py-0.5 rounded shadow-2xs flex items-center gap-0.5 cursor-pointer transition-colors"
-                              title="Liquidar / Pagar factura pendente"
+                              title="Liquidar factura: registar o pagamento e emitir recibo"
                             >
                               <span className="material-symbols-outlined text-[11px]">payments</span>
                               Pagar
                             </button>
                           )}
 
-                          {/* Secondary view/print/cancel triggers */}
-                          {sale.status !== 'Cancelada' ? (
+                          {isCancelledSale(sale) ? (
+                            <>
+                              {sale.creditNoteNumber && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void runPostCommitTask({
+                                      label: 'gerar a nota de crédito',
+                                      task: () => downloadCreditNoteA4({ ...sale, items: sale.items || [] }, resolveSettings())
+                                    })
+                                  }
+                                  className="bg-rose-50 border border-rose-200 hover:bg-rose-100 text-rose-700 font-bold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors"
+                                  title={`Reimprimir a nota de crédito ${sale.creditNoteNumber}`}
+                                >
+                                  Nota de Crédito
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => openPreview(sale, 'A4')}
+                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                title="Ver a factura anulada (sai marcada como ANULADA)"
+                              >
+                                Ver Factura
+                              </button>
+                              {(!sale.documentType || sale.documentType === 'FaturaDefinitiva') && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRestoreInvoice(sale)}
+                                  className="bg-blue-50 border border-blue-100 hover:bg-blue-100 text-blue-600 font-bold text-[9.5px] uppercase px-2 py-0.5 rounded cursor-pointer transition-colors"
+                                  title="Emitir uma factura nova com o mesmo conteúdo e número novo. A factura anulada mantém-se no histórico."
+                                >
+                                  Reemitir
+                                </button>
+                              )}
+                            </>
+                          ) : (
                             <>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('A4');
-                                }}
+                                onClick={() => openPreview(sale, 'A4')}
                                 className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Fatura A4"
+                                title="Visualizar e imprimir Factura A4"
                               >
                                 Fatura A4
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('Proforma');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Fatura Proforma A4"
-                              >
-                                F. Proforma
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('Thermal');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Recibo POS"
-                              >
-                                POS
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToPrint(sale);
-                                  setPrintType('ReciboA4');
-                                }}
-                                className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
-                                title="Visualizar e Imprimir Recibo A4"
-                              >
-                                Recibo A4
-                              </button>
+                              {isProformaSale(sale) && !sale.convertedToInvoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleIssueInvoiceFromProforma(sale)}
+                                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[9.5px] uppercase px-1.5 py-0.5 rounded cursor-pointer transition-colors"
+                                  title="Emitir a factura definitiva a partir desta proforma (número novo, stock deduzido)"
+                                >
+                                  Emitir Factura
+                                </button>
+                              )}
+                              {isProformaSale(sale) && sale.convertedToInvoice && (
+                                <span
+                                  className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 font-mono"
+                                  title="Proforma já convertida numa factura definitiva"
+                                >
+                                  → {sale.convertedToInvoice}
+                                </span>
+                              )}
+                              {/* Proforma só se reimprime em facturas que são proformas.
+                                  Antes, qualquer factura definitiva podia sair com o
+                                  mesmo número e o título "FACTURA PROFORMA" (FT-54). */}
+                              {isProformaSale(sale) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openPreview(sale, 'Proforma')}
+                                  className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                  title="Visualizar e imprimir Factura Proforma (documento sem efeito fiscal)"
+                                >
+                                  F. Proforma
+                                </button>
+                              )}
+                              {/* Recibo só de factura liquidada: um recibo de uma dívida
+                                  é prova de um pagamento que não houve (FT-67). */}
+                              {isSettledSale(sale) && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openPreview(sale, 'Thermal')}
+                                    className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                    title="Visualizar e imprimir Recibo POS"
+                                  >
+                                    POS
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openPreview(sale, 'ReciboA4')}
+                                    className="bg-slate-50 border border-slate-200 hover:bg-slate-100 text-slate-700 font-semibold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer"
+                                    title="Visualizar e imprimir Recibo A4"
+                                  >
+                                    Recibo A4
+                                  </button>
+                                </>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleCancelInvoice(sale)}
                                 className="bg-rose-50 border border-rose-100 hover:bg-rose-100 text-rose-600 font-bold text-[9.5px] px-1.5 py-0.5 rounded cursor-pointer transition-colors"
-                                title="Cancelar Factura definitivamente"
+                                title="Anular a factura: emite nota de crédito e devolve o stock"
                               >
                                 Cancelar
                               </button>
                             </>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleRestoreInvoice(sale)}
-                              className="bg-blue-50 border border-blue-100 hover:bg-blue-100 text-blue-600 font-bold text-[9.5px] uppercase px-2 py-0.5 rounded cursor-pointer transition-colors"
-                              title="Restaurar Factura Cancelada de volta a Pendente"
-                            >
-                              Restaurar
-                            </button>
                           )}
                         </div>
                       </td>
@@ -969,20 +1290,38 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             <div className="bg-slate-900 p-4 border-b border-slate-800 flex justify-between items-center text-white">
               <span className="font-bold flex items-center gap-2 text-sm uppercase tracking-wide">
                 <span className="material-symbols-outlined text-emerald-500">print</span>
-                Visualização de Emissão de Fatura / Recibo
+                {isCancelledSale(invoiceToPrint)
+                  ? 'Documento ANULADO — via de arquivo'
+                  : printType === 'ReciboA4' || printType === 'Thermal'
+                    ? 'Recibo de liquidação'
+                    : 'Visualização de emissão'}
               </span>
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
+                    const s = resolveSettings();
+                    const isCancelled = isCancelledSale(invoiceToPrint);
                     if (printType === 'Thermal') {
                       downloadThermalReceipt(invoiceToPrint, s);
                     } else if (printType === 'A4') {
-                      downloadInvoiceA4(invoiceToPrint, s, false, invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA');
+                      downloadInvoiceA4(
+                        invoiceToPrint,
+                        s,
+                        false,
+                        isCancelled
+                          ? 'FACTURA ANULADA'
+                          : isProformaSale(invoiceToPrint)
+                            ? 'FACTURA PROFORMA'
+                            : invoiceToPrint.paymentMethod === 'Crédito'
+                              ? 'FACTURA A CRÉDITO'
+                              : 'FACTURA DEFINITIVA'
+                      );
                     } else if (printType === 'Proforma') {
                       downloadInvoiceA4(invoiceToPrint, s, false, 'FACTURA PROFORMA');
                     } else if (printType === 'ReciboA4') {
-                      downloadInvoiceA4(invoiceToPrint, s, true);
+                      // Um único gerador de recibos A4: o da liquidação e o da
+                      // reimpressão têm de sair iguais (FT-66).
+                      downloadReceiptA4(invoiceToPrint, s);
                     } else if (printType === 'DoubleA5') {
                       downloadDuplicatedInvoiceA4(invoiceToPrint, s);
                     }
@@ -1005,6 +1344,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             </div>
 
             {/* Document Layouts */}
+            {isCancelledSale(invoiceToPrint) && (
+              <div className="bg-rose-600 text-white text-center text-[11px] font-black uppercase tracking-widest py-1.5">
+                Factura anulada{invoiceToPrint.creditNoteNumber ? ` — nota de crédito ${invoiceToPrint.creditNoteNumber}` : ''} · este documento não tem valor fiscal
+              </div>
+            )}
+
             <div className="p-8 bg-slate-100 flex justify-center custom-scrollbar overflow-y-auto max-h-[650px]">
               
               {/* 1. Standard A4 Commercial Invoice Layout */}
@@ -1041,14 +1386,18 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                   </div>
                                 </div>
                                 <div className="text-right">
-                                  <div className="bg-emerald-800 text-white px-5 py-2 rounded text-sm font-black uppercase tracking-wider shadow-sm">
-                                    {printType === 'Proforma' 
-                                      ? 'FACTURA PROFORMA' 
-                                      : (invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA')}
+                                  <div className={`${isCancelledSale(invoiceToPrint) ? 'bg-rose-700' : 'bg-emerald-800'} text-white px-5 py-2 rounded text-sm font-black uppercase tracking-wider shadow-sm`}>
+                                    {isCancelledSale(invoiceToPrint)
+                                      ? 'FACTURA ANULADA'
+                                      : printType === 'Proforma' || isProformaSale(invoiceToPrint)
+                                        ? 'FACTURA PROFORMA'
+                                        : (invoiceToPrint.paymentMethod === 'Crédito' ? 'FACTURA A CRÉDITO' : 'FACTURA DEFINITIVA')}
                                   </div>
                                   <p className="text-gray-700 mt-2 font-mono font-bold text-xs">Nº: {invoiceToPrint.invoiceNumber}</p>
                                   <p className="text-gray-500 font-mono text-[10px]">Emissão: {new Date(invoiceToPrint.date).toLocaleString('pt-MZ')}</p>
-                                  <p className="text-gray-500 text-[10px] mt-0.5">Forma de Pagamento: Transferência Bancária</p>
+                                  <p className="text-gray-500 text-[10px] mt-0.5">
+                                    Forma de Pagamento: {invoiceToPrint.settledPaymentMethod || invoiceToPrint.paymentMethod || 'Não indicada'}
+                                  </p>
                                 </div>
                               </div>
                             ) : (
@@ -1073,8 +1422,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                 </div>
                                 <div className="text-right space-y-1">
                                   <p className="text-[10px] font-black uppercase text-gray-400 tracking-wider mb-1">OPERADOR:</p>
-                                  <p className="font-bold text-gray-800">{invoiceToPrint.operatorName || 'Mazive'}</p>
-                                  <p className="text-gray-500 text-[10px]">Sessão Offline Validada</p>
+                                  <p className="font-bold text-gray-800">{invoiceToPrint.operatorName || 'Operador'}</p>
+                                  <p className="text-gray-500 text-[10px]">
+                                    {invoiceToPrint.terminalId ? `Posto: ${invoiceToPrint.terminalId}` : 'Posto não registado'}
+                                  </p>
                                 </div>
                               </div>
                             )}
@@ -1128,7 +1479,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     </div>
                                     <div className="flex justify-between text-gray-600">
                                       <span>IVA:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.includeIva ? `${(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT` : 'Sem IVA'}</span>
+                                      <span className="font-bold font-mono">
+                                        {invoiceToPrint.includeIva
+                                          ? `${previewIva.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT`
+                                          : 'Isento'}
+                                      </span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-emerald-800 border-t border-gray-300 pt-1.5">
                                       <span>Total Líquido:</span>
@@ -1320,7 +1675,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                   {/* Document Title Bar */}
                   <div className="border-y-2 border-double border-gray-400 py-1.5 text-center font-black uppercase text-[10px] tracking-wider text-gray-900 bg-gray-50/50">
-                    Recibo de Pagamento POS
+                    {isSettledSale(invoiceToPrint) ? 'Recibo de Pagamento POS' : 'Comprovativo de Venda'}
                   </div>
 
                   {/* Metadata */}
@@ -1385,13 +1740,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
-                        <span>IVA (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span>IVA:</span>
+                        <span className="font-mono">{previewIva.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
                     <div className="flex justify-between font-black text-[11px] border-t border-dashed border-gray-400 pt-1.5 mt-1 text-black">
-                      <span>TOTAL PAGO:</span>
+                      <span>{isSettledSale(invoiceToPrint) ? 'TOTAL PAGO:' : 'TOTAL EM DÍVIDA:'}</span>
                       <span className="font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
 
@@ -1602,35 +1957,66 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
       )}
 
-      {/* Security Action Validation Modal (Anulação / Restauração protegidas por senha de gestor) */}
+      {/* Modal de acção: liquidação (sem senha), anulação e reemissão (com senha) */}
       {securityModal.show && securityModal.sale && (
         <div className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden border border-gray-200">
             <div className={`p-3.5 text-white font-bold flex justify-between items-center ${
-              securityModal.action === 'cancel' ? 'bg-gradient-to-r from-red-600 to-red-700' : 'bg-gradient-to-r from-blue-600 to-blue-700'
+              securityModal.action === 'cancel'
+                ? 'bg-gradient-to-r from-red-600 to-red-700'
+                : securityModal.action === 'pay'
+                  ? 'bg-gradient-to-r from-emerald-600 to-emerald-700'
+                  : 'bg-gradient-to-r from-blue-600 to-blue-700'
             }`}>
               <span className="flex items-center gap-2 text-sm">
-                <span className="material-symbols-outlined text-[18px]">gpp_maybe</span>
-                {securityModal.action === 'cancel' ? 'Anular Venda' : 'Restaurar Venda'}
+                <span className="material-symbols-outlined text-[18px]">
+                  {securityModal.action === 'pay' ? 'payments' : 'gpp_maybe'}
+                </span>
+                {securityModal.action === 'cancel'
+                  ? 'Anular Factura'
+                  : securityModal.action === 'pay'
+                    ? 'Registar Pagamento'
+                    : 'Reemitir Factura'}
               </span>
-              <button onClick={() => setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' })} className="text-white hover:opacity-80 cursor-pointer">
+              <button
+                onClick={() => setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' })}
+                className="text-white hover:opacity-80 cursor-pointer"
+              >
                 <span className="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
-            
+
             <div className="p-4 space-y-3 text-xs">
               <div className={`p-2.5 rounded-lg border text-center ${
-                securityModal.action === 'cancel' ? 'bg-red-50 border-red-200 text-red-900' : 'bg-blue-50 border-blue-200 text-blue-900'
+                securityModal.action === 'cancel'
+                  ? 'bg-red-50 border-red-200 text-red-900'
+                  : securityModal.action === 'pay'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-blue-50 border-blue-200 text-blue-900'
               }`}>
                 <p className="font-bold text-xs">
                   {securityModal.sale.invoiceNumber} • {securityModal.sale.customerName || 'Cliente Geral'}
                 </p>
                 <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
-                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString('pt-MZ')} MT</strong>
+                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</strong>
                 </p>
                 {securityModal.action === 'cancel' && (
-                  <p className="text-[10px] text-red-700 mt-1">
-                    O stock será estornado de volta ao inventário.
+                  <p className="text-[10px] text-red-700 mt-1 text-left">
+                    O stock é devolvido ao inventário e é emitida uma nota de crédito com número próprio.
+                    Esta acção não devolve dinheiro: o reembolso tem de ser registado em caixa.
+                  </p>
+                )}
+                {securityModal.action === 'restore' && (
+                  <p className="text-[10px] text-blue-700 mt-1 text-left">
+                    A factura anulada <strong>não volta a viver</strong>. É emitida uma factura nova, com número novo e
+                    estado Pendente, e o stock é deduzido outra vez. A factura anulada e a nota de crédito ficam no
+                    histórico.
+                  </p>
+                )}
+                {securityModal.action === 'pay' && (
+                  <p className="text-[10px] text-emerald-700 mt-1 text-left">
+                    O recibo é numerado e emitido ao confirmar. Se outra pessoa liquidar a mesma factura ao mesmo
+                    tempo, o sistema recusa a segunda operação em vez de duplicar o recibo.
                   </p>
                 )}
               </div>
@@ -1641,33 +2027,57 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 </div>
               )}
 
-              <div className="space-y-1">
-                <label className="block text-[10px] font-black uppercase text-gray-500">
-                  Senha de Autorização
-                </label>
-                <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} autoComplete="off" noValidate>
-                  <input
-                    type="password"
-                    name="sec_mgr_pass_input"
-                    id="sec_mgr_pass_input"
-                    autoComplete="new-password"
-                    spellCheck={false}
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    data-lpignore="true"
-                    data-form-type="other"
-                    aria-autocomplete="none"
-                    placeholder="Código de Gestor / Técnico"
-                    value={securityModal.password}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setSecurityModal(prev => ({ ...prev, password: val, error: '' }));
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                    autoFocus
-                  />
-                </form>
-              </div>
+              {securityModal.action === 'pay' ? (
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black uppercase text-gray-500">
+                    Como entrou o dinheiro?
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {PAYMENT_METHODS.map(method => (
+                      <button
+                        key={method}
+                        type="button"
+                        onClick={() => setSecurityModal(prev => ({ ...prev, paymentMethod: method, error: '' }))}
+                        className={`px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors ${
+                          (securityModal.paymentMethod || 'Dinheiro') === method
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        {method}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-black uppercase text-gray-500">
+                    Senha de Autorização
+                  </label>
+                  <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} autoComplete="off" noValidate>
+                    <input
+                      type="password"
+                      name="sec_mgr_pass_input"
+                      id="sec_mgr_pass_input"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      data-lpignore="true"
+                      data-form-type="other"
+                      aria-autocomplete="none"
+                      placeholder="Palavra-passe de gestor"
+                      value={securityModal.password}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSecurityModal(prev => ({ ...prev, password: val, error: '' }));
+                      }}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                      autoFocus
+                    />
+                  </form>
+                </div>
+              )}
 
               <div className="flex gap-2 justify-end pt-2 border-t border-gray-100">
                 <button
@@ -1680,11 +2090,22 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 <button
                   type="button"
                   onClick={handleExecuteSecurityAction}
-                  className={`px-3.5 py-1.5 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer text-xs ${
-                    securityModal.action === 'cancel' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+                  disabled={isProcessing}
+                  className={`px-3.5 py-1.5 text-white rounded-lg font-bold transition-all shadow-sm cursor-pointer text-xs disabled:opacity-60 disabled:cursor-wait ${
+                    securityModal.action === 'cancel'
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : securityModal.action === 'pay'
+                        ? 'bg-emerald-600 hover:bg-emerald-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
                   }`}
                 >
-                  {securityModal.action === 'cancel' ? 'Confirmar Anulação' : 'Confirmar Restauração'}
+                  {isProcessing
+                    ? 'A processar…'
+                    : securityModal.action === 'cancel'
+                      ? 'Confirmar Anulação'
+                      : securityModal.action === 'pay'
+                        ? 'Confirmar Recebimento'
+                        : 'Confirmar Reemissão'}
                 </button>
               </div>
             </div>

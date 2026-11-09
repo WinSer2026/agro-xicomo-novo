@@ -180,7 +180,13 @@ Tudo o que está marcado como "verificado" foi confirmado por leitura de código
 
 ### Estado da execução
 
-Nenhum destes achados foi corrigido ainda. A correção segue por fases, começando pelos quatro P0, e cada fase atualiza esta secção com o que foi alterado e o que foi verificado.
+**34 fechados · 2 parciais · 45 abertos.** Detalhe e justificação em `docs/plano-melhoria.md`.
+
+| Situação | IDs |
+|---|---|
+| **Fechados** (34) | FT-01, FT-06, FT-07, FT-15, FT-23, FT-24, FT-25, FT-26, FT-27, FT-28, FT-31, FT-32, FT-33, FT-34, FT-35, FT-39, FT-40, FT-41, FT-42, FT-46, FT-47, FT-48, FT-49, FT-54, FT-55, FT-56, FT-57, FT-58, FT-59, FT-66, FT-67, FT-70, FT-75, FT-79 |
+| **Parciais** (2) | FT-36 (a NC referencia o recibo, mas o reembolso em dinheiro continua sem registo), FT-38 (liquidação já é atómica; a anulação ainda só tem guarda de estado) |
+| **Abertos** (45) | FT-02, FT-03, FT-04, FT-05, FT-08, FT-09, FT-10, FT-11, FT-12, FT-13, FT-14, FT-16, FT-17, FT-18, FT-19, FT-20, FT-21, FT-22, FT-29, FT-30, FT-37, FT-43, FT-44, FT-45, FT-50, FT-51, FT-52, FT-53, FT-60, FT-61, FT-62, FT-63, FT-64, FT-65, FT-68, FT-69, FT-71, FT-72, FT-73, FT-74, FT-76, FT-77, FT-78, FT-80, FT-81 |
 
 ## O que já está correto (para não regredir)
 

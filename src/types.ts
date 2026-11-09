@@ -84,6 +84,22 @@ export interface Sale {
   creditNoteNumber?: string;
   /** Momento da anulação, para rasto documental. */
   cancelledAt?: string;
+  /** Quem autorizou a anulação (utilizador que introduziu a palavra-passe). */
+  cancelledBy?: string;
+  /** Momento em que a factura foi efectivamente liquidada. */
+  paidAt?: string;
+  /** Utilizador que registou a liquidação. */
+  paidBy?: string;
+  /**
+   * Meio pelo qual a dívida foi paga (dinheiro, transferência, M-Pesa...).
+   * Distinto de `paymentMethod`: uma factura emitida a crédito mantém
+   * "Crédito" no documento original, e o recibo diz por onde o dinheiro entrou.
+   */
+  settledPaymentMethod?: string;
+  /** Nº da factura cancelada que esta factura substitui (reemissão). */
+  reissuedFrom?: string;
+  /** Nº da factura definitiva emitida a partir desta proforma. */
+  convertedToInvoice?: string;
   /** 'Proforma' = documento comercial sem efeito fiscal nem financeiro. */
   status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito' | 'Proforma';
   documentType?: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';

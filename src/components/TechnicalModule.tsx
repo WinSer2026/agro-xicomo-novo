@@ -972,9 +972,18 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleEliminarHistoricoTeste = async () => {
     if (isSubmitting) return;
     const conf = await appConfirm(
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? O sistema ficará limpo e pronto para iniciar o uso com dados reais de produção.'
+      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? ' +
+      'Isto apaga vendas, quebras, assiduidade, salários pagos, vendas em pausa, transformações e o livro de movimentos de stock. ' +
+      'É irreversível e inutiliza a auditoria fiscal do período. Use apenas em dados de teste, antes de entrar em produção.'
     );
     if (!conf) return;
+
+    const typedPassword = await appPrompt('Para confirmar, introduza a palavra-passe de gestor:');
+    if (typedPassword === null) return;
+    if (!(await verifyAuthorizationPassword(typedPassword, settings))) {
+      await appConfirm('Palavra-passe incorreta. Nada foi eliminado.');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -1002,8 +1011,15 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   const handleZerarSistema = async () => {
     if (isSubmitting) return;
-    const conf = await appConfirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras e folhas de salários, mas manterá os utilizadores e o catálogo.');
+    const conf = await appConfirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras, assiduidade, salários pagos e o livro de movimentos de stock, mas manterá os utilizadores e o catálogo.');
     if (!conf) return;
+
+    const typedPassword = await appPrompt('Para confirmar, introduza a palavra-passe de gestor:');
+    if (typedPassword === null) return;
+    if (!(await verifyAuthorizationPassword(typedPassword, settings))) {
+      await appConfirm('Palavra-passe incorreta. Nada foi apagado.');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -1047,10 +1063,14 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   };
 
   const handleNovoAno = async () => {
-    const conf = await appConfirm('Deseja iniciar um Novo Exercício Comercial? Isto redefinirá os livros de faturação enquanto preserva cadastros estruturais.');
+    const conf = await appConfirm(
+      'Deseja iniciar um Novo Exercício Comercial? A numeração de facturas, proformas, recibos e notas de crédito passa a usar a série do novo ano. O histórico do ano anterior NÃO é apagado: a legislação obriga a conservá-lo para inspecção.'
+    );
     if (!conf) return;
 
-    await dbService.clearSystemData();
+    // Nada é apagado. A numeração já é por ano (`FAC-2026-`, `FAC-2027-`, ...),
+    // por isso um novo exercício é apenas uma mudança de data. Antes esta
+    // função chamava clearSystemData() e destruía o livro de vendas.
 
     void dbService.addAuditLog({
       id: 'log-' + Date.now(),

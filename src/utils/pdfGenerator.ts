@@ -504,7 +504,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(100, 100, 100);
       doc.text(`Referente à Fatura Nº: ${invoice.invoiceNumber}`, 195, 29, { align: 'right' });
       doc.text(`Data de Emissão: ${new Date(invoice.date).toLocaleString('pt-MZ')}`, 195, 34, { align: 'right' });
-      doc.text(`Forma de Pagamento: ${(invoice.paymentMethod || 'Dinheiro').toUpperCase()}`, 195, 39, { align: 'right' });
+      doc.text(`Forma de Pagamento: ${(invoice.settledPaymentMethod || invoice.paymentMethod || 'Dinheiro').toUpperCase()}`, 195, 39, { align: 'right' });
 
     } else {
       // ── CONTINUATION PAGE HEADER ──
@@ -793,7 +793,12 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.text(`Movitel: ${phoneMovi}`, 40, y, { align: 'center' });
   y += 6;
 
-  // ── Banner Box: RECIBO DE PAGAMENTO POS ──
+  // ── Banner Box ──
+  // Um documento térmico só se chama "recibo de pagamento" se a venda estiver
+  // efectivamente paga (FT-70). Caso contrário é um comprovativo de venda, e
+  // dizê-lo evita que o cliente saia com prova de um pagamento que não houve.
+  const thermalIsSettled = Boolean(isFinancialSale(invoice) && invoice.status === 'Paga');
+  const thermalTitle = thermalIsSettled ? 'RECIBO DE PAGAMENTO POS' : 'COMPROVATIVO DE VENDA';
   doc.setFillColor(245, 245, 245);
   doc.rect(3, y, 74, 8, 'F');
   doc.setDrawColor(0, 0, 0);
@@ -801,7 +806,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.line(3, y, 77, y);
   doc.line(3, y + 8, 77, y + 8);
   doc.setFontSize(10);
-  doc.text('RECIBO DE PAGAMENTO POS', 40, y + 5.5, { align: 'center' });
+  doc.text(thermalTitle, 40, y + 5.5, { align: 'center' });
   y += 14;
 
   // ── Details (Left label, right value) ──
@@ -883,7 +888,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
 
   // TOTAL PAGO (Highlight)
   doc.setFontSize(11);
-  doc.text('TOTAL PAGO:', 4, y);
+  doc.text(thermalIsSettled ? 'TOTAL PAGO:' : 'TOTAL EM DÍVIDA:', 4, y);
   doc.text(`${fmtMT(invoice.total)} MT`, 76, y, { align: 'right' });
   y += 5.5;
 
@@ -894,7 +899,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
 
   // FORMA PAGAMENTO
   doc.text('FORMA PAGAMENTO:', 4, y);
-  doc.text((invoice.paymentMethod || 'DINHEIRO').toUpperCase(), 76, y, { align: 'right' });
+  doc.text((invoice.settledPaymentMethod || invoice.paymentMethod || 'DINHEIRO').toUpperCase(), 76, y, { align: 'right' });
   y += 5;
 
   // Additional Payment breakdown if any
@@ -1077,6 +1082,180 @@ function renderCompactInvoice(
 // ============================================================================
 // 5. RELATÓRIO DE VENDAS (PDF A4)
 // ============================================================================
+
+// ============================================================================
+// NOTA DE CRÉDITO (A4)
+// ============================================================================
+
+/**
+ * Nota de crédito de anulação total.
+ *
+ * A anulação de uma factura definitiva emitia um número `NC-AAAA-NNNN` que era
+ * guardado na venda e nunca chegava a existir em papel. Sem este documento, a
+ * empresa anulava facturas no sistema e mantinha-as válidas no dossier — o
+ * oposto do que uma inspecção fiscal aceita. Este gerador produz o documento
+ * que acompanha a anulação, com a referência cruzada à factura e ao recibo.
+ */
+export async function downloadCreditNoteA4(invoice: Sale, settings: SystemSettings) {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const co = getCompanyDefaults(settings);
+  const logoBase64 = await getLogoBase64(settings.logoUrl || '/logo.png');
+
+  const items = invoice.items || [];
+  const CHUNK = 16;
+  const pages: typeof items[] = [];
+  for (let i = 0; i < Math.max(items.length, 1); i += CHUNK) {
+    pages.push(items.slice(i, i + CHUNK));
+  }
+
+  const creditNoteNumber = invoice.creditNoteNumber || 'S/Nº';
+  const cancellationDate = invoice.cancelledAt ? new Date(invoice.cancelledAt) : new Date();
+  const ivaValue = invoice.includeIva
+    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    : 0;
+
+  pages.forEach((pageItems, pageIdx) => {
+    if (pageIdx > 0) doc.addPage();
+    const isFirst = pageIdx === 0;
+    const isLast = pageIdx === pages.length - 1;
+
+    // ── Cabeçalho ─────────────────────────────────────────────────────
+    if (logoBase64) {
+      try { doc.addImage(logoBase64, 'PNG', 15, 10, 45, 26); }
+      catch { try { doc.addImage(logoBase64, 'JPEG', 15, 10, 45, 26); } catch { /* sem logo */ } }
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(14, 98, 49);
+    doc.text(co.name, 195, 16, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(90, 90, 90);
+    doc.text(`NUIT: ${co.nuit}`, 195, 21, { align: 'right' });
+    doc.text(co.address, 195, 25, { align: 'right', maxWidth: 100 });
+    doc.text(`${co.email} • ${co.phone1}`, 195, 33, { align: 'right' });
+
+    // ── Caixa do título ───────────────────────────────────────────────
+    doc.setFillColor(190, 30, 45);
+    doc.rect(15, 40, 180, 12, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.text('NOTA DE CRÉDITO', 105, 48, { align: 'center' });
+
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(9);
+    doc.text(`Nº: ${creditNoteNumber}`, 15, 58);
+    doc.text(`Data de emissão: ${fmtDate(cancellationDate.toISOString())}`, 195, 58, { align: 'right' });
+
+    // ── Referências ───────────────────────────────────────────────────
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(0.2);
+    doc.rect(15, 61, 180, 20);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.text('DOCUMENTO RECTIFICADO', 18, 66);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Factura nº: ${invoice.invoiceNumber}`, 18, 71);
+    doc.text(`Data da factura: ${fmtDate(invoice.date)}`, 18, 76);
+    doc.text(`Cliente: ${invoice.customerName || 'Consumidor Final'}`, 108, 71);
+    doc.text(`NUIT: ${invoice.customerNuit || 'Consumidor Final'}`, 108, 76);
+    if (invoice.receiptNumber) {
+      doc.text(`Recibo liquidado: ${invoice.receiptNumber}`, 18, 79);
+    }
+
+    // ── Motivo ────────────────────────────────────────────────────────
+    doc.setFontSize(8);
+    doc.text(
+      `Motivo: anulação total da factura ${invoice.invoiceNumber}, emitida por ${invoice.operatorName || 'operador'} ` +
+      `no posto ${invoice.terminalId || 'não identificado'}. O valor de ${fmtMT(invoice.total)} MT é creditado ao cliente.`,
+      15,
+      88,
+      { maxWidth: 180 }
+    );
+
+    // ── Tabela de artigos ─────────────────────────────────────────────
+    const tableTop = 96;
+    doc.setFillColor(240, 240, 240);
+    doc.rect(15, tableTop, 180, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.text('ARTIGO / SERVIÇO', 17, tableTop + 5);
+    doc.text('QTD', 120, tableTop + 5, { align: 'right' });
+    doc.text('P. UNIT.', 145, tableTop + 5, { align: 'right' });
+    doc.text('TOTAL', 193, tableTop + 5, { align: 'right' });
+
+    let rowY = tableTop + 12;
+    doc.setFont('helvetica', 'normal');
+    if (pageItems.length === 0) {
+      doc.text('Sem linhas registadas nesta venda.', 17, rowY);
+      rowY += 6;
+    }
+    pageItems.forEach(item => {
+      const name = String(item.name || item.productId || '').substring(0, 62);
+      doc.text(name, 17, rowY, { maxWidth: 96 });
+      doc.text(String(item.quantity ?? ''), 120, rowY, { align: 'right' });
+      doc.text(fmtMT(Number(item.unitPrice) || 0), 145, rowY, { align: 'right' });
+      doc.text(fmtMT(Number(item.totalPrice) || 0), 193, rowY, { align: 'right' });
+      rowY += 5.5;
+    });
+
+    // ── Totais ────────────────────────────────────────────────────────
+    if (isLast) {
+      const totalsY = Math.max(rowY + 8, 200);
+      doc.setDrawColor(200, 200, 200);
+      doc.line(120, totalsY - 5, 195, totalsY - 5);
+      doc.setFontSize(8);
+      doc.text('Subtotal:', 120, totalsY);
+      doc.text(`${fmtMT(invoice.subtotal)} MT`, 195, totalsY, { align: 'right' });
+      doc.text('Desconto:', 120, totalsY + 5);
+      doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
+      if (invoice.includeIva) {
+        doc.text('IVA:', 120, totalsY + 10);
+        doc.text(`${fmtMT(ivaValue)} MT`, 195, totalsY + 10, { align: 'right' });
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.text('TOTAL CREDITADO:', 120, totalsY + 17);
+      doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 17, { align: 'right' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.text(
+        'Este documento anula, para todos os efeitos, a factura acima identificada. ' +
+        'O original deve ser arquivado junto desta nota de crédito.',
+        15,
+        totalsY + 28,
+        { maxWidth: 180 }
+      );
+
+      // Assinaturas
+      doc.setDrawColor(120, 120, 120);
+      const signY = totalsY + 48;
+      doc.line(20, signY, 85, signY);
+      doc.line(120, signY, 185, signY);
+      doc.text('O Responsável', 52.5, signY + 4, { align: 'center' });
+      doc.text('O Cliente', 152.5, signY + 4, { align: 'center' });
+    }
+
+    // ── Rodapé ────────────────────────────────────────────────────────
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text(
+      `${co.name} • NUIT ${co.nuit} • Processado por computador — AgroGestão ERP • Pág. ${pageIdx + 1}/${pages.length}`,
+      105,
+      288,
+      { align: 'center' }
+    );
+    if (!isFirst) {
+      doc.setFontSize(7.5);
+      doc.text(`NOTA DE CRÉDITO Nº ${creditNoteNumber} (continuação)`, 105, 12, { align: 'center' });
+    }
+  });
+
+  doc.save(`NOTA_CREDITO_${creditNoteNumber}_${invoice.invoiceNumber}.pdf`);
+}
 
 export async function downloadSalesReportPDF(
   sales: Sale[],
