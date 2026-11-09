@@ -59,8 +59,11 @@ ok('há colecções detetadas no código', nomesUsados.size > 5);
 // Se ficar desactualizada, publica-se meia fechadura — este teste evita isso.
 const ficheiroCola = 'REGRAS-FIRESTORE-PARA-COLAR.txt';
 if (existsSync(ficheiroCola)) {
+  // O ficheiro e uma copia PURA do firestore.rules: sem cabecalho, sem
+  // comentarios de bloco (as regras do Firestore so aceitam "//"). Um cabecalho
+  // aqui ja fez um utilizador colar texto invalido na consola.
   const cola = readFileSync(ficheiroCola, 'utf-8');
-  const semCabecalho = cola.replace(/^\s*\/\*[\s\S]*?\*\/\s*/, '').trim();
+  const semCabecalho = cola.trim();
   ok('a cópia para colar coincide com firestore.rules', semCabecalho === regrasCruas.trim());
   ok('a cópia para colar começa em rules_version', semCabecalho.startsWith("rules_version = '2';"));
   ok('a cópia para colar termina na chave final', semCabecalho.endsWith('}'));

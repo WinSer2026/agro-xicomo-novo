@@ -176,8 +176,15 @@
   PASSO 4 — Copiar as regras novas.
   ---------------------------------
   • Abra na pasta do sistema o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt
-  • Ctrl+A e Ctrl+C. (Tem um cabeçalho explicativo dentro de um comentário;
-    pode copiar tudo, o Firestore ignora comentários.)
+  • Confirme que a PRIMEIRA linha é     rules_version = '2';
+    e que o ficheiro tem 104 linhas, com a última linha a ser  }
+  • Ctrl+A e Ctrl+C.
+
+  ⚠ O ficheiro é cópia PURA das regras: não tem cabeçalho nem instruções.
+    Se o ficheiro aberto começar com "====", "PASSO A PASSO" ou "COMO
+    PUBLICAR", é o guia errado. As regras do Firestore só aceitam comentários
+    de uma linha (//); colar texto de guia produz erros como "Missing 'match'
+    keyword" e "token recognition error".
 
 
   PASSO 5 — Colar por cima das antigas.
@@ -242,8 +249,10 @@
   Causas mais frequentes de falha:
    1. login "Anónimo" desligado (verificar sempre primeiro);
    2. texto colado incompleto;
-   3. o separador usado não era "Segurança" (ou era outra base de dados);
-   4. regras ainda a propagar (esperar 2-3 minutos).
+   3. texto errado (o guia em vez das regras) -> erro de sintaxe na linha 3-27
+      com "Missing 'match' keyword" / "token recognition error";
+   4. o separador usado não era "Segurança" (ou era outra base de dados);
+   5. regras ainda a propagar (esperar 2-3 minutos).
 
 
 ══════════════════════════════════════════════════════════════════════════════

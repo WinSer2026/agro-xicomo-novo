@@ -42,11 +42,27 @@ PASSO 4 — Criar uma versão nova para editar
   serve — clone, e siga igual.
 
 
-PASSO 5 — Colocar o nosso texto
+PASSO 5 — Colocar o nosso texto  (ATENÇÃO: copie O FICHEIRO CERTO)
   a) Abra o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt  (na pasta do sistema).
-     Aperte Ctrl+A  e depois Ctrl+C.
-  b) Volte à consola. Clique dentro do editor de texto.
-     Aperte Ctrl+A  (apaga o que lá está) e depois Ctrl+V (cola o novo).
+     Tem de começar assim, na primeira linha:
+
+         rules_version = '2';
+
+     e tem 104 linhas. A última linha é só:  }
+     Se o ficheiro que abriu começa com "====" ou com "PASSO A PASSO" ou com
+     "COMO PUBLICAR", está no ficheiro ERRADO — esse é o guia, não as regras.
+
+  b) Aperte Ctrl+A e depois Ctrl+C.
+
+  c) Volte à consola. Clique dentro do editor de texto.
+     Aperte Ctrl+A (seleciona tudo o que lá está) e depois Delete/Backspace.
+     Confirme que a caixa ficou VAZIA.
+     Só então Ctrl+V.
+
+  d) Confirme, no texto colado:
+       primeira linha .... rules_version = '2';
+       última linha ...... }
+       existe a linha .... match /cash_sessions/{docId}
 
 
 PASSO 6 — Publicar
@@ -59,6 +75,14 @@ PASSO 7 — Ver se funcionou
   Aperte Ctrl+Shift+R (atualiza a página).
   Clique no botão do turno e abra um turno.
   Se abrir, está feito.
+
+
+ERRO "Missing 'match' keyword" OU "token recognition error"
+  Isto significa que foi colado o texto errado (o guia, não as regras).
+  Os guias têm setas, "&", "·", "==", endereços https — tudo isso é inválido
+  dentro das regras.
+  Solução: apague tudo (Ctrl+A, Delete) e cole só o conteúdo de
+  REGRAS-FIRESTORE-PARA-COLAR.txt, que começa em rules_version.
 
 
 SE ALGO CORRER MAL

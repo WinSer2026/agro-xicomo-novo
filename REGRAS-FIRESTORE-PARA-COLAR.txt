@@ -1,29 +1,3 @@
-/*
-================================================================================
-  COPIA DAS REGRAS DO FIRESTORE — PARA COLAR NA CONSOLA
-  AGRO - XICOMO & SERVICOS, LDA · gerado em 09/11/2026
-================================================================================
-
-  Este ficheiro e uma copia EXACTA de firestore.rules (a fonte de verdade).
-  Serve para copiar tudo (Ctrl+A, Ctrl+C) e colar no editor de Regras da
-  consola do Firebase.
-
-  Este cabecalho esta dentro de um comentario de bloco de proposito: as regras
-  do Firestore ignoram-no, por isso pode colar o ficheiro inteiro sem editar
-  nada. A parte executavel comeca em rules_version e termina na ultima chave.
-
-  Se alterar firestore.rules, este ficheiro tem de ser regenerado. Ha um teste
-  (test/rules_coverage_test.ts) que falha quando os dois deixam de coincidir.
---------------------------------------------------------------------------------
-  O QUE ESTA COPIA PROTEGE (21 coleccoes)
-  products, sales, losses, transformations, employees, attendance, customers,
-  paused_sales, active_cart, settings, counters, deletions, payroll_payments,
-  active_sessions, credentials, audit_logs, audit_logs_archive,
-  stock_movements, cash_movements, debts, cash_sessions
-  -- tudo o resto e NEGADO.
---------------------------------------------------------------------------------
-*/
-
 rules_version = '2';
 // ---------------------------------------------------------------------------
 // Regras do Firestore — AGRO-XICOMO
