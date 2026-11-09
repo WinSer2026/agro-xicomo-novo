@@ -5,6 +5,18 @@
 ════════════════════════════════════════════════════════════
 
 
+ANTES — se quiser tentar acabar na página onde está
+  Na captura, o painel do texto é mais largo do que a janela: há uma barra
+  de deslocamento em baixo. Isso significa que os botões de edição podem
+  estar fora do ecrã, à direita.
+  a) Aperte Ctrl e "-" duas vezes (a página fica mais pequena).
+  b) Maximize a janela do navegador.
+  c) Arraste a barra de baixo para a direita.
+  Se aparecer "Editar" (pencil) ou "Publicar", use: clique em Editar, cole o
+  texto, Publicar.
+  Se continuar sem botão de publicar, siga para o PASSO 1 abaixo.
+
+
 PASSO 1 — Abrir outra consola (a do Google Cloud)
   Cole este endereço no navegador:
 
