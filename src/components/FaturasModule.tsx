@@ -506,10 +506,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             }
           }
 
-          await dbService.cancelSaleWithStockRestoration(
+          const cancelResult = await dbService.cancelSaleWithStockRestoration(
             { ...sale, ...cancellationMeta, previousStatus: sale.status as Sale['previousStatus'] },
             restockItems
           );
+          // O que a base de dados recusou repor é a verdade final: pode ter
+          // sido vendido um produto que entretanto foi eliminado.
+          cancelResult.skipped.forEach(item => {
+            if (!missingProducts.includes(item.name)) missingProducts.push(item.name);
+          });
         } else {
           await dbService.addSale({
             ...sale,
@@ -885,7 +890,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     : 0;
 
   return (
-    <div className="space-y-6" id="faturas_module_container">
+    <div className="space-y-2.5" id="faturas_module_container">
       {/* Toast Notification Banner */}
       {toastMessage && (
         <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border transition-all animate-bounce ${
@@ -902,12 +907,14 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
       )}
 
-      {/* Module Title */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
-        <h2 className="text-xl font-black text-slate-800 flex items-center gap-2">
-          <span className="material-symbols-outlined text-emerald-600">receipt_long</span>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-black text-slate-800 flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-emerald-600 text-[18px]">receipt_long</span>
           Gestão de Facturas
         </h2>
+        <span className="text-[10px] font-bold text-slate-400">
+          {isLoadingSales ? 'A actualizar…' : `${sales.length} de ${activeQueryCount} factura(s)`}
+        </span>
       </div>
 
       {/* Date Range Filter */}
@@ -925,75 +932,69 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       />
 
       {/* Invoice Dashboard Header Summary cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">payments</span>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">payments</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Facturado</p>
-            <p className="text-lg font-black text-slate-800 truncate font-mono mt-0.5">
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Total Facturado</p>
+            <p className="text-[13px] font-black text-slate-800 truncate font-mono leading-tight">
               {totalInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">check_circle</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">check_circle</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Pago (Liquidado)</p>
-            <p className="text-lg font-black text-emerald-700 truncate font-mono mt-0.5">
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Total Pago (Liquidado)</p>
+            <p className="text-[13px] font-black text-emerald-700 truncate font-mono leading-tight">
               {paidInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">hourglass_empty</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">hourglass_empty</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Em dívida (Pendente + Crédito)</p>
-            <p className="text-lg font-black text-amber-700 truncate font-mono mt-0.5">
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Em dívida (Pendente + Crédito)</p>
+            <p className="text-[13px] font-black text-amber-700 truncate font-mono leading-tight">
               {debtInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-red-50 border border-red-100 flex items-center justify-center text-red-600 shrink-0">
-            <span className="material-symbols-outlined text-[22px]">cancel</span>
+        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-2 shadow-xs flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-red-50 border border-red-100 flex items-center justify-center text-red-600 shrink-0">
+            <span className="material-symbols-outlined text-[15px]">cancel</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Cancelado</p>
-            <p className="text-lg font-black text-red-700 truncate font-mono mt-0.5">
+            <p className="text-[8.5px] font-black uppercase text-slate-400 tracking-wide truncate">Cancelado</p>
+            <p className="text-[13px] font-black text-red-700 truncate font-mono leading-tight">
               {canceledInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
       </div>
 
-      {/* Se a agregação do servidor falhou, os cartões estão a somar só a
-          página carregada. Dizer isso é obrigatório: antes os números
-          apareciam com o mesmo ar de "totais do período" (FT-01). */}
+      {/* Totais só da página quando a agregação falha (FT-01). */}
       {!salesSummary && !isLoadingSales && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-[11px] font-semibold text-amber-900 flex items-start gap-2">
-          <span className="material-symbols-outlined text-[16px]">warning</span>
-          <span>
-            Os totais abaixo referem-se apenas às {sales.length} factura(s) carregadas nesta página — a soma do período
-            não está disponível (rede ou índice). Use «Carregar mais facturas» e confirme com a exportação antes de
-            fechar decisões de dinheiro.
-          </span>
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-900 flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-[13px]">warning</span>
+          <span>Totais só desta página — a soma do período não está disponível. Confirme pela exportação.</span>
         </div>
       )}
 
       {/* Main Filter and Invoice Grid Search area */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
-        <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
+      <div className="bg-white border border-slate-200 rounded-xl p-2.5 shadow-sm space-y-2">
+        <div className="flex flex-col lg:flex-row gap-2 items-center justify-between">
           {/* Quick filter status tabs */}
-          <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold w-full lg:w-auto custom-scrollbar">
+          <div className="flex gap-1 overflow-x-auto text-[10.5px] font-bold w-full lg:w-auto custom-scrollbar">
             {(['Todas', 'Pendente', 'Crédito', 'Paga', 'Proforma', 'Cancelada'] as const).map(tab => {
               const count = tab === 'Todas'
                 ? periodSummary.totalCount
@@ -1011,7 +1012,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   key={tab}
                   type="button"
                   onClick={() => setFaturasFilter(tab)}
-                  className={`px-3 py-1.5 rounded-lg border transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md border transition-colors whitespace-nowrap cursor-pointer ${
                     faturasFilter === tab
                       ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
                       : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
@@ -1024,19 +1025,19 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           </div>
 
           {/* Search bar inputs */}
-          <div className="relative w-full lg:max-w-md">
-            <span className="material-symbols-outlined absolute left-3 top-2.5 text-slate-400 text-[20px]">search</span>
+          <div className="relative w-full lg:max-w-xs">
+            <span className="material-symbols-outlined absolute left-2 top-2 text-slate-400 text-[15px]">search</span>
             <input
               type="text"
               placeholder="Pesquise por Número de Factura ou Nome do Cliente..."
               value={faturasSearch}
               onChange={(e) => setFaturasSearch(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-slate-800"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-[11px] focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-slate-800"
             />
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[9.5px] text-slate-500">
           <span>
             {isLoadingSales
               ? 'A atualizar facturas…'
@@ -1050,17 +1051,17 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         </div>
 
         {/* Detailed Scrollable Invoices Table/Grid */}
-        <div className="overflow-x-auto border border-slate-150 rounded-xl">
-          <table className="w-full text-left border-collapse text-[10.5px]">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-150 text-slate-500 uppercase text-[9px] font-black tracking-wider">
-                <th className="p-2">Nº Factura</th>
-                <th className="p-2">Cliente</th>
-                <th className="p-2">Data de Emissão</th>
-                <th className="p-2">Meio de Pagamento</th>
-                <th className="p-2 text-right">Valor Total</th>
-                <th className="p-2 text-center">Estado</th>
-                <th className="p-2 text-right">Acções Operacionais</th>
+        <div className="overflow-auto max-h-[46vh] border border-slate-150 rounded-lg">
+          <table className="w-full text-left border-collapse text-[10px]">
+            <thead className="sticky top-0 z-10 bg-slate-50">
+              <tr className="bg-slate-50 border-b border-slate-150 text-slate-500 uppercase text-[8.5px] font-black tracking-wider">
+                <th className="px-1.5 py-1">Nº Factura</th>
+                <th className="px-1.5 py-1">Cliente</th>
+                <th className="px-1.5 py-1">Data de Emissão</th>
+                <th className="px-1.5 py-1">Meio de Pagamento</th>
+                <th className="px-1.5 py-1 text-right">Valor Total</th>
+                <th className="px-1.5 py-1 text-center">Estado</th>
+                <th className="px-1.5 py-1 text-right">Acções Operacionais</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-150 bg-white">
@@ -1075,33 +1076,33 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   return (
                     <tr key={sale.id || sale.invoiceNumber || `linha-${rowIdx}`} className="hover:bg-slate-50/50 transition-colors">
                       {/* Invoice Number */}
-                      <td className="p-2 font-mono font-black text-slate-700 text-[10.5px]">{sale.invoiceNumber}</td>
+                      <td className="px-1.5 py-1 font-mono font-black text-slate-700 text-[10px]">{sale.invoiceNumber}</td>
                       
                       {/* Customer Name */}
-                      <td className="p-2">
+                      <td className="px-1.5 py-1">
                         <p className="font-bold text-slate-800 text-[10.5px]">{sale.customerName}</p>
                         <p className="text-[9.5px] text-slate-400">Op: {sale.operatorName}</p>
                       </td>
 
                       {/* Date */}
-                      <td className="p-2 text-slate-500 text-[10px]">
+                      <td className="px-1.5 py-1 text-slate-500 text-[9.5px] whitespace-nowrap">
                         {new Date(sale.date).toLocaleDateString('pt-MZ', { day: '2-digit', month: '2-digit', year: 'numeric' })} • {new Date(sale.date).toLocaleTimeString('pt-MZ', { hour: '2-digit', minute: '2-digit' })}
                       </td>
 
                       {/* Payment Method */}
-                      <td className="p-2">
+                      <td className="px-1.5 py-1">
                         <span className="font-semibold text-slate-600 bg-slate-100 border border-slate-150 px-1.5 py-0.5 rounded text-[9.5px]">
                           {sale.paymentMethod}
                         </span>
                       </td>
 
                       {/* Total Price */}
-                      <td className="p-2 text-right font-black text-slate-900 font-mono text-[11px]">
+                      <td className="px-1.5 py-1 text-right font-black text-slate-900 font-mono text-[10.5px] whitespace-nowrap">
                         {sale.total.toLocaleString('pt-MZ')} MT
                       </td>
 
                       {/* Status Badges */}
-                      <td className="p-2 text-center">
+                      <td className="px-1.5 py-1 text-center">
                         <span className={`text-[8.5px] font-black uppercase px-2 py-0.5 rounded-full border ${
                           sale.status === 'Paga'
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-150'
@@ -1130,7 +1131,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       </td>
 
                       {/* Operations */}
-                      <td className="p-2 text-right">
+                      <td className="px-1.5 py-1 text-right">
                         <div className="flex justify-end gap-1 flex-wrap">
                           {/* Liquidar: só dívida real, nunca proforma ou anulada */}
                           {isDebtSale(sale) && !isCancelledSale(sale) && (
@@ -1264,16 +1265,16 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           </table>
         </div>
 
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
-          <p className="text-[10px] text-slate-400 text-center sm:text-left">
-            A lista é carregada por páginas de 30 facturas. Os totais e contagens acima referem-se ao período completo.
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+          <p className="text-[9px] text-slate-400">
+            30 facturas por página · totais do período completo
           </p>
           {hasMoreSales && (
             <button
               type="button"
               onClick={() => void loadMoreSales()}
               disabled={isLoadingSales}
-              className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-wait border border-emerald-200 text-emerald-800 rounded-lg text-xs font-black transition-colors"
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-wait border border-emerald-200 text-emerald-800 rounded-lg text-[10px] font-black transition-colors"
             >
               <span className={`material-symbols-outlined text-[16px] ${isLoadingSales ? 'animate-spin' : ''}`}>expand_more</span>
               {isLoadingSales ? 'A carregar…' : 'Carregar mais facturas'}
@@ -1804,10 +1805,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <table className="w-full text-left text-[9px] mb-4">
                         <thead>
                           <tr className="bg-slate-800 text-white font-bold">
-                            <th className="p-2">Item</th>
-                            <th className="p-2 text-right">Qtd</th>
-                            <th className="p-2 text-right">P. Unitário</th>
-                            <th className="p-2 text-right">Total</th>
+                            <th className="px-1.5 py-1">Item</th>
+                            <th className="px-1.5 py-1 text-right">Qtd</th>
+                            <th className="px-1.5 py-1 text-right">P. Unitário</th>
+                            <th className="px-1.5 py-1 text-right">Total</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -1875,10 +1876,10 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <table className="w-full text-left text-[9px] mb-4">
                         <thead>
                           <tr className="bg-slate-800 text-white font-bold">
-                            <th className="p-2">Item</th>
-                            <th className="p-2 text-right">Qtd</th>
-                            <th className="p-2 text-right">P. Unitário</th>
-                            <th className="p-2 text-right">Total</th>
+                            <th className="px-1.5 py-1">Item</th>
+                            <th className="px-1.5 py-1 text-right">Qtd</th>
+                            <th className="px-1.5 py-1 text-right">P. Unitário</th>
+                            <th className="px-1.5 py-1 text-right">Total</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">

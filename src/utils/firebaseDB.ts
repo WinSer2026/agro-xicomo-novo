@@ -1169,53 +1169,114 @@ export class FirebaseDBService {
     );
   }
 
-  public async cancelSaleWithStockRestoration(sale: Sale, restockItems: any[]): Promise<void> {
+  /**
+   * Anulação de venda com devolução de stock.
+   *
+   * Vulnerabilidades que esta versão fecha:
+   *  1. **Duplicação**: não havia verificação de estado. Chamar a rotina duas
+   *     vezes devolvia o stock duas vezes (o utilizador ficava com produto a
+   *     mais e a venda anulada uma só vez). Agora a venda é lida dentro da
+   *     transacção e uma venda já anulada é recusada.
+   *  2. **Produtos fantasmas**: `batch.set(..., {merge:true})` com `increment`
+   *     num produto eliminado **criava** um documento com stock e sem nome.
+   *     Agora só se repõe o que ainda existe, e o que não existe é devolvido
+   *     ao chamador para ser mostrado ao operador.
+   *  3. **Sem limite**: uma anulação com centenas de linhas distintas excedia
+   *     o limite de escritas de uma transacção. Passa a ser recusada cedo.
+   */
+  public async cancelSaleWithStockRestoration(
+    sale: Sale,
+    restockItems: any[]
+  ): Promise<{ restored: number; skipped: Array<{ productId: string; name: string }> }> {
     await this.ensureAuth();
-    const saleId = String(sale.id || sale.invoiceNumber || Date.now());
-    const batch = writeBatch(db);
-    // 1. Restock products atomically
-    for (const item of restockItems) {
-      if (!item || !item.productId) continue;
-      const docRef = doc(db, "products", String(item.productId));
-      if (item.hasConversion) {
-        if (item.sellingUnit === "Bulk") {
-          batch.set(docRef, { 
-            stockQtyBulk: increment(Number(item.qtyToAdd || 0)), 
-            stockQty: increment(Number(item.equivalentBaseQty || 0)) 
-          }, { merge: true });
-        } else {
-          batch.set(docRef, { 
-            stockQtyRetail: increment(Number(item.qtyToAdd || 0)), 
-            stockQty: increment(Number(item.qtyToAdd || 0)) 
-          }, { merge: true });
-        }
-      } else {
-        batch.set(docRef, { stockQty: increment(Number(item.qtyToAdd || 0)) }, { merge: true });
-      }
-    }
-    // 2. Update sale status to 'Cancelada' atomically
-    const sanitizedSale = this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' });
-    batch.set(doc(db, 'sales', saleId), sanitizedSale, { merge: true });
 
-    await batch.commit();
+    const validos = (restockItems || []).filter(item => item && item.productId && Number(item.qtyToAdd) > 0);
+    if (validos.length > 200) {
+      throw new Error(
+        `Anulação com ${validos.length} linhas de stock excede o limite de uma operação atómica (200). Divida a operação.`
+      );
+    }
+
+    const saleId = String(sale.id || sale.invoiceNumber || Date.now());
+    const saleRef = doc(db, 'sales', saleId);
+    const sanitizedSale = this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' });
+
+    const skipped: Array<{ productId: string; name: string }> = [];
+    let restored = 0;
+
+    // Uma escrita por produto, para caber folgado no limite da transacção.
+    const porProduto = new Map<string, { bulk: number; retail: number; base: number; name: string }>();
+    for (const item of validos) {
+      const id = String(item.productId);
+      const entry = porProduto.get(id) || { bulk: 0, retail: 0, base: 0, name: item.productName || id };
+      const qty = Number(item.qtyToAdd) || 0;
+      if (item.hasConversion && item.sellingUnit === 'Bulk') {
+        entry.bulk += qty;
+        entry.base += Number(item.equivalentBaseQty) || qty;
+      } else if (item.hasConversion) {
+        entry.retail += qty;
+        entry.base += qty;
+      } else {
+        entry.base += qty;
+      }
+      porProduto.set(id, entry);
+    }
+
+    await runTransaction(db, async transaction => {
+      const saleSnapshot = await transaction.get(saleRef);
+      if (saleSnapshot.exists()) {
+        const estado = String((saleSnapshot.data() as Sale).status || '');
+        if (estado === 'Cancelada' || estado === 'canceled') {
+          throw new Error('Esta venda já está anulada. O stock não volta a ser reposto.');
+        }
+      }
+
+      const produtos = new Map<string, any>();
+      for (const id of porProduto.keys()) {
+        produtos.set(id, await transaction.get(doc(db, 'products', id)));
+      }
+
+      for (const [id, entry] of porProduto.entries()) {
+        const snap = produtos.get(id);
+        if (!snap || !snap.exists()) {
+          skipped.push({ productId: id, name: entry.name });
+          continue;
+        }
+        const updates: Record<string, unknown> = {};
+        if (entry.bulk > 0) updates.stockQtyBulk = increment(entry.bulk);
+        if (entry.retail > 0) updates.stockQtyRetail = increment(entry.retail);
+        if (entry.base > 0) updates.stockQty = increment(entry.base);
+        if (Object.keys(updates).length > 0) {
+          transaction.set(doc(db, 'products', id), updates, { merge: true });
+          restored += 1;
+        }
+      }
+
+      transaction.set(saleRef, sanitizedSale, { merge: true });
+    });
+
     this.productsCache = null;
     this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
 
     await this.recordStockMovements(
-      restockItems.map(item => ({
-        id: `mov-estorno-${saleId}-${item.productId}-${Date.now()}`,
-        date: new Date().toISOString(),
-        productId: String(item.productId),
-        productName: String(item.productName || item.productId),
-        type: 'Estorno' as const,
-        qtyDelta: Math.abs(Number(item.equivalentBaseQty || item.qtyToAdd) || 0),
-        unit: String(item.unit || 'un'),
-        reference: String(sale.creditNoteNumber || sanitizedSale.invoiceNumber || saleId),
-        operatorName: sanitizedSale.operatorName
-      }))
+      validos
+        .filter(item => !skipped.some(s => s.productId === String(item.productId)))
+        .map(item => ({
+          id: `mov-estorno-${saleId}-${item.productId}-${Date.now()}`,
+          date: new Date().toISOString(),
+          productId: String(item.productId),
+          productName: String(item.productName || item.productId),
+          type: 'Estorno' as const,
+          qtyDelta: Math.abs(Number(item.equivalentBaseQty || item.qtyToAdd) || 0),
+          unit: String(item.unit || 'un'),
+          reference: String(sale.creditNoteNumber || sanitizedSale.invoiceNumber || saleId),
+          operatorName: sanitizedSale.operatorName
+        }))
     );
+
+    return { restored, skipped };
   }
 
   // --- Losses ---
