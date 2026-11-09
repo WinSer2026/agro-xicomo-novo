@@ -5,14 +5,14 @@ import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { isFinancialSale, isDebtSale, isCancelledSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
 import { cashBalance, sumRefunds } from '../utils/cashBox';
-import { splitSalesForReport } from '../utils/reporting';
+import { splitSalesForReport, periodDayRange, stockBeforePeriod, buildProductPerformance, formatMT, type ReportPeriod } from '../utils/reporting';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { REPORT_CATEGORIES, matchCategory } from '../utils/categoryHelper';
 
 export default function FinanceModule() {
@@ -123,8 +123,12 @@ export default function FinanceModule() {
     }, 0);
   }, 0);
 
-  const totalProfit = Math.max(0, totalGrossSales - totalCost);
-  const netCommercialMargin = Math.max(0, totalGrossSales - totalCost - totalLossesVal - totalPayrollVal);
+  /**
+   * Lucro e margem assinados. Com `Math.max(0, …)` um mês de prejuízo aparecia
+   * como "0 MT de lucro" — indistinguível de um mês sem vendas.
+   */
+  const totalProfit = totalGrossSales - totalCost;
+  const netCommercialMargin = totalGrossSales - totalCost - totalLossesVal - totalPayrollVal;
   const stockAlerts = products.filter(p => p.stockQty <= 10);
   const avgTicket = filteredSales.length > 0 ? (totalGrossSales / filteredSales.length) : 0;
   const pendingSyncCount = filteredSales.filter(s => !s.synced).length;
@@ -145,21 +149,17 @@ export default function FinanceModule() {
   ];
 
   // Helper to filter sales for POS Periodic Reports
-  const getFilteredSalesForReport = (period: 'Diário' | 'Semanal' | 'Mensal' | 'Trimestral' | 'Semestral' | 'Anual') => {
-    const now = new Date();
-    return sales.filter(s => {
-      const sDate = new Date(s.date);
-      const diffTime = Math.abs(now.getTime() - sDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
-      if (period === 'Diário') return diffDays <= 1;
-      if (period === 'Semanal') return diffDays <= 7;
-      if (period === 'Mensal') return diffDays <= 30;
-      if (period === 'Trimestral') return diffDays <= 90;
-      if (period === 'Semestral') return diffDays <= 180;
-      if (period === 'Anual') return diffDays <= 365;
-      return true;
-    });
+  /**
+   * Vendas do período de relatório.
+   *
+   * Antes: `Math.abs(agora − data)` em dias. Isso incluía vendas datadas no
+   * futuro, tratava "Diário" como "últimas 24 horas" e cortava em UTC (uma venda
+   * das 23:00 em Maputo caía no dia seguinte). Agora são dias de calendário
+   * locais: hoje é hoje, e o que está no futuro não entra.
+   */
+  const getFilteredSalesForReport = (period: ReportPeriod) => {
+    const { startDay, endDay } = periodDayRange(period);
+    return sales.filter(s => isDateInRange(s.date, startDay, endDay, s.dateKey ? toLocalDateKey(s.dateKey) : undefined));
   };
 
   /**
@@ -173,18 +173,52 @@ export default function FinanceModule() {
   const reportCancelledCount = reportSplit.totals.cancelledCount;
   const reportProformaValue = reportSplit.totals.proforma;
   const reportProformaCount = reportSplit.totals.proformaCount;
-  const reportGrossSales = reportSales.reduce((acc, s) => acc + s.total, 0);
+  const reportGrossSales = reportSales.reduce((acc, s) => acc + (Number(s.total) || 0), 0);
+  /**
+   * Descontos concedidos: sem esta linha, a soma do "Faturado" por produto não
+   * bate certo com a "Faturação Bruta" do cabeçalho e parece haver dinheiro a
+   * faltar. Os valores por produto são brutos; o total é líquido de desconto.
+   */
+  const reportDiscounts = reportSales.reduce((acc, s) => acc + (Number(s.discount) || 0), 0);
+  /**
+   * Custo das vendas do período.
+   *
+   * Antes, quando o produto já não existia no catálogo, o custo era
+   * `preço × 0,6` — ou seja, o sistema **inventava 40% de margem** e apresentava
+   * esse número como lucro. Agora, sem custo conhecido, assume-se custo igual ao
+   * valor faturado (margem zero) e o total é declarado no documento. Nunca se
+   * inflaciona o lucro com um número inventado.
+   */
+  let reportUnknownCostValue = 0;
   const reportCost = reportSales.reduce((acc, sale) => {
-    return acc + sale.items.reduce((sum, item) => {
-      const prod = products.find(p => p.id === item.productId);
-      const buyPrice = prod ? getUnitCost(prod, item.sellingUnit) : (item.unitPrice * 0.6);
+    return acc + (sale.items || []).reduce((sum, item) => {
+      const prod = products.find(p => String(p.id) === String(item.productId));
+      const valorLinha = (Number(item.unitPrice) || 0) * (Number(item.quantity) || 0);
+      if (!prod) {
+        reportUnknownCostValue += valorLinha;
+        return sum + valorLinha;
+      }
+      const buyPrice = getUnitCost(prod, item.sellingUnit);
       const baseQty = getBaseUnitQuantity(prod, item.quantity, item.sellingUnit);
       return sum + (buyPrice * baseQty);
     }, 0);
   }, 0);
-  const reportProfit = Math.max(0, reportGrossSales - reportCost);
+  // Um prejuízo é um prejuízo: forçar zero escondia o problema do proprietário.
+  const reportProfit = reportGrossSales - reportCost;
   const reportTransCount = reportSales.length;
   const reportMargin = reportGrossSales > 0 ? ((reportProfit / reportGrossSales) * 100) : 0;
+
+  /**
+   * Uma só tabela por produto, usada no PDF e no Excel. Antes cada documento
+   * fazia a sua conta: o PDF somava `item.quantity` sem converter a unidade e o
+   * Excel convertia para unidade base — o mesmo saco aparecia como 1 no PDF e
+   * como 50 kg no Excel.
+   */
+  const productPerformance = buildProductPerformance(products, reportSales, {
+    qtyOf: (_sale, item, product) => getBaseUnitQuantity(product, item.quantity, item.sellingUnit),
+    lineTotal: (_sale, item) => (Number(item.unitPrice) || 0) * (Number(item.quantity) || 0),
+    lineCost: (_sale, item, product) => getUnitCost(product, item.sellingUnit) * getBaseUnitQuantity(product, item.quantity, item.sellingUnit)
+  });
 
   const handleCompileReport = () => {
     setCompiledPeriod(reportPeriod);
@@ -201,6 +235,7 @@ export default function FinanceModule() {
       { Métrica: 'Lucro Estimado', Valor: `${reportProfit.toLocaleString('pt-MZ')} MT` },
       { Métrica: 'Total de Transações', Valor: reportTransCount },
       { Métrica: 'Margem Operacional', Valor: `${reportMargin.toFixed(1)}%` },
+      { Métrica: 'Descontos concedidos no período', Valor: `${reportDiscounts.toLocaleString('pt-MZ')} MT` },
       { Métrica: 'Cancelado no período (não soma)', Valor: `${reportCancelledValue.toLocaleString('pt-MZ')} MT em ${reportCancelledCount} documento(s)` },
       { Métrica: 'Proformas no período (não soma)', Valor: `${reportProformaValue.toLocaleString('pt-MZ')} MT em ${reportProformaCount} documento(s)` },
       { Métrica: 'Data de Emissão', Valor: new Date().toLocaleString('pt-MZ') }
@@ -209,20 +244,19 @@ export default function FinanceModule() {
     XLSX.utils.book_append_sheet(workbook, wsSummary, 'Resumo Executivo');
 
     // Sheet 2: Product Performance
-    const productData = products.map(p => {
-      const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
-        return sum + (item ? getBaseUnitQuantity(p, item.quantity, item.sellingUnit) : 0);
-      }, 0);
+    const productData = productPerformance.map(linha => {
+      const p = products.find(prod => String(prod.id) === linha.productId);
       return {
-        'Produto/Serviço': p.name,
-        'Categoria': p.category,
-        'Stock Atual': p.stockQty,
-        'Preço Compra': p.buyingPrice,
-        'Preço Venda': p.sellingPrice,
-        'Quantidade Vendida': soldQty,
-        'Total Faturado (MT)': soldQty * p.sellingPrice,
-        'Lucro Estimado (MT)': soldQty * (p.sellingPrice - p.buyingPrice)
+        'Produto/Serviço': linha.name,
+        'Categoria': linha.category,
+        'Stock Atual': p?.stockQty ?? '',
+        'Stock Início do Período': linha.stockBeforeComplete ? linha.stockBefore : 'indeterminado',
+        'Preço Compra': p?.buyingPrice ?? '',
+        'Preço Venda': p?.sellingPrice ?? '',
+        'Quantidade Vendida (base)': linha.soldQty,
+        'Total Faturado (MT)': Number(linha.invoiced.toFixed(2)),
+        'Custo (MT)': Number(linha.cost.toFixed(2)),
+        'Lucro Estimado (MT)': Number(linha.profit.toFixed(2))
       };
     });
     const wsProducts = XLSX.utils.json_to_sheet(productData);
@@ -360,11 +394,13 @@ export default function FinanceModule() {
     doc.text('TRANSAÇÕES', 115, 43);
     doc.text('MARGEM OPERACIONAL', 155, 43);
 
-    doc.setFontSize(11);
+    doc.setFontSize(10);
     doc.setTextColor(0, 106, 78);
-    doc.text(`${reportGrossSales.toLocaleString('pt-MZ')} MT`, 20, 51);
-    doc.setTextColor(30, 58, 138);
-    doc.text(`${reportProfit.toLocaleString('pt-MZ')} MT`, 65, 51);
+    doc.text(formatMT(reportGrossSales), 20, 51);
+    // Prejuízo é declarado a vermelho — antes era forçado a zero e desaparecia.
+    if (reportProfit < 0) doc.setTextColor(190, 18, 60);
+    else doc.setTextColor(30, 58, 138);
+    doc.text(formatMT(reportProfit), 65, 51);
     doc.setTextColor(51, 65, 85);
     doc.text(`${reportTransCount} Vendas`, 115, 51);
     doc.setTextColor(180, 83, 9);
@@ -385,15 +421,29 @@ export default function FinanceModule() {
       15,
       64
     );
+    if (reportUnknownCostValue > 0) {
+      doc.setTextColor(180, 83, 9);
+      doc.text(
+        `Artigos já inexistentes no catálogo: ${formatMT(reportUnknownCostValue)} faturados sem custo conhecido — lucro assumido como zero nessas linhas.`,
+        15,
+        68
+      );
+    }
+    doc.setTextColor(71, 85, 105);
+    doc.text(
+      `Descontos concedidos no período: ${formatMT(reportDiscounts)} — os valores por produto abaixo são brutos; o total acima é líquido de desconto.`,
+      15,
+      72
+    );
     doc.setTextColor(51, 65, 85);
 
     // Table: Product Performance
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
     doc.setTextColor(0, 106, 78);
-    doc.text('DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO', 15, 70);
+    doc.text('DESEMPENHO DE VENDAS POR PRODUTO / SERVIÇO', 15, 80);
 
-    let currentY = 75;
+    let currentY = 85;
     doc.saveGraphicsState();
     doc.setFillColor(0, 106, 78);
     doc.rect(15, currentY, 180, 7, 'F');
@@ -416,14 +466,12 @@ export default function FinanceModule() {
     doc.setFontSize(7.5);
     doc.setTextColor(51, 65, 85);
 
-    products.forEach((p, idx) => {
-      const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
-        return sum + (item ? item.quantity : 0);
-      }, 0);
-      const stockAnterior = p.stockQty + soldQty;
-      const faturado = soldQty * p.sellingPrice;
-      const lucro = soldQty * (p.sellingPrice - p.buyingPrice);
+    productPerformance.forEach((linha, idx) => {
+      const p = products.find(prod => String(prod.id) === linha.productId)!;
+      const soldQty = linha.soldQty;
+      const stockAnterior = linha.stockBeforeComplete ? linha.stockBefore : null;
+      const faturado = linha.invoiced;
+      const lucro = linha.profit;
 
       if (currentY > 265) {
         doc.addPage();
@@ -459,7 +507,7 @@ export default function FinanceModule() {
 
       doc.text((idx + 1).toString(), 17, currentY + 4);
       doc.text(p.name.length > 32 ? p.name.substring(0, 30) + '...' : p.name, 23, currentY + 4);
-      doc.text(`${stockAnterior} ${p.baseUnit}`, 88, currentY + 4, { align: 'right' });
+      doc.text(stockAnterior === null ? 'n/d' : `${stockAnterior} ${p.baseUnit}`, 88, currentY + 4, { align: 'right' });
       doc.text(`${p.buyingPrice.toLocaleString('pt-MZ')} MT`, 108, currentY + 4, { align: 'right' });
       doc.text(`${p.sellingPrice.toLocaleString('pt-MZ')} MT`, 128, currentY + 4, { align: 'right' });
       doc.text(`${soldQty} ${p.baseUnit}`, 148, currentY + 4, { align: 'right' });
@@ -1352,7 +1400,9 @@ export default function FinanceModule() {
               </div>
               <div className="space-y-1">
                 <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Margem Lucro Est.</span>
-                <p className="text-2xl font-black text-slate-800 font-mono">{(totalProfit || 0).toLocaleString('pt-MZ')} MT</p>
+                <p className={`text-2xl font-black font-mono ${totalProfit < 0 ? 'text-rose-700' : 'text-slate-800'}`}>
+                  {(totalProfit || 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                </p>
                 <div className="text-[10px] text-gray-400 font-medium">Margem operacional aprox. 35%</div>
               </div>
             </div>
@@ -1416,17 +1466,21 @@ export default function FinanceModule() {
                       { name: 'Dom', amount: 0 }
                     ];
                     
+                    // Os dias são de calendário de Maputo, não do relógio do
+                    // dispositivo: um terminal com o fuso trocado somava vendas
+                    // no dia errado (e uma venda das 23:00 caía no dia seguinte).
+                    const hojeKey = toLocalDateKey(new Date().toISOString());
+                    const baseDia = new Date(`${hojeKey}T12:00:00.000Z`);
+
                     for (let i = 0; i < 7; i++) {
-                      const d = new Date();
-                      d.setDate(d.getDate() - i);
-                      const dayName = days[d.getDay()];
-                      
+                      const d = new Date(baseDia);
+                      d.setUTCDate(d.getUTCDate() - i);
+                      const diaKey = d.toISOString().slice(0, 10);
+                      const dayName = days[d.getUTCDay()];
+
                       const daySales = sales.filter(s => {
                         if (!isFinancialSale(s)) return false;
-                        const saleDate = new Date(s.date);
-                        return saleDate.getDate() === d.getDate() &&
-                               saleDate.getMonth() === d.getMonth() &&
-                               saleDate.getFullYear() === d.getFullYear();
+                        return toLocalDateKey(s.date) === diaKey;
                       });
                       const total = daySales.reduce((sum, s) => sum + s.total, 0);
                       
@@ -1784,9 +1838,12 @@ export default function FinanceModule() {
                 <p className="text-xl font-mono font-black text-slate-800 mt-1">{(reportGrossSales || 0).toLocaleString('pt-MZ')} MT</p>
               </div>
 
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+              <div className={`p-4 rounded-xl border ${reportProfit < 0 ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'}`}>
                 <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Lucro Estimado</span>
-                <p className="text-xl font-mono font-black text-emerald-700 mt-1">{(reportProfit || 0).toLocaleString('pt-MZ')} MT</p>
+                <p className={`text-xl font-mono font-black mt-1 ${reportProfit < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{(reportProfit || 0).toLocaleString('pt-MZ')} MT</p>
+                {reportProfit < 0 && (
+                  <p className="text-[9px] text-rose-600 font-bold">Prejuízo no período — não foi arredondado para zero.</p>
+                )}
               </div>
 
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">

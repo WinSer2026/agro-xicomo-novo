@@ -1224,7 +1224,9 @@ export class FirebaseDBService {
 
     const saleId = String(sale.id || sale.invoiceNumber || Date.now());
     const saleRef = doc(db, 'sales', saleId);
-    const sanitizedSale = this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada' });
+    // Marca explícita: sem isto, os relatórios não conseguem distinguir uma
+    // anulação clássica (stock voltou) de um corte de inventário (stock saiu).
+    const sanitizedSale = this.sanitizeData({ ...sale, id: saleId, status: 'Cancelada', stockReturned: true });
 
     const skipped: Array<{ productId: string; name: string }> = [];
     let restored = 0;
@@ -1403,6 +1405,9 @@ export class FirebaseDBService {
           const atualizada: Sale = {
             ...atual,
             status: 'Cancelada',
+            // Com estorno o stock voltou; sem estorno a saída aconteceu mesmo
+            // (a contagem física já a tinha em conta).
+            stockReturned: input.applyStock,
             cancelledAt: new Date().toISOString(),
             cancelledBy: input.username,
             previousStatus: atual.status as Sale['previousStatus'],

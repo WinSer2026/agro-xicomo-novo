@@ -82,6 +82,14 @@ export interface Sale {
   previousStatus?: 'Paga' | 'Pendente' | 'Crédito';
   /** Número da nota de crédito emitida aquando da anulação (E-06). */
   creditNoteNumber?: string;
+  /**
+   * O stock foi devolvido ao anular?
+   * `true`  — anulação clássica, a mercadoria volta ao inventário.
+   * `false` — corte de inventário: a contagem física já foi lançada e o produto
+   *           já não estava lá; devolver inflacionaria o saldo.
+   * Ausente — vendas antigas, tratadas como devolvidas.
+   */
+  stockReturned?: boolean;
   /** Momento da anulação, para rasto documental. */
   cancelledAt?: string;
   /** Quem autorizou a anulação (utilizador que introduziu a palavra-passe). */
