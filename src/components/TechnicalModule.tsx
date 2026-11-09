@@ -8,6 +8,7 @@ import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
 import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
+import { isAuthorizationConfigured, prepareAuthorizationPassword } from '../utils/authorization';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, formatDatePT } from '../utils/dateRangeHelper';
 import { hashPassword, validateAccessPassword, decidePasswordUpdate } from '../utils/securityHelper';
@@ -60,6 +61,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   // Editing Settings
   const [compName, setCompName] = useState('');
   const [stockCode, setStockCode] = useState('');
+  // O código de gestor já está definido na base? O campo aparece vazio por
+  // segurança (nunca mostramos hash nem texto), e vazio = "manter o actual".
+  const [stockCodeConfigured, setStockCodeConfigured] = useState(false);
   const [logoUrl, setLogoUrl] = useState('');
   const [banco, setBanco] = useState('');
   const [conta, setConta] = useState('');
@@ -171,7 +175,8 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setActiveSessions(activeSess);
 
       setCompName(config.companyName);
-      setStockCode(config.stockPasswordHash);
+      setStockCode('');
+      setStockCodeConfigured(isAuthorizationConfigured(config));
       setLogoUrl(config.logoUrl || '');
       setBanco((config as any).banco || 'First Capital Bank, S.A.');
       setConta((config as any).numero_conta || '99466610001');
@@ -571,8 +576,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     e.preventDefault();
     if (isSubmitting) return;
 
-    if (!compName || !stockCode) {
-      showToast('Por favor, preencha o nome da empresa e o código de stock.', 'error');
+    if (!compName) {
+      showToast('Por favor, preencha o nome da empresa.', 'error');
+      return;
+    }
+    if (!stockCode && !stockCodeConfigured) {
+      showToast('Defina o código do gestor: sem ele, as alterações de stock e as anulações ficam bloqueadas.', 'error');
       return;
     }
 
@@ -580,7 +589,11 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       mode: settings?.mode || 'Online',
       companyName: compName,
       logoUrl,
-      stockPasswordHash: stockCode,
+      // Campo vazio + já configurado = manter o hash existente (nunca reescrever
+      // o código com vazio por descuido). Texto novo é sempre guardado em hash.
+      stockPasswordHash: stockCode
+        ? await prepareAuthorizationPassword(stockCode)
+        : (settings?.stockPasswordHash || ''),
       banco,
       numero_conta: conta,
       nib,
@@ -930,8 +943,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       value={stockCode}
                       onChange={(e) => setStockCode(e.target.value)}
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary font-mono"
-                      placeholder="Código para autorização de alterações manuais de stock"
+                      placeholder={stockCodeConfigured ? 'Código definido — escreva aqui apenas para o alterar' : 'Código para autorização de alterações manuais de stock'}
                     />
+                    <p className="text-[10px] text-gray-500 mt-1">
+                      Guardado em forma cifrada (hash). Não é possível voltar a lê-lo; se o perder, defina outro aqui.
+                      {stockCodeConfigured ? ' Deixe vazio para manter o código actual.' : ''}
+                    </p>
                   </div>
                 </div>
 

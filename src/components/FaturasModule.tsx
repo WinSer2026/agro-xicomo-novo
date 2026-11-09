@@ -14,6 +14,7 @@ import {
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
+import { currentShiftId } from '../utils/shifts';
 import { describeDebt, summarizeDebts } from '../utils/debts';
 import type { Debt } from '../types';
 import { Sale, SystemSettings } from '../types';
@@ -610,11 +611,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           } else {
             const agora = new Date().toISOString();
             try {
+              // O reembolso pertence ao turno em que o dinheiro saiu: é ele que
+              // tem de o descontar no fecho (decisão do dono).
+              const shiftId = await currentShiftId();
               await dbService.addCashMovement({
                 id: `cx-reembolso-${sale.id || sale.invoiceNumber}-${Date.now()}`,
                 date: agora,
                 day: toCashDay(agora),
                 type: 'Reembolso',
+                cashSessionId: shiftId,
                 amount: -Math.abs(valor),
                 method: securityModal.refundMethod || 'Dinheiro',
                 operator,

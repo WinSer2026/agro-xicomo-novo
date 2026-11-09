@@ -374,7 +374,7 @@ function renderInvoiceFooter(
   // o fallback recalcula 16% sobre a base líquida.
   const invoiceHasIva = Boolean(invoice.includeIva);
   const invoiceIvaValue = invoiceHasIva
-    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    ? Number(invoice.ivaAmount ?? Math.round(((invoice.subtotal - invoice.discount) - (invoice.subtotal - invoice.discount) / 1.16) * 100) / 100)
     : 0;
   let a4Cursor = totalsY + 5;
   if (invoiceHasIva) {
@@ -644,7 +644,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
 
       const receiptHasIva = Boolean(invoice.includeIva);
       const receiptIvaValue = receiptHasIva
-        ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+        ? Number(invoice.ivaAmount ?? Math.round(((invoice.subtotal - invoice.discount) - (invoice.subtotal - invoice.discount) / 1.16) * 100) / 100)
         : 0;
       let receiptCursor = totalsY + 5;
       if (receiptHasIva) {
@@ -875,7 +875,7 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   }
   if (invoice.includeIva) {
     const thermalIva = Number(
-      invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100
+      invoice.ivaAmount ?? Math.round(((invoice.subtotal - invoice.discount) - (invoice.subtotal - invoice.discount) / 1.16) * 100) / 100
     );
     doc.text('IVA (16%):', 4, y);
     doc.text(`${fmtMT(thermalIva)} MT`, 76, y, { align: 'right' });
@@ -1111,7 +1111,7 @@ export async function downloadCreditNoteA4(invoice: Sale, settings: SystemSettin
   const creditNoteNumber = invoice.creditNoteNumber || 'S/Nº';
   const cancellationDate = invoice.cancelledAt ? new Date(invoice.cancelledAt) : new Date();
   const ivaValue = invoice.includeIva
-    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    ? Number(invoice.ivaAmount ?? Math.round(((invoice.subtotal - invoice.discount) - (invoice.subtotal - invoice.discount) / 1.16) * 100) / 100)
     : 0;
 
   pages.forEach((pageItems, pageIdx) => {

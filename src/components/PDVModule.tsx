@@ -8,6 +8,10 @@ import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedS
 import { getSingularUnit } from '../utils/unitHelper';
 import { getUnitCost, isHybridProduct, getBulkSellingPrice } from '../utils/priceHelper';
 import { clampItemDiscountValue, getItemDiscount, getMaxItemDiscountValue, getSaleTotals, ItemDiscountType } from '../utils/saleTotals';
+import { resolveSaleStatus, validatePayment, requiresReceipt } from '../utils/checkoutRules';
+import { currentShiftId } from '../utils/shifts';
+import { canSellOnCredit } from '../utils/creditRules';
+import CreditAuthModal from './CreditAuthModal';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
 import { generateNextInvoiceNumber, generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
@@ -1293,11 +1297,55 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   };
 
   // Direct checkout handler
+  // D3 — crédito: limite por cliente, prazo e bloqueio de dívida vencida.
+  // `creditAuthOk` guarda a autorização da gerência para ESTA venda; é limpa
+  // depois de a venda gravar.
+  const [creditAuthOk, setCreditAuthOk] = useState(false);
+  // Formato de impressão que o operador tinha escolhido quando o crédito pediu
+  // autorização: sem isto, o recibo sairia no papel errado depois de autorizar.
+  const creditPendingFormatRef = useRef<'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'FaturaProforma'>('A4');
+  const [creditAuth, setCreditAuth] = useState<{
+    show: boolean;
+    reasons: string[];
+    outstanding: number;
+    amount: number;
+  }>({ show: false, reasons: [], outstanding: 0, amount: 0 });
+
   const handleFinalizeSale = async (printFormat: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'FaturaProforma') => {
     if (isFinalizing) return;
     if (cart.length === 0) {
       showToast('O carrinho está vazio!', 'error');
       return;
+    }
+
+    // ── Venda a crédito: verificar antes de tocar em dinheiro ou stock ──
+    if (paymentMethod === 'Crédito') {
+      const totalCredito = getSaleTotals(cart, customSubtotalDiscount, includeIva).total;
+      try {
+        const dividas = await dbService.getDebts();
+        const decisao = canSellOnCredit({
+          customerName,
+          amount: totalCredito,
+          debts: dividas,
+          managerAuthorized: creditAuthOk
+        });
+        if (!decisao.allowed) {
+          if (decisao.requiresManager) {
+            creditPendingFormatRef.current = printFormat;
+            setCreditAuth({ show: true, reasons: decisao.reasons, outstanding: decisao.outstanding, amount: totalCredito });
+            return;
+          }
+          showToast(decisao.reasons[0] || 'Venda a crédito não autorizada.', 'error');
+          return;
+        }
+        // Autorização da gerência vale para ESTA venda: consome-se aqui para
+        // não ficar aberta para a venda seguinte.
+        if (creditAuthOk) setCreditAuthOk(false);
+      } catch (erro) {
+        console.error('[PDV] Falha ao verificar dívidas do cliente:', erro);
+        showToast('Não foi possível verificar as dívidas deste cliente. A venda a crédito não avançou.', 'error');
+        return;
+      }
     }
 
     setIsFinalizing(true);
@@ -1312,6 +1360,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       setIncludeIva(false);
       setNewSaleStatus('Paga');
       setAmountReceived('');
+      // A autorização de crédito vale para uma venda, não para o resto do dia.
+      setCreditAuthOk(false);
     };
 
     try {
@@ -1371,12 +1421,25 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         };
       });
 
-      // Determine default status: A4 definitive invoices and proformas are saved as Pendente
-      let finalStatus: Sale['status'] = 'Paga';
-      if (effectiveDocType === 'FaturaProforma' || printFormat === 'A4') {
-        finalStatus = 'Pendente';
-      } else if (paymentMethod === 'Crédito') {
-        finalStatus = 'Crédito';
+      // Estado final (D2): depende do PAGAMENTO, nunca do papel impresso.
+      const finalStatus: Sale['status'] = resolveSaleStatus({
+        documentType: effectiveDocType,
+        paymentMethod,
+        emitWithoutReceipt: false
+      });
+
+      // Validação do pagamento (NEG-02): recusa-se fechar uma venda "Paga" sem
+      // que o dinheiro (ou as linhas do múltiplo) cubram o total.
+      const paymentCheck = validatePayment({
+        paymentMethod,
+        total: tot,
+        amountReceived,
+        multiLines: multiPaymentLines
+      });
+      if (!paymentCheck.ok) {
+        showToast(paymentCheck.message || 'Pagamento inválido.', 'error');
+        setIsFinalizing(false);
+        return;
       }
 
       // Números sequenciais transaccionais (FAC-2026-N / REC-...): reservados
@@ -1386,7 +1449,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         generateNextInvoiceNumber(existingSales, effectiveDocType),
         (key, min) => dbService.nextDocumentNumber(key, min)
       );
-      const needsReceipt = (finalStatus === 'Paga' || printFormat === 'ReciboA4' || printFormat === 'Thermal');
+      const needsReceipt = requiresReceipt(finalStatus);
       const receiptNum = needsReceipt
         ? await reserveDocumentNumber(
             generateNextReceiptNumber(existingSales, printFormat),
@@ -1398,9 +1461,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         ? multiPaymentLines.filter(l => l.amount > 0)
         : undefined;
 
+      // Turno de caixa: a venda fica marcada com o turno em que entrou, para o
+      // fecho do turno saber exactamente o que esperar. Se não houver turno
+      // aberto a venda NÃO é bloqueada — o fecho trata-a pela hora.
+      const shiftId = await currentShiftId();
+
       const newSale: Sale = {
         id: uid('sale-'),
         invoiceNumber: invoiceNum,
+        cashSessionId: shiftId,
         receiptNumber: receiptNum,
         date: new Date().toISOString(),
         customerName,
@@ -1412,6 +1481,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         total: tot,
         paymentMethod,
         paymentBreakdown: activeBreakdown,
+        amountReceived: paymentCheck.received,
+        changeGiven: paymentCheck.change,
         status: finalStatus,
         documentType: effectiveDocType,
         operatorId: currentUser.username,
@@ -3438,7 +3509,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
                         <span>IVA INCLUÍDO (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total * 0.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total - invoiceToPrint.total / 1.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
@@ -4597,6 +4668,35 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
           </div>
         </div>
+      )}
+
+      {/* --- Autorização da gerência: crédito acima do limite (D3) --- */}
+      {creditAuth.show && (
+        <CreditAuthModal
+          customerName={customerName}
+          amount={creditAuth.amount}
+          outstanding={creditAuth.outstanding}
+          reasons={creditAuth.reasons}
+          settings={settings}
+          onAuthorized={() => {
+            void dbService.addAuditLog({
+              id: uid('log-'),
+              timestamp: new Date().toISOString(),
+              username: currentUser.username,
+              ipAddress: 'N/D',
+              action: 'Crédito Autorizado Acima do Limite',
+              status: 'Alerta',
+              level: 'WARNING',
+              entity: 'sales',
+              details: `Venda a crédito de ${creditAuth.amount.toFixed(2)} MT a ${customerName} autorizada pela gerência (dívida anterior ${creditAuth.outstanding.toFixed(2)} MT; limite 20.000 MT).`
+            });
+            setCreditAuth({ show: false, reasons: [], outstanding: 0, amount: 0 });
+            setCreditAuthOk(true);
+            // Volta a chamar o fecho: agora com autorização registada.
+            void handleFinalizeSaleRef.current?.(creditPendingFormatRef.current);
+          }}
+          onClose={() => setCreditAuth({ show: false, reasons: [], outstanding: 0, amount: 0 })}
+        />
       )}
 
       {/* --- Modal Opções de Impressão (Recibo Xprinter XP 80C e A4) --- */}

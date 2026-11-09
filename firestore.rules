@@ -72,7 +72,7 @@ service cloud.firestore {
 
     // --- Livro de caixa (reembolsos e sangrias) ------------------------------
     // Cada linha é dinheiro que saiu (ou entrou) da gaveta sem venda. É prova
-    // para a inspecção e para o fecho do dia: uma vez escrita, não se corrige
+    // para a inspecção e para o fecho do turno: uma vez escrita, não se corrige
     // nem se apaga. Um erro corrige-se com um movimento contrário, que fica
     // também registado.
     // --- Dívidas de clientes ------------------------------------------------
@@ -87,6 +87,18 @@ service cloud.firestore {
     match /cash_movements/{docId} {
       allow read, create: if request.auth != null;
       allow update, delete: if false;
+    }
+
+    // --- Turnos de caixa (fecho por turno, D5) -------------------------------
+    // Um turno nasce 'Aberto' e é fechado UMA vez. A actualização só é
+    // permitida enquanto estiver aberto; a partir do momento em que está
+    // 'Fechado', o documento — contagem, diferença, quem contou e quem
+    // conferiu — é prova assinada e não se altera nem se apaga. Uma correcção
+    // faz-se com movimento contrário em cash_movements.
+    match /cash_sessions/{docId} {
+      allow read, create: if request.auth != null;
+      allow update: if request.auth != null && resource.data.status == 'Aberto';
+      allow delete: if false;
     }
   }
 }

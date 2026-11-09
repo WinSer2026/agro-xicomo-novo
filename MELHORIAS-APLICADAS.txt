@@ -1,0 +1,343 @@
+══════════════════════════════════════════════════════════════════════════════
+  AGRO - XICOMO & SERVIÇOS, LDA
+  MELHORIAS APLICADAS AO SISTEMA — 1.ª ENTREGA DE CÓDIGO
+  Data: 09/11/2026
+  Base: PLANO-MELHORIA-COMPLETO.txt v2.2 + REGISTO-DECISOES.txt
+══════════════════════════════════════════════════════════════════════════════
+
+  LEIA PRIMEIRO
+  -------------
+  Este documento diz o que MUDOU no programa (código), não o que está planeado.
+  O que mudou foi testado automaticamente. Os testes passaram todos:
+  - verificação do código (TypeScript): 0 erros;
+  - 10 conjuntos de testes de regras de negócio: 409 verificações, 0 falhas;
+  - 4 conjuntos de testes de interface: 13 testes, 0 falhas;
+  - compilação para produção (build): concluída sem erros.
+
+  MAS há 3 coisas que VOCÊ tem de fazer antes de isto valer em produção.
+  Estão no fim deste documento, na secção "O QUE FALTA FAZER DO SEU LADO".
+
+
+══════════════════════════════════════════════════════════════════════════════
+  1. IVA — O PREÇO JÁ INCLUI O IMPOSTO (decisão D1)
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  O programa somava 16% de IVA por cima do preço de venda. Quem comprava
+  116 MT pagava 134,56 MT. Era dinheiro cobrado a mais ao cliente.
+
+  O QUE FICOU
+  -----------
+  O total da venda é o preço de tabela menos os descontos. O IVA não se soma:
+  é retirado de dentro do total. Exemplo de 116 MT:
+      total ......... 116,00 MT   (o que o cliente paga)
+      base (s/ IVA) . 100,00 MT
+      IVA (16%) .....  16,00 MT
+
+  O botão de IVA deixou de influenciar o total: só muda a DISCRIMINAÇÃO no
+  documento (mostrar ou não a linha do IVA). Vender com A4, térmica ou
+  recibos dá sempre o mesmo total.
+
+  ONDE
+  ----
+  src/utils/saleTotals.ts       → getSaleTotals, extractIva, netOfIva
+                                  [CONFIRMADO] 116 MT → base 100, IVA 16, total 116
+  src/utils/pdfGenerator.ts     → cálculos de IVA nos 4 modelos de documento
+  src/components/PDVModule.tsx  → linha "IVA INCLUÍDO (16%)" do recibo de bolso
+
+  ATENÇÃO FISCAL (continua pendente — P-01 do plano)
+  --------------------------------------------------
+  Esta correcção faz o mapa de IVA deixar de ser 0 e passar a mostrar cerca de
+  13,79% das vendas (16/116). Isso é o correcto se os preços de tabela forem
+  com IVA incluído — que é o que o dono decidiu. Antes de a empresa declarar
+  este mapa, o contabilista tem de confirmar. As vendas ANTIGAS já gravadas
+  com IVA somado por cima não são corrigidas automaticamente: precisam de nota
+  de crédito, uma por uma (M-09 do plano).
+
+
+══════════════════════════════════════════════════════════════════════════════
+  2. ESTADO DA VENDA DEPENDE DO PAGAMENTO (decisão D2)
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  Uma factura em papel A4 paga a dinheiro ficava marcada "Pendente" só por
+  causa do papel escolhido. Ficava a dever dinheiro que já tinha entrado.
+
+  O QUE FICOU
+  -----------
+    Proforma / cotação ................ Pendente
+    Venda a crédito ................... Crédito (com dívida registada)
+    "Emitir sem receber" (escolha) .... Pendente
+    Todo o resto ...................... Paga + recibo emitido
+
+  Além disso, a venda é RECUSADA se o pagamento não cobrir o total:
+    - dinheiro: valor entregue menor que o total → recusa e diz quanto falta;
+    - múltiplo: soma dos troços menor que o total → recusa e diz quanto falta.
+  O troco passou a ficar gravado na venda (quanto foi entregue, quanto voltou),
+  para se poder conferir a gaveta.
+
+  ONDE
+  ----
+  src/utils/checkoutRules.ts    → resolveSaleStatus, requiresReceipt,
+                                  validatePayment, totalsMatch (novo ficheiro)
+  src/components/PDVModule.tsx  → usa essas regras ao fechar a venda
+
+  TESTES
+  ------
+  test/checkout_test.ts (novo): 37 verificações, incluindo "A4 pago fica Paga",
+  "faltam 16,00 MT", "múltiplo a menos é recusado", IVA de 116 = 16.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  3. CRÉDITO A CLIENTES — LIMITE, PRAZO E BLOQUEIO (decisão D3)
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  Qualquer pessoa vendia a crédito a qualquer cliente, por qualquer valor e
+  sem prazo. Não havia limite, nem bloqueio, nem forma de saber quem estava
+  atrasado — a dívida vivia na cabeça de quem vendia.
+
+  O QUE FICOU (regras que decidiu)
+  --------------------------------
+    - limite: 20.000 MT de dívida por cliente;
+    - prazo: 30 dias (já era o prazo com que a dívida é criada);
+    - acima do limite: só com CÓDIGO DE GESTOR (pedido num ecrã próprio e
+      registado na auditoria);
+    - cliente com dívida vencida há mais de 30 dias: NÃO leva mais crédito,
+      nem com código de gestor. Tem de regularizar primeiro.
+
+  ONDE
+  ----
+  src/utils/creditRules.ts            → canSellOnCredit, CREDIT_LIMIT_MT,
+                                        CREDIT_TERM_DAYS, creditDueDate (novo)
+  src/components/CreditAuthModal.tsx  → ecrã do código de gestor (novo)
+  src/components/PDVModule.tsx        → verificação antes de fechar a venda
+
+  TESTES
+  ------
+  test/credit_test.ts (novo): 25 verificações, incluindo limite, autorização
+  de gerência, bloqueio aos 30 dias de atraso e cliente "Cliente Geral".
+
+
+══════════════════════════════════════════════════════════════════════════════
+  4. TURNO DE CAIXA — O BOTÃO QUE VOCÊ PEDIU (decisão D5)
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  O fecho era por dia, feito por uma pessoa só, comparado com um valor
+  calculado a partir das vendas — sem contar o dinheiro que estava na gaveta.
+  Não se sabia quem abriu, quem contou, quem conferiu, nem quanto transitou
+  para o turno seguinte. E o dinheiro dentro de um pagamento "Múltiplo" era
+  ignorado por completo (falha PD-09): a gaveta tinha dinheiro que o ecrã
+  dizia não existir.
+
+  O QUE FICOU
+  -----------
+  Um botão "Turno N · aberto HH:MM por Fulano", sempre visível no topo do
+  ecrã, em qualquer módulo. Carrega-se quando a empresa quiser trocar de
+  turno — não há horários impostos, porque ainda não se sabe como a empresa
+  vai organizar os turnos.
+
+  Ao carregar:
+    1. aparece uma tabela por método (Dinheiro, Transferência, M-Pesa, E-Mola)
+       com o que o sistema espera e um campo para escrever o que se contou;
+    2. a diferença é calculada ao cêntimo;
+    3. se houver QUALQUER diferença, a justificação escrita é obrigatória
+       (não há tolerância de 50 MT nem de 5 MT);
+    4. exige "quem contou" e "quem conferiu" — pode ser a mesma pessoa, mas
+       fica escrito no documento do fecho que foi a mesma;
+    5. grava o fecho (não se altera depois) e abre logo o turno seguinte.
+
+  REGRA DO DINHEIRO QUE TRANSITA: o turno seguinte começa com o que foi
+  CONTADO, não com um fundo fixo inventado. Não há fundo de maneio de 5.000 MT.
+  No primeiro turno de sempre, pede uma contagem física inicial assinada.
+
+  REEMBOLSOS: entram como saída e são descontados no esperado do turno em que o
+  dinheiro voltou ao cliente. SALÁRIOS: não passam por aqui (decisão sua) —
+  continuam a sair do banco, fora do fecho da caixa.
+
+  ONDE
+  ----
+  src/utils/cashSessions.ts           → regras puras: quanto se espera por
+                                        método, diferenças, validação do fecho,
+                                        transporte de saldo (novo)
+  src/utils/shifts.ts                 → abrir/fechar turno, gravar, auditar (novo)
+  src/components/ShiftChangeModal.tsx → ecrã de contagem e fecho (novo)
+  src/App.tsx                         → botão no cabeçalho
+  src/utils/firebaseDB.ts             → getCashSessions, getOpenCashSession,
+                                        createCashSession, closeCashSession
+                                        (fecho dentro de transacção: não se
+                                        fecha duas vezes nem se sobrepõe)
+  src/types.ts                        → tipo CashSession (turno)
+  firestore.rules                     → colecção cash_sessions protegida:
+                                        cria e lê com sessão; actualiza SÓ
+                                        enquanto estiver aberto; nunca apaga
+
+  CORRECÇÃO PD-09 (saldo de caixa)
+  --------------------------------
+  O saldo passou a somar a parte em dinheiro das vendas "Múltiplo" e a
+  excluir a parte em M-Pesa/transferência. Antes, uma venda de 1.000 MT paga
+  com 600 em dinheiro + 400 em M-Pesa entrava no caixa como zero.
+  Onde: src/utils/cashBox.ts → cashBalance (usa saleInflows de cashSessions.ts).
+
+  TESTES
+  ------
+  test/cashsession_test.ts (novo): 45 verificações — esperado por método,
+  reembolso a descontar, diferença de 1 cêntimo, fecho sem justificação
+  recusado, mesma pessoa a contar e conferir, transporte do saldo, venda sem
+  turno tratada pela hora.
+
+  NOTA HONESTA
+  ------------
+  [A VERIFICAR] Os turnos abertos ANTES desta actualização não existem, porque
+  o conceito não existia. As vendas antigas não são reatribuídas a nenhum
+  turno: no fecho contam pela hora (se caírem dentro da janela do turno). Isto
+  está decidido no plano e não se faz backfill.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  5. SEGURANÇA — O CÓDIGO 05082 ACABOU
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  O código de gestor (que autoriza mexer no stock e anular vendas) era "05082"
+  e estava escrito no código do programa. Qualquer pessoa com acesso ao
+  programa sabia o código. Pior: em qualquer instalação nova, funcionava
+  mesmo antes de alguém o definir.
+
+  O QUE FICOU
+  -----------
+    - deixou de existir código por omissão: sem código definido, as operações
+      sensíveis são RECUSADAS (é o comportamento seguro);
+    - o código é guardado cifrado (hash com sal), não em texto simples;
+    - o Painel Técnico mostra o campo vazio com a indicação "Código definido —
+      escreva aqui apenas para o alterar"; deixar vazio mantém o actual;
+    - códigos antigos em texto simples continuam a funcionar até serem
+      alterados, para não bloquear a loja no dia da actualização.
+
+  ONDE
+  ----
+  src/utils/authorization.ts       → isAuthorizationConfigured,
+                                     prepareAuthorizationPassword
+  src/components/TechnicalModule.tsx → grava em hash, campo nunca mostra o código
+  src/utils/firebaseDB.ts          → definições por omissão sem "05082"
+  src/components/StockModule.tsx   → textos que citavam "05082" corrigidos
+
+  ATENÇÃO: se a empresa nunca definiu o código no Painel Técnico, tem de o
+  definir AGORA — caso contrário as alterações de stock e as anulações ficam
+  bloqueadas. É uma Protecção, não uma avaria.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  6. DADOS QUE NÃO DESAPARECEM (leituras que mentiam "zero")
+══════════════════════════════════════════════════════════════════════════════
+
+  O QUE ESTAVA ERRADO
+  -------------------
+  Quando a leitura à base de dados falhava (rede, permissões, índice), o
+  programa respondia "não há nada" em vez de "não consegui ler". Consequências
+  reais:
+    - o catálogo era semeado de novo por cima do verdadeiro;
+    - as definições da empresa (NUIT, bancos, contactos, código de gestor)
+      eram reescritas com valores de fábrica;
+    - as credenciais vazias faziam o sistema recriar o utilizador admin.
+
+  O QUE FICOU
+  -----------
+    - leituras que NÃO escondem o erro (getAllOrFail) para catálogo, definições
+      e credenciais;
+    - o catálogo só é semeado em instalação nova CONFIRMADA: leitura com
+      sucesso + zero produtos + nenhuma venda. Se houver vendas e o catálogo
+      vier vazio, o programa pára e diz para verificar;
+    - as definições, quando a leitura falha, usam a cópia em memória/cache e
+      NÃO gravam por cima das reais;
+    - as credenciais já não criam conta admin automaticamente. A conta inicial
+      é criada uma única vez, com palavra-passe temporária ALEATÓRIA, mostrada
+      no ecrã de login para ser alterada no primeiro acesso.
+
+  ONDE
+  ----
+  src/utils/firebaseDB.ts → getAllOrFail, hasAnySales, getProducts,
+                            getSettings, getCredentials
+  src/utils/credentialsReset.ts (já existia; passou a receber o erro em vez de
+                            uma lista vazia)
+
+
+══════════════════════════════════════════════════════════════════════════════
+  7. FICHEIROS APAGADOS (código morto, com segredos lá dentro)
+══════════════════════════════════════════════════════════════════════════════
+
+  src/data/credentialsReset.ts  (40 linhas) — continha as 9 contas oficiais com
+      hashes de palavra-passe e um comentário a dizer quais eram as palavras-
+      passe temporárias. Nenhum ficheiro do programa o usava (verificado por
+      pesquisa em todo o código). Apagado.
+
+  src/utils/indexedDB.ts (2.008 linhas) — base de dados local antiga, substituída
+      pelo Firestore + safeStorage. Continha o código "05082" em três sítios.
+      Nenhum ficheiro do programa o usava. Apagado.
+
+  NOTA: se em algum momento quiser recuperar algum destes ficheiros, eles
+  continuam no histórico do Git (a versão anterior está guardada).
+
+
+══════════════════════════════════════════════════════════════════════════════
+  8. RECIBO DE SALÁRIO — FRASE RETIRADA
+══════════════════════════════════════════════════════════════════════════════
+
+  A folha de vencimento dizia "gerada em total conformidade com o Regulamento
+  INSS e as tabelas oficiais de Retenção de IRPS". Era uma promessa que o
+  programa não pode fazer (a tabela pode estar desactualizada).
+  Passou a dizer que foi preparada segundo as regras em uso e que os valores
+  devem ser conferidos com a tabela oficial e com o contabilista.
+  Nenhum valor de salário foi tocado. Onde: src/components/HRModule.tsx.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  O QUE FALTA FAZER DO SEU LADO  (3 passos, por esta ordem)
+══════════════════════════════════════════════════════════════════════════════
+
+  1) DEFINIR O CÓDIGO DE GESTOR
+     Painel Técnico → Configurações → "Palavra-passe de Segurança do Stock".
+     Escreva o código (4 a 6 caracteres), grave e guarde-o. A partir daí as
+     operações de stock e as anulações pedem esse código.
+
+  2) PUBLICAR AS REGRAS DO FIRESTORE
+     As regras novas (que incluem os turnos de caixa) só valem depois de
+     publicadas. No computador onde o sistema foi instalado:
+         npm run build
+         npx firebase-tools deploy --only firestore:rules
+     Antes de publicar, confirme no Firebase que a autenticação "Anónimo" está
+     activada. Se não estiver, o programa fica sem acesso aos dados.
+
+  3) FALAR COM O CONTABILISTA SOBRE O IVA
+     Mostre-lhe a secção 1 deste documento. Se ele disser que os preços de
+     tabela não incluem IVA, esta correcção tem de ser revista ANTES de o
+     sistema começar a emitir documentos com IVA discriminado.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  O QUE AINDA NÃO FOI FEITO (do plano v2.2)
+══════════════════════════════════════════════════════════════════════════════
+
+  Feito nesta entrega: D1, D2, D3, D5, SEG-03 (código de gestor), BD-01/02/03
+  (leituras que mentiam), PD-09 (saldo com múltiplos e reembolsos), M-10
+  (primeiro turno), recibo de salário, limpeza de código morto, PG-28.
+
+  Continua por fazer (fases seguintes do plano, por ordem de risco):
+    - Ondas 1 e 2 restantes: relatórios com IVA discriminado por período,
+      conferência de stocks, importação de dados com validação;
+    - Fase 4: desempenho e impressão (A4/térmica), exportações grandes;
+    - PD-13 (salários): ADIADO por sua decisão;
+    - PR-10 (armazém): ADIADO sem data por sua decisão; NEG-07 aceite como
+      risco datado;
+    - NEG-07 e restantes riscos aceites estão descritos no plano, secção de
+      riscos assumidos.
+
+  Nada disto bloqueia o uso diário do sistema: são melhorias de relatório,
+  velocidade e arrumação.
+══════════════════════════════════════════════════════════════════════════════
