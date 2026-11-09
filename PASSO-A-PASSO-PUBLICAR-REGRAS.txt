@@ -141,9 +141,13 @@
   Firestore ("Firestore Rules" / "Regras").
 
   [CONFIRMADO] 3.ª captura: já está no sítio certo. Vê o histórico de versões
-  à esquerda e o texto das regras à direita. Falta entrar no MODO DE EDIÇÃO:
-  carregue no botão azul "Desenvolver e testar" (canto superior direito,
-  acima do editor). É esse botão que abre o editor com o botão "Publicar".
+  à esquerda e o texto das regras à direita.
+
+  ⚠ CORRIGIDO NA 4.ª CAPTURA: o botão azul "Desenvolver e testar" NÃO abre o
+  editor — abre uma janela sobre o Pacote de emuladores (testar localmente).
+  Feche-a no X. O editor desta consola nova não está identificado com certeza;
+  o caminho documentado e explícito é o da consola do Google Cloud
+  (opção A abaixo, agora recomendada).
 
   Nota: a vista que está a ver parece ser a de consulta/histórico. Se
   conseguir escrever dentro do texto (clique e tente), pode editar já; se não,
@@ -246,10 +250,12 @@
   ALTERNATIVAS (só se a consola não abrir)
 ══════════════════════════════════════════════════════════════════════════════
 
-  A) CONSOLA DO GOOGLE CLOUD (fundo azul, começa por console.cloud.google.com)
+  A) CONSOLA DO GOOGLE CLOUD — CAMINHO RECOMENDADO AGORA
+     [CONFIRMADO] documentação de 07/11/2026 ("Getting started with security
+     rules"): Databases → ID da base → Security → Firestore Rules → New
+     ruleset / Clone ruleset → Publish; a timeline permite clonar/restaurar.
+     Passo a passo simples em COMO-PUBLICAR-REGRAS-SIMPLES.txt.
      https://console.cloud.google.com/databases?project=gen-lang-client-0896153566
-     → clicar no ID da base de dados → "Segurança" (Security) → separador
-       "Firestore Rules" → New ruleset / Clone ruleset → colar → Publicar.
 
   B) LINHA DE COMANDOS (na pasta do sistema, precisa de Node.js e internet)
      npx firebase-tools login
