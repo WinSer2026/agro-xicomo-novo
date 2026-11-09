@@ -12,6 +12,7 @@ import {
   settlementDisclaimer
 } from '../utils/saleStatus';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { generateNextReceiptNumber } from '../utils/sequenceHelper';
 import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
 import { Sale, SystemSettings } from '../types';
 import {
@@ -396,9 +397,16 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
         let payment: { sale: Sale; receiptNumber: string };
         try {
+          // Semeia o contador com o maior recibo já emitido: se o contador
+          // estiver vazio, o próximo número não pode repetir um recibo existente.
+          const candidatoRecibo = generateNextReceiptNumber(sales, 'ReciboA4');
+          const ultimoReciboConhecido =
+            parseInt(candidatoRecibo.slice(candidatoRecibo.lastIndexOf('-') + 1), 10) - 1 || 0;
+
           payment = await dbService.payInvoiceWithReceipt(sale.id, {
             paidBy: operator,
-            settledPaymentMethod
+            settledPaymentMethod,
+            fallbackMax: ultimoReciboConhecido
           });
         } catch (err: any) {
           // Erros esperados: factura já paga, anulada, inexistente. Ficam no

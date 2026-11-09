@@ -952,7 +952,7 @@ export class FirebaseDBService {
    */
   public async payInvoiceWithReceipt(
     saleId: string,
-    payment: { paidBy: string; settledPaymentMethod: string }
+    payment: { paidBy: string; settledPaymentMethod: string; fallbackMax?: number }
   ): Promise<{ sale: Sale; receiptNumber: string }> {
     await this.ensureAuth();
     const saleRef = doc(db, 'sales', String(saleId));
@@ -984,7 +984,11 @@ export class FirebaseDBService {
       const stored = counterSnapshot.exists()
         ? Number((counterSnapshot.data() as Record<string, number>)[prefix] || 0)
         : 0;
-      const next = stored + 1;
+      // Se o contador estiver vazio (base migrada, contador apagado), usa-se o
+      // maior recibo já emitido como ponto de partida — senão o próximo recibo
+      // repetia um número que o cliente já tem em mãos.
+      const safeFallback = Number.isFinite(payment.fallbackMax) ? Math.max(0, Math.floor(payment.fallbackMax!)) : 0;
+      const next = Math.max(stored, safeFallback) + 1;
       const receiptNumber = `${prefix}${String(next).padStart(4, '0')}`;
       const now = new Date().toISOString();
 

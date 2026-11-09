@@ -14,9 +14,11 @@ import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
 import { isFinancialSale, isCancelledSale, settlementDisclaimer } from '../utils/saleStatus';
-import { lineTaxAmount, normalizeTaxRate } from '../utils/taxHelper';
+import { lineTaxAmount, normalizeTaxRate, itemTaxRate, cartTaxAmount } from '../utils/taxHelper';
 import { appAlert, appPrompt, appConfirm } from '../utils/confirmDialog';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
+import { getClientIp } from '../utils/clientInfo';
 import { findDuplicateSale, describeDuplicateRisk } from '../utils/saleDuplicates';
 import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
@@ -1419,9 +1421,37 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     return itemDiscounts + customSubtotalDiscount;
   };
 
+  /**
+   * IVA do carrinho, por linha e com a taxa de cada produto.
+   *
+   * O que estava errado: o total aplicava **16% fixos** sobre a base
+   * (`base * 1.16`), mas o IVA gravado na venda era calculado **por linha**, com
+   * a taxa de cada produto — e ainda por cima sobre o valor bruto, antes dos
+   * descontos. Com produtos isentos ou a 5%, o cliente pagava um valor e o
+   * documento declarava outro.
+   *
+   * Agora o total e o IVA saem da mesma conta: valor líquido de cada linha
+   * (já com os descontos repartidos proporcionalmente) × a taxa dessa linha.
+   */
+  const getIvaAmount = () => {
+    if (!includeIva) return 0;
+    const sub = getSubtotal();
+    if (sub <= 0) return 0;
+    return cartTaxAmount(
+      cart.map(item => ({
+        productId: item.productId,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        taxRate: item.taxRate
+      })),
+      products,
+      (sub - getDiscount()) / sub
+    );
+  };
+
   const getTotal = () => {
     const base = Math.max(0, getSubtotal() - getDiscount());
-    return includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
+    return Math.round((base + getIvaAmount()) * 100) / 100;
   };
 
   const playScannerBeep = () => {
@@ -1528,12 +1558,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       // E-02: o IVA é calculado por linha, com a taxa do produto (16% por
       // omissão). Antes era 16% fixo sobre o total, o que tornava impossível
       // declarar produtos com outra taxa ou isentos.
-      const iva = includeIva
-        ? Math.round(cart.reduce((acc, item) => {
-            const produto = products.find(p => p.id === item.productId);
-            return acc + lineTaxAmount(item, produto);
-          }, 0) * 100) / 100
-        : 0;
+      // A mesma conta que produziu o total: documento e cobrança não divergem.
+      const iva = getIvaAmount();
 
       // --- Controlo do pagamento (D-06) -------------------------------------
       // O estado da venda é financeiro: não se grava uma venda como paga sem
@@ -1852,22 +1878,28 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       async () => {
         let paymentSaved = false;
         try {
-          const allSales = await dbService.getSales();
-          const candidate = generateNextReceiptNumber(allSales, 'ReciboA4');
-          const receiptNum = await dbService.nextDocumentNumber(
-            'ReciboA4',
-            new Date().getFullYear(),
-            parseInt(candidate.slice(candidate.lastIndexOf('-') + 1), 10) - 1 || 0
-          );
-          const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: sale.receiptNumber || receiptNum };
-          await dbService.addSale(updatedSale);
-          paymentSaved = true;
+          /**
+           * Antes: lia-se o contador, calculava-se o recibo e gravava-se a venda
+           * em duas operações. Dois postos a liquidar a mesma fatura ao mesmo
+           * tempo emitiam **dois recibos** para um só pagamento. Agora é uma
+           * transacção: verifica o estado, numera o recibo e grava.
+           */
+          const todasAsVendas = await dbService.getSales();
+          const candidato = generateNextReceiptNumber(todasAsVendas, 'ReciboA4');
+          const ultimoRecibo = parseInt(candidato.slice(candidato.lastIndexOf('-') + 1), 10) - 1 || 0;
 
-          setInvoiceToPrint(updatedSale);
+          const payment = await dbService.payInvoiceWithReceipt(String(sale.id), {
+            paidBy: currentUser.username,
+            settledPaymentMethod: sale.paymentMethod || 'Dinheiro',
+            fallbackMax: ultimoRecibo
+          });
+
+          paymentSaved = true;
+          setInvoiceToPrint(payment.sale);
           setPrintType('ReciboA4');
           const receiptGenerated = await runPostCommitTask({
             label: 'gerar o recibo da fatura liquidada',
-            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
+            task: () => downloadInvoicePDF(payment.sale, 'ReciboA4')
           });
           await runPostCommitTask({
             label: 'atualizar o histórico após liquidar a fatura',
@@ -1875,63 +1907,165 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           });
 
           if (receiptGenerated) {
-            showToast(`Fatura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
+            showToast(`Fatura ${sale.invoiceNumber} paga com sucesso! Recibo ${payment.receiptNumber} gerado em A4.`, 'success');
           } else {
-            showToast(`Fatura ${sale.invoiceNumber} foi liquidada com sucesso. O recibo pode ser reimpresso pelo histórico.`, 'warning');
+            showToast(`Fatura ${sale.invoiceNumber} foi liquidada. Recibo ${payment.receiptNumber}: reimprima pelo histórico.`, 'warning');
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error('Erro ao liquidar fatura:', err);
           if (paymentSaved) {
             showToast(`A fatura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
           } else {
             showToast('Erro ao liquidar fatura.', 'error');
+            void appAlert(`A fatura NÃO foi liquidada.\n\n${err?.message || 'Erro desconhecido.'}`);
           }
         }
       }
     );
   };
 
+  /**
+   * Anular uma factura a partir do PDV.
+   *
+   * Antes, esta acção era um clique: sem palavra-passe, sem nota de crédito e
+   * sem registo do dinheiro devolvido. A mesma anulação feita em Faturas exigia
+   * gestor, emitia NC e perguntava pelo reembolso — dois ecrãs, duas regras, a
+   * mesma base de dados. Uma factura anulada pelo PDV não tinha documento de
+   * rectificação: numa inspecção, era uma factura em falta.
+   *
+   * Agora as duas entradas fazem o mesmo: palavra-passe, NC numerada por
+   * documento definitivo, stock reposto, reembolso registado em caixa e
+   * auditoria.
+   */
   const handleCancelInvoice = (sale: Sale) => {
     askConfirmation(
       'Cancelar Fatura',
-      `Deseja realmente cancelar a fatura ${sale.invoiceNumber}? Esta ação irá anular este documento no histórico de vendas de forma permanente.`,
+      `Anular a fatura ${sale.invoiceNumber} (${sale.total.toLocaleString('pt-MZ')} MT).\n\n` +
+        'A anulação emite nota de crédito, repõe o stock e é registada em auditoria. ' +
+        'Exige a palavra-passe de gestor.',
       async () => {
         let cancellationSaved = false;
         try {
-          // Revert stock and update the invoice in the same batch whenever this
-          // is a definitive invoice. This prevents a cancelled invoice from
-          // being shown as failed after its stock has already been restored.
-          if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
-            const products = await dbService.getProducts();
+          const password = await appPrompt(
+            `Anular ${sale.invoiceNumber}: introduza a palavra-passe de gestor.`
+          );
+          if (password === null) return;
+          if (!(await verifyAuthorizationPassword(password, settings))) {
+            showToast('Autorização recusada: palavra-passe incorrecta.', 'error');
+            return;
+          }
+
+          if (sale.status === 'Cancelada') {
+            showToast('Esta factura já está anulada.', 'error');
+            return;
+          }
+
+          // ── Reembolso: só quando o cliente já tinha pago ────────────────
+          let refundValue = 0;
+          if (canRefund(sale)) {
+            const devolveu = await appConfirm(
+              `O cliente pagou ${maxRefundFor(sale).toFixed(2)} MT nesta factura.\n\n` +
+                'Devolveu esse dinheiro agora? Se sim, fica registado no Livro de Caixa.',
+              { confirmLabel: 'Sim, devolvi', danger: true }
+            );
+            if (devolveu) refundValue = maxRefundFor(sale);
+          }
+
+          // ── Nota de crédito: só documentos definitivos ───────────────────
+          const isDefinitive = !sale.documentType || sale.documentType === 'FaturaDefinitiva';
+          const creditNoteNumber = isDefinitive
+            ? await dbService.nextDocumentNumber('NotaCredito', new Date().getFullYear(), 0)
+            : undefined;
+
+          const agora = new Date().toISOString();
+          const operador = currentUser.username;
+          const annotated: Sale = {
+            ...sale,
+            cancelledAt: agora,
+            cancelledBy: operador,
+            previousStatus: sale.status as Sale['previousStatus'],
+            ...(creditNoteNumber ? { creditNoteNumber } : {}),
+            notes: [
+              sale.notes,
+              `[PDV] Anulada em ${agora.substring(0, 16).replace('T', ' ')} por ${operador}.`,
+              creditNoteNumber ? `Nota de crédito: ${creditNoteNumber}.` : '',
+              refundValue > 0 ? `Devolvidos ${refundValue.toFixed(2)} MT ao cliente (registado em caixa).` : ''
+            ].filter(Boolean).join('\n')
+          };
+
+          if (isDefinitive) {
+            const produtos = await dbService.getProducts();
             const restockItems: any[] = [];
             for (const item of (sale.items || [])) {
               if (!item) continue;
-              const prod = products.find(p => String(p.id) === String(item.productId));
-              if (prod && !prod.isService) {
-                const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-                const qtyToAdd = Number(item.quantity) || 0;
-                if (qtyToAdd <= 0) continue;
-                if (hasConversion && item.sellingUnit === 'Bulk') {
-                  restockItems.push({
-                    productId: String(prod.id),
-                    hasConversion: true,
-                    sellingUnit: 'Bulk',
-                    qtyToAdd,
-                    equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
-                  });
-                } else if (hasConversion) {
-                  restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
-                } else {
-                  restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
-                }
+              const prod = produtos.find(p => String(p.id) === String(item.productId));
+              if (!prod || prod.isService) continue;
+              const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+              const qtyToAdd = Number(item.quantity) || 0;
+              if (qtyToAdd <= 0) continue;
+              if (hasConversion && item.sellingUnit === 'Bulk') {
+                restockItems.push({
+                  productId: String(prod.id),
+                  hasConversion: true,
+                  sellingUnit: 'Bulk',
+                  qtyToAdd,
+                  equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+                });
+              } else if (hasConversion) {
+                restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+              } else {
+                restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
               }
             }
-            await dbService.cancelSaleWithStockRestoration(sale, restockItems);
+            await dbService.cancelSaleWithStockRestoration(annotated, restockItems);
           } else {
-            await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
+            await dbService.addSale({ ...annotated, id: String(sale.id || Date.now()), status: 'Cancelada' });
           }
 
           cancellationSaved = true;
+
+          // ── Dinheiro devolvido ──────────────────────────────────────────
+          if (refundValue > 0) {
+            try {
+              await dbService.addCashMovement({
+                id: `cx-reembolso-${sale.id || sale.invoiceNumber}-${Date.now()}`,
+                date: agora,
+                day: toCashDay(agora),
+                type: 'Reembolso',
+                amount: -Math.abs(refundValue),
+                method: sale.paymentMethod || 'Dinheiro',
+                operator: operador,
+                authorizedBy: operador,
+                reference: sale.invoiceNumber,
+                receiptNumber: sale.receiptNumber,
+                creditNoteNumber,
+                notes: `Devolução ao cliente na anulação de ${sale.invoiceNumber} (PDV)`
+              });
+            } catch (erroReembolso) {
+              console.error('[PDV] Falha ao registar o reembolso:', erroReembolso);
+              void appAlert(
+                `A factura foi anulada, mas a devolução de ${refundValue.toFixed(2)} MT NÃO ficou registada em caixa.\n\n` +
+                  'Registe-a manualmente antes de fechar o dia.'
+              );
+            }
+          }
+
+          const ipAddress = await getClientIp().catch(() => 'desconhecido');
+          void dbService.addAuditLog({
+            id: 'log-pdv-cancel-' + Date.now(),
+            timestamp: agora,
+            username: operador,
+            ipAddress,
+            action: 'Anulação de Venda (PDV, Autorizada)',
+            status: 'Sucesso',
+            level: 'WARNING',
+            entity: 'sales',
+            details:
+              `Factura ${sale.invoiceNumber} (${sale.total} MT) anulada no PDV. ` +
+              (creditNoteNumber ? `Nota de crédito: ${creditNoteNumber}. ` : 'Documento não definitivo: sem NC. ') +
+              (refundValue > 0 ? `Reembolso de ${refundValue.toFixed(2)} MT registado.` : 'Sem reembolso registado.')
+          });
+
           await runPostCommitTasks([
             {
               label: 'atualizar o histórico depois de cancelar a fatura',
@@ -1942,13 +2076,18 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               task: () => loadPDVData()
             }
           ]);
-          showToast(`Fatura ${sale.invoiceNumber} cancelada com sucesso.`, 'success');
+          showToast(
+            `Fatura ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}` +
+              `${refundValue > 0 ? ` e ${refundValue.toFixed(2)} MT devolvidos` : ''}.`,
+            'success'
+          );
         } catch (err) {
           console.error('Erro ao cancelar fatura:', err);
           if (cancellationSaved) {
-            showToast(`A fatura ${sale.invoiceNumber} foi cancelada com sucesso. Alguns dados visuais serão atualizados em seguida.`, 'warning');
+            showToast(`A fatura ${sale.invoiceNumber} foi anulada. Alguns dados visuais serão atualizados em seguida.`, 'warning');
           } else {
             showToast('Erro ao cancelar fatura.', 'error');
+            void appAlert('A fatura NÃO foi anulada. Nada foi alterado.');
           }
         }
       }
@@ -1958,12 +2097,54 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const handleRestoreInvoice = async (sale: Sale) => {
     let restorationSaved = false;
     try {
-      const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
+      /**
+       * Reemissão: a factura anulada **não volta a viver**.
+       *
+       * Antes, o PDV repunha o estado da mesma factura (mesmo número, mesmo
+       * documento) — enquanto Faturas emitia uma factura nova. O mesmo botão
+       * produzia resultados diferentes, e o número já declarado como anulado
+       * reaparecia como válido. Agora sai número novo, como em Faturas; a
+       * factura anulada e a nota de crédito ficam no histórico.
+       */
+      const anoAtual = new Date().getFullYear();
+      const vendasConhecidas = await dbService.getSales();
+      const ultimoNumero = (valor: string) => parseInt(valor.slice(valor.lastIndexOf('-') + 1), 10) - 1 || 0;
+      const novoNumero = await dbService.nextDocumentNumber(
+        'FaturaDefinitiva',
+        anoAtual,
+        ultimoNumero(generateNextInvoiceNumber(vendasConhecidas, 'FaturaDefinitiva'))
+      );
+      const agoraReemissao = new Date().toISOString();
+
+      const updatedSale: Sale = {
+        ...sale,
+        id: newSaleId(),
+        invoiceNumber: novoNumero,
+        receiptNumber: undefined,
+        creditNoteNumber: undefined,
+        cancelledAt: undefined,
+        cancelledBy: undefined,
+        stockReturned: undefined,
+        status: 'Pendente',
+        date: agoraReemissao,
+        dateKey: toLocalDateKey(agoraReemissao),
+        notes: [
+          sale.notes,
+          `[PDV] Reemitida a partir de ${sale.invoiceNumber} (anulada).`
+        ].filter(Boolean).join('\n')
+      };
 
       // Reapply the original stock deduction and restore the invoice status in
       // one batch. A partial stock-only restore must never be reported as an
       // error after the action has already changed the database.
-      if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
+      /**
+       * Se a anulação anterior **não** repôs stock (corte de inventário, onde a
+       * contagem física já o tinha em conta), a reemissão não pode voltar a
+       * deduzir — o produto já saiu uma vez.
+       */
+      const deveDeduzirStock = sale.stockReturned !== false;
+
+      if (deveDeduzirStock && sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
         const products = await dbService.getProducts();
         const deductionItems: any[] = [];
         for (const item of (sale.items || [])) {

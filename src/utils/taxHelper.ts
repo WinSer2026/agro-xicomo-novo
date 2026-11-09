@@ -41,3 +41,29 @@ export function sumTaxAmount(
   }, 0);
   return Math.round(total * 100) / 100;
 }
+
+/**
+ * IVA de um carrinho inteiro, linha a linha.
+ *
+ * `discountRatio` é o factor (0..1) que sobra depois de todos os descontos —
+ * de linha e de documento. Reparte-se proporcionalmente: assim o IVA é cobrado
+ * sobre o que o cliente realmente paga, e não sobre o preço de tabela.
+ *
+ * Existe para o PDV não voltar a ter duas contas diferentes: a que forma o
+ * total e a que fica gravada na venda.
+ */
+export function cartTaxAmount(
+  items: Array<{ productId?: string | number; unitPrice?: number; quantity?: number; taxRate?: number; totalPrice?: number }>,
+  products: Array<Pick<Product, 'id' | 'taxRate'>> = [],
+  discountRatio = 1
+): number {
+  const fator = Math.min(1, Math.max(0, Number.isFinite(discountRatio) ? discountRatio : 1));
+  const total = (items || []).reduce((acc, item) => {
+    if (!item) return acc;
+    const produto = products.find(p => String(p.id) === String(item.productId));
+    const bruto = Number(item.unitPrice) * Number(item.quantity);
+    const base = Number.isFinite(bruto) && bruto !== 0 ? bruto : Number(item.totalPrice) || 0;
+    return acc + lineTaxAmount({ totalPrice: base * fator, taxRate: item.taxRate }, produto);
+  }, 0);
+  return Math.round(total * 100) / 100;
+}
