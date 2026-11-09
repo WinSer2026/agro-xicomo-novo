@@ -22,6 +22,7 @@ import {
 } from '../utils/pdfGenerator';
 import { sumTaxAmount } from '../utils/taxHelper';
 import { DateRangeFilter } from './DateRangeFilter';
+import InventoryCutoffTool from './InventoryCutoffTool';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask } from '../utils/postCommit';
 import * as XLSX from 'xlsx';
@@ -54,6 +55,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
   // Preview / Print state
   const [invoiceToPrint, setInvoiceToPrint] = useState<Sale | null>(null);
+  const [showCutoffTool, setShowCutoffTool] = useState(false);
   const [printType, setPrintType] = useState<'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'Proforma' | null>(null);
 
   // Toast notification state
@@ -912,9 +914,20 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <span className="material-symbols-outlined text-emerald-600 text-[18px]">receipt_long</span>
           Gestão de Facturas
         </h2>
-        <span className="text-[10px] font-bold text-slate-400">
-          {isLoadingSales ? 'A actualizar…' : `${sales.length} de ${activeQueryCount} factura(s)`}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-slate-400">
+            {isLoadingSales ? 'A actualizar…' : `${sales.length} de ${activeQueryCount} factura(s)`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCutoffTool(true)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[10.5px] font-black transition-colors"
+            title="Corte de inventário: anular vendas do período ou descontar do stock as vendas feitas depois da contagem"
+          >
+            <span className="material-symbols-outlined text-[14px]">content_cut</span>
+            Corte de Inventário
+          </button>
+        </div>
       </div>
 
       {/* Date Range Filter */}
@@ -1919,6 +1932,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           </div>
         </div>
       )}
+
+      <InventoryCutoffTool
+        isOpen={showCutoffTool}
+        onClose={() => setShowCutoffTool(false)}
+        currentUser={currentUser || null}
+        onCompleted={() => { void loadData(false); }}
+      />
 
       {/* Custom Confirmation Modal */}
       {confirmModal?.show && (
