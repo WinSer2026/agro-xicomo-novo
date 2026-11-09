@@ -121,7 +121,20 @@ export default function ShiftChangeModal({ currentUser, onClose, onChanged }: Sh
     }
   };
 
-  const handleClose = async () => {
+  /**
+   * Fecha o turno.
+   *
+   * `openNext = true`  → fecha e abre já o seguinte com o dinheiro contado
+   *                      (a troca de turno normal, com alguém a receber).
+   * `openNext = false` → SÓ fecha. O próximo turno fica por abrir, à espera do
+   *                      botão "Abrir turno". Serve para fechar no fim do dia,
+   *                      ao fechar para almoço, ou quando ainda não se sabe
+   *                      quem vai ficar na caixa.
+   *
+   * Em qualquer dos casos, a contagem, a diferença e as assinaturas são
+   * gravadas da mesma forma — o que muda é apenas se nasce um turno novo.
+   */
+  const handleClose = async (openNext: boolean) => {
     if (busy || !session) return;
     setBusy(true); setErrors([]); setWarnings([]);
     try {
@@ -130,7 +143,8 @@ export default function ShiftChangeModal({ currentUser, onClose, onChanged }: Sh
         countedBy,
         verifiedBy,
         counted: countedNumeric,
-        justification
+        justification,
+        openNext
       });
       setWarnings(resultado.warnings);
       if (!resultado.ok) {
@@ -140,7 +154,11 @@ export default function ShiftChangeModal({ currentUser, onClose, onChanged }: Sh
       const numeroFechado = resultado.closed?.number ?? session.number;
       setDone(
         `Turno ${numeroFechado} fechado. Diferença: ${money(resultado.difference || 0)}.` +
-        (resultado.next ? ` Turno ${resultado.next.number} aberto com o dinheiro contado.` : ' A abrir o turno seguinte falhou — abra manualmente.')
+        (resultado.next
+          ? ` Turno ${resultado.next.number} aberto com o dinheiro contado.`
+          : (openNext
+              ? ' A abrir o turno seguinte falhou — abra manualmente quando precisar.'
+              : ' Não foi aberto nenhum turno novo: a caixa fica fechada até alguém carregar em "Abrir turno".'))
       );
       setJustification('');
       onChanged?.();
@@ -351,17 +369,33 @@ export default function ShiftChangeModal({ currentUser, onClose, onChanged }: Sh
                 )}
 
                 <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-600 leading-relaxed">
-                  Ao fechar, o turno seguinte abre automaticamente com <strong>{money(totalOf(countedNumeric))}</strong> contados.
                   Reembolsos já estão descontados no valor que o sistema espera. O fecho não se altera depois de gravado.
+                  <br />
+                  <strong>Escolha em baixo</strong> se o turno seguinte deve abrir já com
+                  <strong> {money(totalOf(countedNumeric))}</strong> contados (troca de turno) ou se a caixa deve ficar fechada.
                 </div>
 
                 <button
-                  onClick={handleClose}
+                  onClick={() => handleClose(true)}
                   disabled={busy}
                   className="w-full py-2.5 rounded-lg bg-slate-900 text-white text-xs font-black uppercase tracking-wide disabled:opacity-50"
                 >
                   {busy ? 'A fechar…' : 'Fechar turno e abrir o seguinte'}
                 </button>
+
+                <button
+                  onClick={() => handleClose(false)}
+                  disabled={busy}
+                  className="w-full py-2 rounded-lg border border-slate-300 bg-white text-slate-700 text-[11px] font-black uppercase tracking-wide hover:bg-slate-50 disabled:opacity-50"
+                  title="Fecha o turno e não abre nenhum novo. A caixa fica fechada até alguém abrir o próximo turno."
+                >
+                  {busy ? 'A fechar…' : 'Só fechar o turno (não abrir outro)'}
+                </button>
+                <p className="text-[10px] text-slate-500 leading-relaxed text-center">
+                  Use o segundo botão no fim do dia, ao fechar para uma pausa, ou quando ainda não se sabe
+                  quem vai ficar na caixa. O turno seguinte abre depois, com o botão "Abrir turno", e começa
+                  com o dinheiro que ficou contado.
+                </p>
               </div>
             )}
 

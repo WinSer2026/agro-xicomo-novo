@@ -61,9 +61,47 @@ function docIdOf(ref: any): string {
   return ref.path[ref.path.length - 1];
 }
 
-function makeSnapshot(collName: string) {
+function matchesWhere(data: DocData, args: any[]): boolean {
+  const [field, op, value] = args;
+  const actual = data?.[field];
+  switch (op) {
+    case '==': return actual === value;
+    case '!=': return actual !== value;
+    case '>': return actual > value;
+    case '>=': return actual >= value;
+    case '<': return actual < value;
+    case '<=': return actual <= value;
+    case 'in': return Array.isArray(value) && value.includes(actual);
+    case 'not-in': return Array.isArray(value) && !value.includes(actual);
+    case 'array-contains': return Array.isArray(actual) && actual.includes(value);
+    default: return true; // operador não suportado: não filtra (evita falso negativo)
+  }
+}
+
+function makeSnapshot(collName: string, constraints?: any[]) {
   const col = __collection(collName);
-  const docs = Array.from(col.entries()).map(([id, data]) => ({
+  let rows: Array<{ id: string; data: DocData }> = Array.from(col.entries())
+    .map(([id, data]) => ({ id, data: clone(data) }));
+
+  for (const c of constraints || []) {
+    if (!c) continue;
+    if (c.type === 'where') rows = rows.filter(r => matchesWhere(r.data, c.args));
+    if (c.type === 'orderBy') {
+      const [field, dir] = c.args;
+      rows = [...rows].sort((a, b) => {
+        const x = a.data?.[field];
+        const y = b.data?.[field];
+        if (x === y) return 0;
+        const cmp = x < y ? -1 : 1;
+        return dir === 'desc' ? -cmp : cmp;
+      });
+    }
+  }
+
+  const limitConstraint = (constraints || []).find(c => c && c.type === 'limit');
+  if (limitConstraint) rows = rows.slice(0, Number(limitConstraint.value) || rows.length);
+
+  const docs = rows.map(({ id, data }) => ({
     id,
     data: () => clone(data),
     exists: () => true,
@@ -172,7 +210,11 @@ export const firestoreMock = {
   },
 
   async getDocs(ref: any) {
-    return makeSnapshot(colNameOf(ref));
+    // As restrições de query são aplicadas a sério: `where`/`orderBy`/`limit`
+    // antes eram só metadados e qualquer consulta devolvia a colecção inteira.
+    // Isso escondia bugs (ex.: "procurar o turno aberto" devolvia também os
+    // fechados) e tornava os testes optimistas.
+    return makeSnapshot(colNameOf(ref), ref.constraints);
   },
 
   async getDoc(ref: any) {
