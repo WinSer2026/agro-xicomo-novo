@@ -55,6 +55,43 @@
   Na captura já está. ✔
 
 
+  ══════════════════════════════════════════════════════════════════════════
+   ATENÇÃO MÁXIMA — O QUE ESTÁ PUBLICADO AGORA (visto na 3.ª captura)
+  ══════════════════════════════════════════════════════════════════════════
+
+  A captura mostra o editor já aberto, com a versão de 24/08/2026 · 00:37.
+  Dois factos que mudam o plano:
+
+  1) [CONFIRMADO pela captura] O texto publicado diz, nos próprios comentários:
+       "as coleções operacionais permanecem legíveis/escrevíveis sem um token
+        Firebase Auth. A protecção definitiva exige a FASE 2"
+     Isto significa que as regras que estão AGORA em produção NÃO exigem
+     autenticação nas colecções de operação. Ou seja: a base está aberta a
+     quem tiver o endereço do projeto.
+
+     Consequência prática: repor esta versão "para voltar atrás" REABRE a base.
+     Só o faça se o sistema ficar inutilizável e por poucos minutos.
+
+  2) [CONFIRMADO pela captura] O histórico à esquerda existe (4 versões: 24/08
+     e três de 07/08). A reversão por histórico É possível nesta consola —
+     mas o ponto 1 continua a valer: a versão anterior é a aberta.
+
+  3) [CONSEQUÊNCIA IMPORTANTE] O teste "o sistema funciona agora" NÃO prova
+     que o login anónimo está ligado — hoje funciona precisamente porque as
+     regras não pedem autenticação. A verificação do login anónimo deixa de
+     ser recomendável e passa a ser OBRIGATÓRIA antes de publicar:
+
+       https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers
+       → fornecedor "Anónimo" tem de estar ATIVADO.
+       → e em "Users"/"Utilizadores" deve haver utilizadores anónimos.
+
+     Se publicar as regras novas com o login anónimo desligado, o sistema
+     fica sem acesso aos dados (listas vazias, erros "permission-denied").
+
+  Bom sinal: há versão de hoje? Não. A última é de 24/08 — confirma que as
+  regras que preparei nunca foram publicadas. É isso que vamos corrigir.
+
+
   PASSO 2 — Carregar em "Segurança" — O SEPARADOR DO TOPO, NÃO O DO MENU.
   ---------------------------------------------------------------------
   ⚠ ATENÇÃO, É AQUI QUE SE PERDE TEMPO:
@@ -83,6 +120,15 @@
   Se a página de "Segurança" abrir como um resumo com cartões (App Check,
   Authentication, Firestore Rules…), clique no cartão/ligação das REGRAS do
   Firestore ("Firestore Rules" / "Regras").
+
+  [CONFIRMADO] 3.ª captura: já está no sítio certo. Vê o histórico de versões
+  à esquerda e o texto das regras à direita. Falta entrar no MODO DE EDIÇÃO:
+  carregue no botão azul "Desenvolver e testar" (canto superior direito,
+  acima do editor). É esse botão que abre o editor com o botão "Publicar".
+
+  Nota: a vista que está a ver parece ser a de consulta/histórico. Se
+  conseguir escrever dentro do texto (clique e tente), pode editar já; se não,
+  use o botão "Desenvolver e testar".
 
   Atalho direto, se preferir colar no endereço:
   [PROVÁVEL] https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/databases/ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335/security/rules
