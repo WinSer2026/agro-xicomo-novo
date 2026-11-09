@@ -21,6 +21,9 @@
   escolhida (ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335),
   a barra de separadores é a que está acima, e o separador "Regras" não existe
   com esse nome nesta versão da consola.
+  [CONFIRMADO] segunda captura (09/11/2026): o menu lateral tem também uma
+  entrada "Segurança" que NÃO serve para isto — abre App Check, Authentication
+  e Phone Verification. O editor das regras está no separador do TOPO.
 
     Projeto ........: gen-lang-client-0896153566
     Base de dados ...: ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
@@ -52,11 +55,34 @@
   Na captura já está. ✔
 
 
-  PASSO 2 — Carregar em "Segurança".
-  ---------------------------------
-  É o segundo separador, imediatamente à direita de "Dados".
-  Vai aparecer o editor das regras (texto parecido com o do ficheiro
-  REGRAS-FIRESTORE-PARA-COLAR.txt) e, ao lado ou por cima, o simulador.
+  PASSO 2 — Carregar em "Segurança" — O SEPARADOR DO TOPO, NÃO O DO MENU.
+  ---------------------------------------------------------------------
+  ⚠ ATENÇÃO, É AQUI QUE SE PERDE TEMPO:
+
+     Há DOIS sítios com o nome "Segurança":
+       • o MENU LATERAL (coluna da esquerda) — "Segurança" é uma CATEGORIA
+         de produtos e abre App Check / Authentication / Phone Verification.
+         NÃO é o que queremos.
+       • o SEPARADOR DO TOPO — na barra horizontal imediatamente à direita de
+         "Dados":  Dados | Segurança | Índices | Recuperação de desastres | Uso
+         É ESTE. Está na mesma linha de "Dados", por cima do painel de dados.
+
+  [CONFIRMADO] Captura de ecrã de 09/11/2026: o ponteiro foi para o item
+  "Segurança" do menu lateral e abriu a lista App Check / Authentication /
+  Phone Verification. Esse caminho é o errado.
+
+  O que fazer:
+     • ignore a coluna da esquerda;
+     • clique na palavra "Segurança" que está na barra do topo, ao lado de
+       "Dados" (a que fica sublinhada quando selecionada).
+
+  Depois disso deve aparecer o editor das regras (texto parecido com o do
+  ficheiro REGRAS-FIRESTORE-PARA-COLAR.txt) e, ao lado ou por cima, o
+  simulador.
+
+  Se a página de "Segurança" abrir como um resumo com cartões (App Check,
+  Authentication, Firestore Rules…), clique no cartão/ligação das REGRAS do
+  Firestore ("Firestore Rules" / "Regras").
 
   Atalho direto, se preferir colar no endereço:
   [PROVÁVEL] https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/databases/ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335/security/rules
