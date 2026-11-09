@@ -57,8 +57,10 @@ porta com a chave do lado de dentro.
    (`ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`), não a `(default)`.
    Use o seletor de base de dados no topo da página. Confirmação: na aba "Dados" veem-se
    `products`, `sales`, `cash_movements`, `audit_logs`.
-2. Separador **Regras** (em inglês, *Rules*) — fica ao lado de "Dados", "Índices", "Utilização".
-   Antes de substituir, copie o texto atual para um ficheiro local (serve de reversão).
+2. Separador **Segurança** — na consola actual (verificado em 09/11/2026 no posto da empresa) a barra
+   é "Dados · Segurança · Índices · Recuperação de desastres · Uso"; o antigo separador "Regras"
+   passou a estar **dentro de "Segurança"**. Antes de substituir, copie o texto atual para um ficheiro
+   local (serve de reversão, porque o histórico pode não existir em bases com nome).
 3. Copiar **todo** o `REGRAS-FIRESTORE-PARA-COLAR.txt` (cópia exata do `firestore.rules`) e colar.
 4. **Publicar** (*Publish*) e esperar pela confirmação com hora.
 

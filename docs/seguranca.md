@@ -91,9 +91,10 @@ Se houver esse erro aqui, o problema é do login anónimo — volte ao Passo 1 a
 Atalho: <https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/rules>
 
 1. **Bancos de dados e armazenamento → Firestore**. Este projecto usa uma base **com nome**
-   (`ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`): se o separador "Rules" não
-   aparecer, falta escolher a base no seletor de base de dados. Em caso de dúvida sobre o caminho,
-   ver `PASSO-A-PASSO-PUBLICAR-REGRAS.txt`.
+   (`ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335`): confirme a base no seletor do
+   topo. Na consola actual as abas são "Dados · **Segurança** · Índices · Recuperação de desastres ·
+   Uso" — as regras estão dentro de **Segurança** (o antigo "Rules" deixou de existir com esse nome).
+   Em caso de dúvida, ver `PASSO-A-PASSO-PUBLICAR-REGRAS.txt`.
 2. Antes de substituir, copie o conteúdo actual para um ficheiro local (é a reversão de reserva).
 3. Cole **todo** o conteúdo de `REGRAS-FIRESTORE-PARA-COLAR.txt` (cópia exacta do `firestore.rules`).
 4. Clique em **Publish** e confirme a data/hora da publicação.
