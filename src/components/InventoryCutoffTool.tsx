@@ -30,6 +30,7 @@ import { Product, Sale, SystemSettings } from '../types';
 import { formatDateToISO, formatDatePT } from '../utils/dateRangeHelper';
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { getClientIp } from '../utils/clientInfo';
+import { canRefund, maxRefundFor } from '../utils/cashBox';
 import {
   analyzeSalesStockImpact,
   annotateCancelledSale,
@@ -77,6 +78,9 @@ export default function InventoryCutoffTool({
   const [toTime, setToTime] = useState('');
   const [reason, setReason] = useState(DEFAULT_REASON);
   const [restoreStock, setRestoreStock] = useState(false);
+  /** Registar em caixa a devolução aos clientes das vendas pagas anuladas. */
+  const [registerRefund, setRegisterRefund] = useState(false);
+  const [refundMethod, setRefundMethod] = useState('Dinheiro');
   const [excluded, setExcluded] = useState<Record<string, boolean>>({});
 
   const [showConfirm, setShowConfirm] = useState(false);
@@ -93,6 +97,7 @@ export default function InventoryCutoffTool({
     creditNotes: Array<{ invoiceNumber: string; creditNoteNumber: string }>;
     skipped: string[];
     clamped: string[];
+    refunded: number;
     atomic: boolean;
   } | null>(null);
 
@@ -146,6 +151,15 @@ export default function InventoryCutoffTool({
    * absolutos: assim uma venda registada entre a leitura e o clique não é
    * apagada pelo valor que estava no ecrã.
    */
+  const refundableSales = useMemo(
+    () => (mode === 'anular' ? selectedSales.filter(sale => canRefund(sale)) : []),
+    [mode, selectedSales]
+  );
+  const refundTotal = useMemo(
+    () => refundableSales.reduce((total, sale) => total + maxRefundFor(sale), 0),
+    [refundableSales]
+  );
+
   const stockDeltas = useMemo(() => {
     if (!direction) return [];
     const sinal = direction === 'deduct' ? -1 : 1;
@@ -332,12 +346,31 @@ export default function InventoryCutoffTool({
 
       const semStock = mode === 'anular' && !restoreStock;
 
+      /**
+       * Reembolsos: só para vendas que já tinham entrado em dinheiro. Uma
+       * proforma anulada não move dinheiro nenhum. O valor devolvido nunca
+       * passa o que o cliente pagou.
+       */
+      const refunds = mode === 'anular' && registerRefund
+        ? selectedSales
+            .filter(sale => canRefund(sale))
+            .map(sale => ({
+              saleId: String(sale.id || sale.invoiceNumber),
+              invoiceNumber: sale.invoiceNumber,
+              receiptNumber: sale.receiptNumber,
+              amount: maxRefundFor(sale),
+              method: refundMethod
+            }))
+            .filter(item => item.amount > 0)
+        : [];
+
       const execucao = await dbService.applyCutoff({
         sales: mode === 'anular' ? selectedSales : [],
         stockDeltas: semStock ? [] : stockDeltas,
         applyStock: !semStock,
         username,
-        reason: motivo
+        reason: motivo,
+        refunds
       });
 
       // Prova documento a documento: factura ↔ nota de crédito.
@@ -373,6 +406,7 @@ export default function InventoryCutoffTool({
         creditNotes: execucao.creditNotes,
         skipped: execucao.skipped,
         clamped: execucao.clamped,
+        refunded: execucao.refunded,
         atomic: execucao.atomic
       });
       setShowConfirm(false);
@@ -445,6 +479,11 @@ export default function InventoryCutoffTool({
                 </p>
               ) : (
                 <p className="text-xs">Stock corrigido em {result.productsCount} artigo(s). As facturas mantiveram-se válidas.</p>
+              )}
+              {result.refunded > 0 && (
+                <p className="text-[10px] text-amber-900 font-bold">
+                  {result.refunded.toFixed(2)} MT registados em caixa como devolução ao cliente.
+                </p>
               )}
               {result.creditNotes.length > 0 && (
                 <p className="text-[10px] text-emerald-800">
@@ -653,6 +692,40 @@ export default function InventoryCutoffTool({
                     vendas nunca chegaram a sair da loja (devolução real de mercadoria).
                   </span>
                 </span>
+              </label>
+            )}
+
+            {mode === 'anular' && refundableSales.length > 0 && (
+              <label className="flex items-start gap-2.5 bg-white border border-amber-200 rounded-lg p-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={registerRefund}
+                  onChange={e => setRegisterRefund(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-amber-600"
+                />
+                <span className="flex-1">
+                  <span className="block text-xs font-black text-slate-800">
+                    Devolvi dinheiro aos clientes — registar em caixa
+                  </span>
+                  <span className="block text-[11px] text-slate-500 mt-0.5">
+                    {refundableSales.length} venda(s) já pagas ·{' '}
+                    <strong className="text-amber-800">{refundTotal.toFixed(2)} MT</strong> a devolver. Sem este
+                    registo, o caixa fecha com falta exatamente desse valor.
+                  </span>
+                </span>
+                {registerRefund && (
+                  <select
+                    value={refundMethod}
+                    onChange={e => setRefundMethod(e.target.value)}
+                    onClick={e => e.stopPropagation()}
+                    className="border border-slate-300 rounded-md px-1.5 py-1 text-[11px] font-bold bg-white"
+                  >
+                    <option>Dinheiro</option>
+                    <option>Transferência</option>
+                    <option>M-Pesa</option>
+                    <option>E-Mola</option>
+                  </select>
+                )}
               </label>
             )}
 

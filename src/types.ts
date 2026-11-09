@@ -412,3 +412,38 @@ export interface StockMovement {
   terminalId?: string;
   note?: string;
 }
+
+/**
+ * Movimento de caixa.
+ *
+ * Porque existe: até aqui, tudo o que saía de dinheiro do estabelecimento tinha
+ * documento — venda, recibo, nota de crédito, quebra. O reembolso ao cliente não
+ * tinha nenhum. O caixa fechava com falta exatamente igual ao devolvido e não
+ * havia forma de provar que saiu, para onde, nem com que autorização. Uma nota
+ * de crédito sem saída de caixa correspondente é, para um inspector, ou um
+ * cliente que não foi pago (NC falsa) ou um pagamento feito fora do sistema.
+ */
+export interface CashMovement {
+  id: string;
+  /** Momento do movimento (ISO). */
+  date: string;
+  /** Dia local de Maputo (AAAA-MM-DD), para relatórios por dia. */
+  day: string;
+  /**
+   * Reembolso = dinheiro que sai para o cliente.
+   * Sangria = retirada do operador. Entrada/Fundo = reposição.
+   */
+  type: 'Reembolso' | 'Sangria' | 'Entrada' | 'Fundo';
+  /** Valor em MT. Positivo entra, negativo sai. */
+  amount: number;
+  method: string;
+  operator: string;
+  /** Quem autorizou com a palavra-passe de gestor. */
+  authorizedBy?: string;
+  /** Factura que originou o movimento. */
+  reference?: string;
+  creditNoteNumber?: string;
+  receiptNumber?: string;
+  notes?: string;
+  terminalId?: string;
+}

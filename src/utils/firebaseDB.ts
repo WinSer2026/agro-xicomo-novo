@@ -41,7 +41,8 @@ import {
   Customer, 
   PausedSale,
   ProductTransformation,
-  StockMovement
+  StockMovement,
+  CashMovement
 } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage, safeSessionStorage } from './safeStorage';
@@ -75,6 +76,8 @@ export interface CutoffResult {
   creditNotes: Array<{ invoiceNumber: string; creditNoteNumber: string }>;
   stockAdjusted: number;
   clamped: string[];
+  /** Total em MT devolvido aos clientes nesta operação. */
+  refunded: number;
   /** false quando a operação teve de ser dividida em mais do que uma transacção. */
   atomic: boolean;
 }
@@ -253,6 +256,7 @@ export class FirebaseDBService {
   private transformationsCache: ProductTransformation[] | null = null;
   private settingsCache: SystemSettings | null = null;
   private lossesCache: LossRecord[] | null = null;
+  private cashMovementsCache: CashMovement[] | null = null;
   private payrollCache: PayrollPayment[] | null = null;
   private pausedSalesCache: PausedSale[] | null = null;
   private employeesCache: Employee[] | null = null;
@@ -1326,6 +1330,8 @@ export class FirebaseDBService {
     applyStock: boolean;
     username: string;
     reason: string;
+    /** Reembolsos a registar em caixa, um por factura paga anulada. */
+    refunds?: Array<{ saleId?: string; invoiceNumber?: string; creditNoteNumber?: string; receiptNumber?: string; amount: number; method: string }>;
   }): Promise<CutoffResult> {
     await this.ensureAuth();
 
@@ -1333,6 +1339,7 @@ export class FirebaseDBService {
     const deltas = input.applyStock
       ? (input.stockDeltas || []).filter(delta => delta && delta.productId)
       : [];
+    const reembolsos = (input.refunds || []).filter(r => r && Number(r.amount) > 0);
 
     const resultado: CutoffResult = {
       cancelled: 0,
@@ -1340,10 +1347,11 @@ export class FirebaseDBService {
       creditNotes: [],
       stockAdjusted: 0,
       clamped: [],
+      refunded: 0,
       atomic: true
     };
 
-    if (vendas.length === 0 && deltas.length === 0) return resultado;
+    if (vendas.length === 0 && deltas.length === 0 && reembolsos.length === 0) return resultado;
 
     const CHUNK = 150; // 150 vendas + 150 produtos + contador < 500 escritas
     if (vendas.length > CHUNK) resultado.atomic = false;
@@ -1416,6 +1424,37 @@ export class FirebaseDBService {
           transaction.set(counterRef, { [prefix]: next, updatedAt: new Date().toISOString() }, { merge: true });
         }
 
+        // --- Reembolsos: entram no livro de caixa no mesmo commit ---
+        if (inicio === 0 && reembolsos.length > 0) {
+          const agora = new Date().toISOString();
+          // Dia local de Maputo: às 23:30 a data UTC já é o dia seguinte.
+          const diaCaixa = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Africa/Maputo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+          }).format(new Date());
+          for (const reembolso of reembolsos) {
+            const id = `cx-corte-${reembolso.saleId || reembolso.invoiceNumber || agora}-${next}`;
+            const movimento: CashMovement = {
+              id,
+              date: agora,
+              day: diaCaixa,
+              type: 'Reembolso',
+              amount: -Math.abs(Number(reembolso.amount)),
+              method: reembolso.method || 'Dinheiro',
+              operator: input.username,
+              authorizedBy: input.username,
+              reference: reembolso.invoiceNumber,
+              receiptNumber: reembolso.receiptNumber,
+              creditNoteNumber: reembolso.creditNoteNumber,
+              notes: `Reembolso por anulação em corte de inventário (${input.reason})`
+            };
+            transaction.set(doc(db, 'cash_movements', id), movimento);
+            resultado.refunded += Math.abs(Number(reembolso.amount));
+          }
+        }
+
         // --- Stock, por diferença ---
         if (aplicarStockAgora) {
           const refsProdutos = deltas.map(delta => doc(db, 'products', String(delta.productId)));
@@ -1468,7 +1507,46 @@ export class FirebaseDBService {
     if (resultado.stockAdjusted > 0) {
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'cutoff-stock' } }));
     }
+    if (resultado.refunded > 0) {
+      this.cashMovementsCache = null;
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_movements', action: 'cutoff-refund' } }));
+    }
     return resultado;
+  }
+
+  // --- Movimentos de caixa (reembolsos, sangrias) ---
+
+  /**
+   * Lê os movimentos de caixa. É a única fonte de verdade para o dinheiro que
+   * saiu da gaveta sem ser por venda.
+   */
+  public async getCashMovements(): Promise<CashMovement[]> {
+    if (this.cashMovementsCache) return this.cashMovementsCache;
+    const lista = await this.getAll<CashMovement>('cash_movements');
+    this.cashMovementsCache = lista.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    return this.cashMovementsCache;
+  }
+
+  /**
+   * Regista um movimento de caixa.
+   *
+   * Não é "best effort": se o reembolso não ficar gravado, o dinheiro sai e o
+   * caixa passa a ter uma falta sem explicação. O chamador tem de tratar o erro
+   * e dizer ao operador que a devolução não foi registada.
+   */
+  public async addCashMovement(movement: CashMovement): Promise<void> {
+    const valor = Number(movement.amount) || 0;
+    if (valor === 0) return;
+    const registo: CashMovement = {
+      ...movement,
+      id: movement.id || `cx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      day: movement.day || movement.date?.substring(0, 10) || new Date().toISOString().substring(0, 10),
+      // Saídas ficam sempre negativas: é o que o saldo de caixa espera.
+      amount: movement.type === 'Reembolso' || movement.type === 'Sangria' ? -Math.abs(valor) : Math.abs(valor)
+    };
+    await this.upsert('cash_movements', registo.id, registo);
+    this.cashMovementsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_movements', action: 'add' } }));
   }
 
   // --- Losses ---

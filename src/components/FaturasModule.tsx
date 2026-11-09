@@ -12,6 +12,7 @@ import {
   settlementDisclaimer
 } from '../utils/saleStatus';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
 import { Sale, SystemSettings } from '../types';
 import {
   downloadInvoiceA4,
@@ -81,6 +82,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     error: string;
     /** Meio de pagamento escolhido na liquidação (só usado com action 'pay'). */
     paymentMethod?: string;
+    /** Houve devolução de dinheiro ao cliente? (só usado com action 'cancel'). */
+    refund?: boolean;
+    /** Valor devolvido, em texto para o operador poder corrigir. */
+    refundAmount?: string;
+    refundMethod?: string;
   }>({ show: false, action: 'cancel', sale: null, password: '', error: '' });
 
   const PAYMENT_METHODS = ['Dinheiro', 'Transferência', 'M-Pesa', 'E-Mola'] as const;
@@ -348,12 +354,18 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   };
 
   const handleCancelInvoice = (sale: Sale) => {
+    const podeDevolver = canRefund(sale);
     setSecurityModal({
       show: true,
       action: 'cancel',
       sale,
       password: '',
-      error: ''
+      error: '',
+      // Nunca pré-marcado: devolver dinheiro é uma decisão, não um efeito
+      // colateral de anular uma factura.
+      refund: false,
+      refundAmount: podeDevolver ? maxRefundFor(sale).toFixed(2) : '',
+      refundMethod: 'Dinheiro'
     });
   };
 
@@ -528,6 +540,44 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         }
 
         actionPersisted = true;
+
+        // ── Reembolso ao cliente ────────────────────────────────────────
+        // A factura está anulada; o dinheiro pode ter de sair. Se sair sem
+        // registo, o caixa fecha com falta e não há forma de provar nada.
+        let refundRegistered = 0;
+        let refundError = '';
+        if (securityModal.refund && canRefund(sale)) {
+          const valor = Number(String(securityModal.refundAmount || '').replace(',', '.'));
+          const maximo = maxRefundFor(sale);
+          if (!Number.isFinite(valor) || valor <= 0) {
+            refundError = 'A devolução ficou por registar: valor inválido.';
+          } else if (valor > maximo + 0.01) {
+            refundError = `A devolução ficou por registar: o máximo devolvível é ${maximo.toFixed(2)} MT (o que o cliente pagou).`;
+          } else {
+            const agora = new Date().toISOString();
+            try {
+              await dbService.addCashMovement({
+                id: `cx-reembolso-${sale.id || sale.invoiceNumber}-${Date.now()}`,
+                date: agora,
+                day: toCashDay(agora),
+                type: 'Reembolso',
+                amount: -Math.abs(valor),
+                method: securityModal.refundMethod || 'Dinheiro',
+                operator,
+                authorizedBy: operator,
+                reference: sale.invoiceNumber,
+                receiptNumber: sale.receiptNumber,
+                creditNoteNumber,
+                notes: `Devolução ao cliente na anulação de ${sale.invoiceNumber}`
+              });
+              refundRegistered = valor;
+            } catch (erro) {
+              console.error('[Faturas] Falha ao registar o reembolso:', erro);
+              refundError = 'A devolução NÃO foi registada em caixa — registe-a manualmente antes de fechar o dia.';
+            }
+          }
+        }
+
         setSecurityModal({ show: false, action: 'cancel', sale: null, password: '', error: '' });
 
         const cancelledSale: Sale = { ...sale, ...cancellationMeta, status: 'Cancelada' };
@@ -554,7 +604,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           details:
             `Venda ${sale.invoiceNumber} (${sale.total} MT) anulada por ${operator}. ` +
             (creditNoteNumber ? `Nota de crédito emitida: ${creditNoteNumber}.` : 'Documento não definitivo: sem nota de crédito.') +
-            receiptNote
+            receiptNote +
+            (refundRegistered > 0
+              ? ` Devolvidos ${refundRegistered.toFixed(2)} MT ao cliente por ${securityModal.refundMethod || 'Dinheiro'}.`
+              : ' Sem devolução de dinheiro registada.') +
+            (refundError ? ` ${refundError}` : '')
         });
         void runPostCommitTask({
           label: 'atualizar as faturas depois da anulação',
@@ -565,8 +619,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           ? ` Atenção: sem stock reposto em ${missingProducts.join(', ')} (artigo já não existe no catálogo).`
           : '';
         showToast(
-          `Venda ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}.` + missingNote,
-          missingProducts.length ? 'warning' : 'success'
+          `Venda ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}.` +
+            (refundRegistered > 0 ? ` Devolvidos ${refundRegistered.toFixed(2)} MT (${securityModal.refundMethod || 'Dinheiro'}).` : '') +
+            missingNote +
+            (refundError ? ` ${refundError}` : ''),
+          refundError || missingProducts.length ? 'warning' : 'success'
         );
       } else {
         // ── Reemissão ───────────────────────────────────────────────────
@@ -2024,7 +2081,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 {securityModal.action === 'cancel' && (
                   <p className="text-[10px] text-red-700 mt-1 text-left">
                     O stock é devolvido ao inventário e é emitida uma nota de crédito com número próprio.
-                    Esta acção não devolve dinheiro: o reembolso tem de ser registado em caixa.
+                    Se o cliente já pagou, diga abaixo se o dinheiro voltou: sem esse registo, o caixa fecha com falta.
                   </p>
                 )}
                 {securityModal.action === 'restore' && (
@@ -2070,6 +2127,63 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                     ))}
                   </div>
                 </div>
+              ) : securityModal.action === 'cancel' && canRefund(securityModal.sale) ? (
+                <form onSubmit={(e) => { e.preventDefault(); handleExecuteSecurityAction(); }} className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(securityModal.refund)}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, refund: e.target.checked, error: '' }))}
+                      className="mt-0.5 w-4 h-4 accent-amber-600 cursor-pointer"
+                    />
+                    <span className="text-[11px] font-bold text-amber-900 leading-tight">
+                      Devolvi dinheiro ao cliente
+                      <span className="block font-normal text-[10px] text-amber-700">
+                        Máximo devolvível: {maxRefundFor(securityModal.sale).toFixed(2)} MT
+                        {securityModal.sale.receiptNumber ? ` • recibo ${securityModal.sale.receiptNumber}` : ''}
+                      </span>
+                    </span>
+                  </label>
+
+                  {securityModal.refund && (
+                    <div className="grid grid-cols-[1fr_auto] gap-1.5">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={securityModal.refundAmount || ''}
+                        onChange={(e) => setSecurityModal(prev => ({ ...prev, refundAmount: e.target.value, error: '' }))}
+                        placeholder="Valor devolvido"
+                        className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                      <select
+                        value={securityModal.refundMethod || 'Dinheiro'}
+                        onChange={(e) => setSecurityModal(prev => ({ ...prev, refundMethod: e.target.value }))}
+                        className="border border-gray-300 rounded-lg px-2 py-1.5 text-[11px] font-bold bg-white focus:outline-none"
+                      >
+                        <option>Dinheiro</option>
+                        <option>Transferência</option>
+                        <option>M-Pesa</option>
+                        <option>E-Mola</option>
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-black uppercase text-gray-500">
+                      Senha do Gestor (autoriza a anulação e a devolução)
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      placeholder="Palavra-passe de gestor"
+                      value={securityModal.password}
+                      onChange={(e) => setSecurityModal(prev => ({ ...prev, password: e.target.value, error: '' }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-center font-bold text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                      autoFocus
+                    />
+                  </div>
+                </form>
               ) : (
                 <div className="space-y-1">
                   <label className="block text-[10px] font-black uppercase text-gray-500">

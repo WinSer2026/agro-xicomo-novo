@@ -3,7 +3,8 @@ import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
 import { isFinancialSale, isDebtSale } from '../utils/saleStatus';
-import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
+import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
+import { cashBalance, sumRefunds } from '../utils/cashBox';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
 import { jsPDF } from 'jspdf';
@@ -19,6 +20,8 @@ export default function FinanceModule() {
   const [products, setProducts] = useState<Product[]>([]);
   const [transformations, setTransformations] = useState<ProductTransformation[]>([]);
   const [payrollPayments, setPayrollPayments] = useState<PayrollPayment[]>([]);
+  /** Movimentos de caixa (reembolsos, sangrias): dinheiro que saiu sem venda. */
+  const [cashMovements, setCashMovements] = useState<CashMovement[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [toastMessage, setToastMessage] = useState('');
@@ -52,7 +55,8 @@ export default function FinanceModule() {
         updatedTable === 'audit_logs' ||
         updatedTable === 'settings' ||
         updatedTable === 'transformations' ||
-        updatedTable === 'payroll_payments'
+        updatedTable === 'payroll_payments' ||
+        updatedTable === 'cash_movements'
       ) {
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
@@ -72,7 +76,7 @@ export default function FinanceModule() {
     // Finance computes complete-period reports, so it explicitly opts into
     // full live sales/catalogue data rather than relying on history pages.
     await dbService.enableLiveCatalogAndSalesSync();
-    const [salesList, lossesList, prodsList, auditPage, config, trfList, payrollList] = await Promise.all([
+    const [salesList, lossesList, prodsList, auditPage, config, trfList, payrollList, cashList] = await Promise.all([
       dbService.getSales(),
       dbService.getLosses(),
       dbService.getProducts(),
@@ -81,7 +85,8 @@ export default function FinanceModule() {
       dbService.getAuditLogsPage({ pageSize: 100 }),
       dbService.getSettings(),
       dbService.getTransformations(),
-      dbService.getPayrollPayments()
+      dbService.getPayrollPayments(),
+      dbService.getCashMovements()
     ]);
     setSales(salesList);
     setLosses(lossesList);
@@ -90,6 +95,7 @@ export default function FinanceModule() {
     setSettings(config);
     setTransformations(trfList);
     setPayrollPayments(payrollList);
+    setCashMovements(cashList);
   };
 
   const showToast = (msg: string) => {
@@ -2151,6 +2157,50 @@ export default function FinanceModule() {
       {/* --- SUB-TAB 3: LIVRO DE VENDAS & GRÁFICOS (LEDGER) --- */}
       {activeSubTab === 'ledger' && (
         <div className="space-y-6">
+          {(() => {
+            const caixa = cashBalance(sales, cashMovements, startDate, endDate);
+            const reembolsos = sumRefunds(cashMovements, startDate, endDate);
+            const movimentos = cashMovements.filter(m => m.day >= startDate && m.day <= endDate).slice(0, 6);
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="bg-white border border-emerald-200 rounded-xl p-3">
+                  <p className="text-[9px] uppercase font-black text-emerald-700">Entrou em dinheiro</p>
+                  <p className="text-lg font-black font-mono text-emerald-700">{caixa.inflow.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</p>
+                  <p className="text-[9px] text-slate-500">Vendas pagas em dinheiro no período</p>
+                </div>
+                <div className={`bg-white border rounded-xl p-3 ${caixa.outflow > 0 ? 'border-rose-300' : 'border-slate-200'}`}>
+                  <p className="text-[9px] uppercase font-black text-rose-700">Saiu em dinheiro</p>
+                  <p className={`text-lg font-black font-mono ${caixa.outflow > 0 ? 'text-rose-700' : 'text-slate-400'}`}>{caixa.outflow.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</p>
+                  <p className="text-[9px] text-slate-500">{reembolsos > 0 ? `${reembolsos.toFixed(2)} MT devolvidos a clientes` : 'Sem reembolsos no período'}</p>
+                </div>
+                <div className="bg-white border border-slate-300 rounded-xl p-3">
+                  <p className="text-[9px] uppercase font-black text-slate-500">Saldo de caixa</p>
+                  <p className={`text-lg font-black font-mono ${caixa.balance < 0 ? 'text-rose-700' : 'text-slate-800'}`}>{caixa.balance.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</p>
+                  <p className="text-[9px] text-slate-500">Deve coincidir com a gaveta ao fechar o dia</p>
+                </div>
+                {movimentos.length > 0 && (
+                  <div className="md:col-span-3 bg-white border border-slate-200 rounded-xl p-3">
+                    <p className="text-[9px] uppercase font-black text-slate-500 mb-1">Últimas saídas de caixa</p>
+                    <div className="space-y-0.5">
+                      {movimentos.map(m => (
+                        <div key={m.id} className="flex items-center justify-between text-[10px] border-b border-slate-100 last:border-0 py-0.5">
+                          <span className="font-bold text-slate-700">
+                            {m.type} · {m.reference || '—'}
+                            {m.creditNoteNumber ? ` · ${m.creditNoteNumber}` : ''}
+                          </span>
+                          <span className="text-slate-500">{m.method} · {m.operator}</span>
+                          <span className={`font-mono font-black ${m.amount < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                            {m.amount.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Financial Bento Cards Summary */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
