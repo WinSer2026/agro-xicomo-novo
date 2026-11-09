@@ -39,7 +39,7 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 | **V-C10** | P2 | O motivo é texto livre e podia ir vazio. | **Fechado**: mínimo de 10 caracteres, validado antes de executar |
 | **V-C11** | P2 | O modo "anular e relançar" não impede o **relançamento duplicado** no PDV: se o operador repetir, vende duas vezes. | **Aberto** |
 | **V-C14** | **P0** | **A palavra-passe do corte nunca podia estar certa.** O ecrã comparava o texto escrito com o próprio `stockPasswordHash` (`typed !== expected`). Com a palavra-passe guardada em hash — que é o formato normal — qualquer tentativa falhava; e onde fosse texto simples, a palavra-passe era válida por comparação direta, sem o helper de autorização. | **Fechado**: passa a usar `verifyAuthorizationPassword` (hash com salt) |
-| **V-C12** | P3 | `projectStock` usa `Math.max(0, …)`: a pré-visualização esconde saldos negativos em vez de os mostrar. | **Aberto** |
+| **V-C12** | P2 | `projectStock` usava `Math.max(0, …)`: a pré-visualização escondia saldos negativos. Um artigo que ia ficar a −40 kg aparecia a 0 — indistinguível de «já não há stock», quando na verdade a venda saiu de mercadoria que o sistema não tem. | **Fechado**: a pré-visualização mostra o saldo real, a vermelho, com «falta X»; um aviso conta os artigos sem stock suficiente. A gravação continua a travar em zero e a dizer o nome do artigo |
 | **V-C13** | P3 | `ipAddress: '127.0.0.1'` fixo no registo de auditoria. | **Fechado**: IP real via `/api/client-info` |
 
 ---
@@ -57,7 +57,7 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 
 ## 4. Verificação
 
-`npx tsc --noEmit` sem erros · `test/inventory_cutoff_test.ts` **49/49** · `test/master_plan_test.ts` 44/44 · `vite build` concluído.
+`npx tsc --noEmit` sem erros · `test/inventory_cutoff_test.ts` **54/54** · `test/master_plan_test.ts` 44/44 · `vite build` concluído.
 
 **Não verificado:** o comportamento com dois postos a operar durante o corte, e o relançamento no PDV após anulação em massa — só se fecham em ambiente real.
 
@@ -72,5 +72,5 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 | 5 | **V-C13** — IP real | ✅ feito |
 | 6 | **V-C14** — palavra-passe comparada com o hash | ✅ feito |
 | 7 | **V-C11** — impedir relançamento duplicado no PDV | ⏳ em aberto |
-| 8 | **V-C12** — mostrar saldos negativos na pré-visualização | ⏳ em aberto |
+| 8 | **V-C12** — mostrar saldos negativos na pré-visualização | ✅ feito |
 | 9 | **V-C09 (lote)** — acima de 150 vendas a operação é dividida; sinalizar no registo de stock | ⏳ em aberto |

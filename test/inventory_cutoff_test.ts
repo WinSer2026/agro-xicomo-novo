@@ -243,7 +243,16 @@ assert(
 );
 
 const movNegativo = { ...movMilho, currentStockQty: 10, currentStockBulk: 0, currentStockRetail: 0 };
-assert(projectStock(movNegativo, 'deduct').stockQty === 0, 'Saldo é travado em zero (nunca negativo)');
+/**
+ * V-C12: a pré-visualização mostrava zero e escondia o problema. Agora mostra o
+ * saldo real (negativo) e diz quanto falta; só a GRAVAÇÃO trava em zero.
+ */
+assert(projectStock(movNegativo, 'deduct').stockQty < 0, 'Pré-visualização mostra o saldo negativo');
+assert(projectStock(movNegativo, 'deduct').insufficient === true, 'Marca stock insuficiente');
+assert(projectStock(movNegativo, 'deduct').shortfallQty > 0, 'Diz quanto falta');
+assert(projectStock(movMilho, 'deduct').insufficient === false, 'Stock suficiente não é sinalizado');
+assert(projectStock(movMilho, 'deduct').shortfallQty === 0, 'Sem falta quando há stock');
+assert(buildStockSnapshots([movNegativo], 'deduct')[0].stockQty === 0, 'A gravação continua a travar em zero');
 
 /* ------------------------------------------------------------------ */
 /* Suite 4 — Contagem lançada com atraso                                */

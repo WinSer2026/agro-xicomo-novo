@@ -822,6 +822,20 @@ export default function InventoryCutoffTool({
               </div>
             </div>
 
+            {/* V-C12: saldos que não chegam têm de ser vistos, não arredondados */}
+            {direction && impact.movements.some(m => projectStock(m, direction).insufficient) && (
+              <div className="bg-rose-50 border border-rose-300 rounded-lg px-3 py-2">
+                <p className="text-[11px] font-black text-rose-800 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[15px]">error</span>
+                  {impact.movements.filter(m => projectStock(m, direction).insufficient).length} artigo(s) sem stock suficiente
+                </p>
+                <p className="text-[10px] text-rose-700 mt-0.5">
+                  O saldo final destes artigos ficaria negativo. A gravação trava em zero — o que significa que
+                  a venda saiu de mercadoria que o sistema não tem. Confirme a contagem física antes de executar.
+                </p>
+              </div>
+            )}
+
             {/* Tabela de impacto por artigo */}
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
@@ -852,7 +866,7 @@ export default function InventoryCutoffTool({
                       impact.movements.map(movement => {
                         const projected = direction
                           ? projectStock(movement, direction)
-                          : { stockQty: movement.currentStockQty };
+                          : { stockQty: movement.currentStockQty, insufficient: false, shortfallQty: 0 };
                         const changed = projected.stockQty !== movement.currentStockQty;
                         return (
                           <tr key={movement.productId}>
@@ -872,10 +886,26 @@ export default function InventoryCutoffTool({
                             <td className="p-2 text-right font-mono text-slate-500">{qty(movement.currentStockQty)}</td>
                             <td
                               className={`p-2 text-right font-mono font-black ${
-                                changed ? (projected.stockQty < movement.currentStockQty ? 'text-red-700' : 'text-blue-700') : 'text-slate-400'
+                                projected.stockQty < 0
+                                  ? 'text-rose-700 bg-rose-50'
+                                  : changed
+                                    ? projected.stockQty < movement.currentStockQty
+                                      ? 'text-red-700'
+                                      : 'text-blue-700'
+                                    : 'text-slate-400'
                               }`}
+                              title={
+                                projected.insufficient
+                                  ? `Faltam ${qty(projected.shortfallQty)} ${movement.baseUnit} — a gravação trava em 0`
+                                  : undefined
+                              }
                             >
                               {qty(projected.stockQty)}
+                              {projected.insufficient && (
+                                <span className="block text-[8.5px] font-bold leading-tight">
+                                  falta {qty(projected.shortfallQty)}
+                                </span>
+                              )}
                             </td>
                           </tr>
                         );
