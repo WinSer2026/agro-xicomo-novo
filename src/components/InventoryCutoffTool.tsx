@@ -28,6 +28,8 @@ import { dbService } from '../utils/firebaseDB';
 import Toast, { type ToastKind } from './Toast';
 import { Product, Sale, SystemSettings } from '../types';
 import { formatDateToISO, formatDatePT } from '../utils/dateRangeHelper';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { getClientIp } from '../utils/clientInfo';
 import {
   analyzeSalesStockImpact,
   annotateCancelledSale,
@@ -37,7 +39,6 @@ import {
   getSaleTimeLabel,
   projectStock,
   selectSalesForCutoff,
-  StockCorrectionSnapshot,
   toDayKey
 } from '../utils/inventoryCutoff';
 
@@ -89,6 +90,10 @@ export default function InventoryCutoffTool({
     salesCount: number;
     productsCount: number;
     stockTouched: boolean;
+    creditNotes: Array<{ invoiceNumber: string; creditNoteNumber: string }>;
+    skipped: string[];
+    clamped: string[];
+    atomic: boolean;
   } | null>(null);
 
   const loadData = useCallback(async () => {
@@ -136,10 +141,22 @@ export default function InventoryCutoffTool({
   const direction: 'deduct' | 'restore' | null =
     mode === 'descontar' ? 'deduct' : restoreStock ? 'restore' : null;
 
-  const snapshots: StockCorrectionSnapshot[] = useMemo(
-    () => (direction ? buildStockSnapshots(impact.movements, direction) : []),
-    [impact.movements, direction]
-  );
+  /**
+   * Variações a aplicar ao stock. Trabalha-se com diferenças, não com saldos
+   * absolutos: assim uma venda registada entre a leitura e o clique não é
+   * apagada pelo valor que estava no ecrã.
+   */
+  const stockDeltas = useMemo(() => {
+    if (!direction) return [];
+    const sinal = direction === 'deduct' ? -1 : 1;
+    return impact.movements.map(movement => ({
+      productId: movement.productId,
+      productName: movement.productName,
+      base: sinal * movement.soldBase,
+      bulk: movement.hasConversion ? sinal * movement.soldBulk : undefined,
+      retail: movement.hasConversion ? sinal * movement.soldRetail : undefined
+    }));
+  }, [impact.movements, direction]);
 
   const cancelledSameDay = useMemo(
     () => (sales || []).filter(sale => sale.status === 'Cancelada' && toDayKey(sale.date) === day).length,
@@ -284,14 +301,26 @@ export default function InventoryCutoffTool({
     event.preventDefault();
     if (isRunning) return;
 
-    const expected = (settings?.stockPasswordHash || '').trim();
-    const typed = password.trim();
-    if (!expected || typed !== expected) {
-      setError('Palavra-passe de autorização incorrecta ou não configurada.');
+    // A palavra-passe é verificada contra a configuração real (hash com salt).
+    // A versão anterior comparava o texto escrito com o próprio hash guardado
+    // — com qualquer palavra-passe protegida, o corte era impossível de usar.
+    if (!(await verifyAuthorizationPassword(password, settings))) {
+      setError('Palavra-passe de autorização incorrecta.');
       return;
     }
-    if (selectedSales.length === 0) {
+
+    const motivo = reason.trim();
+    if (motivo.length < 10) {
+      setError('Indique o motivo (mínimo 10 caracteres). Sem isso, a anulação não tem justificação em auditoria.');
+      return;
+    }
+
+    if (mode === 'anular' && selectedSales.length === 0) {
       setError('Não há vendas seleccionadas para processar.');
+      return;
+    }
+    if (mode === 'descontar' && stockDeltas.length === 0) {
+      setError('Não há quantidades a descontar no período escolhido.');
       return;
     }
 
@@ -299,36 +328,52 @@ export default function InventoryCutoffTool({
     setError('');
     try {
       const username = currentUser?.username || 'Gestor';
+      const ipAddress = await getClientIp().catch(() => 'desconhecido');
 
-      if (mode === 'anular') {
-        const annotated = selectedSales.map(sale => annotateCancelledSale(sale, reason, username));
-        await dbService.cancelSalesBulk(annotated, snapshots);
-      } else {
-        await dbService.applyStockCorrection(snapshots);
-      }
+      const semStock = mode === 'anular' && !restoreStock;
+
+      const execucao = await dbService.applyCutoff({
+        sales: mode === 'anular' ? selectedSales : [],
+        stockDeltas: semStock ? [] : stockDeltas,
+        applyStock: !semStock,
+        username,
+        reason: motivo
+      });
+
+      // Prova documento a documento: factura ↔ nota de crédito.
+      const mapa = execucao.creditNotes
+        .slice(0, 60)
+        .map(item => `${item.invoiceNumber}→${item.creditNoteNumber}`)
+        .join('; ');
 
       await dbService.addAuditLog({
         id: 'log-cutoff-' + Date.now(),
         timestamp: new Date().toISOString(),
         username,
-        ipAddress: '127.0.0.1',
+        ipAddress,
         action: mode === 'anular' ? 'Anulação em Massa (Corte de Inventário)' : 'Correcção de Stock por Corte de Inventário',
         status: 'Sucesso',
         level: 'WARNING',
         entity: 'sales/products',
         details:
           mode === 'anular'
-            ? `${selectedSales.length} venda(s) do dia ${day} anuladas ${snapshots.length > 0 ? 'COM' : 'SEM'} estorno de stock. ` +
-              `Valor anulado: ${money(impact.totals.totalValue)}. Motivo: ${reason}`
-            : `Stock corrigido em ${snapshots.length} artigo(s) com base em ${selectedSales.length} venda(s) do dia ${day} ` +
-              `posteriores à contagem física. Custo movimentado: ${money(impact.totals.costValue)}. Motivo: ${reason}`
+            ? `${execucao.cancelled} venda(s) do dia ${day} anuladas ${execucao.stockAdjusted > 0 ? 'COM' : 'SEM'} estorno de stock. ` +
+              `Valor anulado: ${money(impact.totals.totalValue)}. Motivo: ${motivo}. ` +
+              `Ignoradas (já anuladas ou inexistentes): ${execucao.skipped.length}. ` +
+              `Notas de crédito: ${mapa || 'nenhuma'}`
+            : `Stock corrigido em ${execucao.stockAdjusted} artigo(s) com base em ${selectedSales.length} venda(s) do dia ${day} ` +
+              `posteriores à contagem física. Custo movimentado: ${money(impact.totals.costValue)}. Motivo: ${motivo}.`
       });
 
       setResult({
         mode,
-        salesCount: selectedSales.length,
-        productsCount: mode === 'anular' ? snapshots.length : snapshots.length,
-        stockTouched: snapshots.length > 0
+        salesCount: execucao.cancelled,
+        productsCount: execucao.stockAdjusted,
+        stockTouched: execucao.stockAdjusted > 0,
+        creditNotes: execucao.creditNotes,
+        skipped: execucao.skipped,
+        clamped: execucao.clamped,
+        atomic: execucao.atomic
       });
       setShowConfirm(false);
       setPassword('');
@@ -399,8 +444,30 @@ export default function InventoryCutoffTool({
                     : 'sem qualquer alteração de stock. Pode agora relançar as vendas no PDV.'}
                 </p>
               ) : (
-                <p className="text-xs">
-                  Stock corrigido em {result.productsCount} artigo(s). As facturas mantiveram-se válidas.
+                <p className="text-xs">Stock corrigido em {result.productsCount} artigo(s). As facturas mantiveram-se válidas.</p>
+              )}
+              {result.creditNotes.length > 0 && (
+                <p className="text-[10px] text-emerald-800">
+                  {result.creditNotes.length} nota(s) de crédito emitida(s) ·{' '}
+                  {result.creditNotes.slice(0, 4).map(n => `${n.invoiceNumber}→${n.creditNoteNumber}`).join(', ')}
+                  {result.creditNotes.length > 4 ? ' …' : ''}
+                </p>
+              )}
+              {result.skipped.length > 0 && (
+                <p className="text-[10px] text-amber-800 font-bold">
+                  {result.skipped.length} documento(s) ignorado(s) por já estarem anulados ou não existirem:{' '}
+                  {result.skipped.slice(0, 4).join(', ')}{result.skipped.length > 4 ? ' …' : ''}
+                </p>
+              )}
+              {result.clamped.length > 0 && (
+                <p className="text-[10px] text-rose-800 font-bold">
+                  Stock travado em zero (não havia saldo suficiente): {result.clamped.slice(0, 5).join(', ')}
+                  {result.clamped.length > 5 ? ' …' : ''}
+                </p>
+              )}
+              {!result.atomic && (
+                <p className="text-[10px] text-amber-900 font-bold">
+                  Operação dividida em vários lotes (mais de 150 vendas): confirme nos Movimentos de stock que tudo foi aplicado.
                 </p>
               )}
             </div>
@@ -562,7 +629,7 @@ export default function InventoryCutoffTool({
                       : 'Stock NÃO é alterado'}
                 </p>
                 <p className="text-[10px] text-slate-500">
-                  {snapshots.length > 0 ? `${snapshots.length} artigo(s) gravados` : 'nenhuma gravação em produtos'}
+                  {stockDeltas.length > 0 ? `${stockDeltas.length} artigo(s) a gravar` : 'nenhuma gravação em produtos'}
                 </p>
               </div>
             </div>
@@ -820,9 +887,9 @@ export default function InventoryCutoffTool({
                   • Stock:{' '}
                   <strong className={direction ? 'text-amber-700' : 'text-emerald-700'}>
                     {direction === 'deduct'
-                      ? `desce em ${snapshots.length} artigo(s)`
+                      ? `desce em ${stockDeltas.length} artigo(s)`
                       : direction === 'restore'
-                        ? `sobe em ${snapshots.length} artigo(s)`
+                        ? `sobe em ${stockDeltas.length} artigo(s)`
                         : 'não é alterado'}
                   </strong>
                 </p>

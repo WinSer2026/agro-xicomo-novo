@@ -59,6 +59,26 @@ import {
  */
 export type FirestorePageCursor = QueryDocumentSnapshot<DocumentData>;
 
+/** Uma linha de correcção de stock do corte de inventário (valores com sinal). */
+export interface CutoffStockDelta {
+  productId: string;
+  productName: string;
+  /** Variação em unidade base: negativa desconta, positiva devolve. */
+  base: number;
+  bulk?: number;
+  retail?: number;
+}
+
+export interface CutoffResult {
+  cancelled: number;
+  skipped: string[];
+  creditNotes: Array<{ invoiceNumber: string; creditNoteNumber: string }>;
+  stockAdjusted: number;
+  clamped: string[];
+  /** false quando a operação teve de ser dividida em mais do que uma transacção. */
+  atomic: boolean;
+}
+
 export interface PaginatedResult<T> {
   items: T[];
   nextCursor: FirestorePageCursor | null;
@@ -1280,36 +1300,57 @@ export class FirebaseDBService {
     return { restored, skipped };
   }
 
-  // --- Corte de inventário (anulação em massa e correcção de stock) ---
+  // --- Corte de inventário ---
 
   /**
-   * Anula várias vendas numa só operação, com nota de crédito por documento.
+   * Executa um corte de inventário numa só transacção por lote.
    *
-   * A versão anterior desta rotina (que veio da linha `main`) escrevia apenas
-   * `status: 'Cancelada'` num `writeBatch`:
-   *   - não guardava estado → uma venda já anulada era anulada outra vez;
-   *   - não emitia nota de crédito → facturas anuladas sem documento de
-   *     rectificação, o que numa inspecção fiscal é uma factura em falta;
-   *   - não era atómica em relação à correcção de stock.
+   * Antes existiam duas rotinas separadas (`cancelSalesBulk` e
+   * `applyStockCorrection`) chamadas uma a seguir à outra: uma falha entre as
+   * duas deixava vendas anuladas com o stock por corrigir — o pior dos mundos,
+   * porque o stock inflacionado continuava lá e as facturas já não existiam.
+   * Aqui as vendas, as notas de crédito, o contador e o stock (por diferença)
+   * são escritos no mesmo commit.
    *
-   * Aqui cada lote corre numa transacção: lê o estado real de cada venda,
-   * ignora as que já estão anuladas, numera a nota de crédito no mesmo
-   * contador transaccional usado pela anulação individual e grava estado +
-   * contador no mesmo passo.
+   * Regras que a rotina garante:
+   *  - só anula documentos que existem e que não estão já anulados;
+   *  - numera uma NC por factura definitiva, no contador transaccional;
+   *  - aplica o stock por **diferença** (lida dentro da transacção), para não
+   *    apagar vendas registadas entretanto;
+   *  - nunca cria produtos inexistentes;
+   *  - devolve o que fez, para o ecrã poder dizer a verdade.
    */
-  public async cancelSalesBulk(
-    sales: Sale[],
-    snapshots: StockCorrectionSnapshot[] = []
-  ): Promise<number> {
+  public async applyCutoff(input: {
+    sales: Sale[];
+    stockDeltas: CutoffStockDelta[];
+    applyStock: boolean;
+    username: string;
+    reason: string;
+  }): Promise<CutoffResult> {
     await this.ensureAuth();
-    const list = (sales || []).filter(sale => sale && (sale.id || sale.invoiceNumber));
-    if (list.length === 0) return 0;
 
-    const CHUNK = 100; // uma transacção admite 500 escritas; 100 fica folgado
-    let cancelled = 0;
+    const vendas = (input.sales || []).filter(sale => sale && (sale.id || sale.invoiceNumber));
+    const deltas = input.applyStock
+      ? (input.stockDeltas || []).filter(delta => delta && delta.productId)
+      : [];
 
-    for (let i = 0; i < list.length; i += CHUNK) {
-      const lote = list.slice(i, i + CHUNK);
+    const resultado: CutoffResult = {
+      cancelled: 0,
+      skipped: [],
+      creditNotes: [],
+      stockAdjusted: 0,
+      clamped: [],
+      atomic: true
+    };
+
+    if (vendas.length === 0 && deltas.length === 0) return resultado;
+
+    const CHUNK = 150; // 150 vendas + 150 produtos + contador < 500 escritas
+    if (vendas.length > CHUNK) resultado.atomic = false;
+
+    for (let inicio = 0; inicio < Math.max(vendas.length, 1); inicio += CHUNK) {
+      const lote = vendas.slice(inicio, inicio + CHUNK);
+      const aplicarStockAgora = inicio === 0 && deltas.length > 0;
       const year = new Date().getFullYear();
       const prefix = `NC-${year}-`;
 
@@ -1321,122 +1362,113 @@ export class FirebaseDBService {
           : 0;
         let next = inicial;
 
+        // --- Vendas ---
         const refs = lote.map(sale => doc(db, 'sales', String(sale.id || sale.invoiceNumber)));
-        const snapshotsPorVenda: any[] = [];
-        for (const ref of refs) {
-          snapshotsPorVenda.push(await transaction.get(ref));
-        }
+        const documentos: any[] = [];
+        for (const ref of refs) documentos.push(await transaction.get(ref));
 
         for (let k = 0; k < lote.length; k++) {
           const ref = refs[k];
-          const snap = snapshotsPorVenda[k];
-          // Só se anula o que existe: um id errado não pode criar uma venda.
-          if (!snap.exists()) continue;
-
+          const snap = documentos[k];
+          if (!snap.exists()) {
+            resultado.skipped.push(lote[k].invoiceNumber || String(lote[k].id));
+            continue;
+          }
           const atual = snap.data() as Sale;
           const estado = String(atual.status || '');
-          // O estado que conta é o da base de dados, não o que o ecrã mostra.
-          if (estado === 'Cancelada' || estado === 'canceled') continue;
+          if (estado === 'Cancelada' || estado === 'canceled') {
+            resultado.skipped.push(atual.invoiceNumber || String(atual.id));
+            continue;
+          }
 
           const isDefinitiva = !atual.documentType || atual.documentType === 'FaturaDefinitiva';
-          const creditNoteNumber = isDefinitiva
-            ? `${prefix}${String(++next).padStart(4, '0')}`
-            : undefined;
+          const creditNoteNumber = isDefinitiva ? `${prefix}${String(++next).padStart(4, '0')}` : undefined;
+
+          const nota = [
+            atual.notes,
+            `[CORTE DE INVENTÁRIO] Anulada em ${new Date().toISOString().substring(0, 16).replace('T', ' ')} por ${input.username}.`,
+            `Motivo: ${input.reason}`,
+            creditNoteNumber ? `Nota de crédito: ${creditNoteNumber}.` : '',
+            atual.receiptNumber ? `Recibo emitido (${atual.receiptNumber}) fica sem efeito por esta anulação. Recibo anulado em ${new Date().toISOString()}.` : ''
+          ].filter(Boolean).join('\n');
 
           const atualizada: Sale = {
-            ...lote[k],
             ...atual,
-            id: String(atual.id || lote[k].id || lote[k].invoiceNumber),
             status: 'Cancelada',
             cancelledAt: new Date().toISOString(),
-            cancelledBy: lote[k].cancelledBy || atual.cancelledBy,
+            cancelledBy: input.username,
             previousStatus: atual.status as Sale['previousStatus'],
             ...(creditNoteNumber ? { creditNoteNumber } : {}),
-            notes: lote[k].notes || atual.notes
+            notes: nota
           };
 
           transaction.set(ref, this.sanitizeData(atualizada), { merge: true });
-          cancelled += 1;
+          resultado.cancelled += 1;
+          if (creditNoteNumber) {
+            resultado.creditNotes.push({
+              invoiceNumber: atualizada.invoiceNumber,
+              creditNoteNumber
+            });
+          }
         }
 
         if (next > inicial) {
-          transaction.set(
-            counterRef,
-            { [prefix]: next, updatedAt: new Date().toISOString() },
-            { merge: true }
-          );
+          transaction.set(counterRef, { [prefix]: next, updatedAt: new Date().toISOString() }, { merge: true });
+        }
+
+        // --- Stock, por diferença ---
+        if (aplicarStockAgora) {
+          const refsProdutos = deltas.map(delta => doc(db, 'products', String(delta.productId)));
+          const produtos: any[] = [];
+          for (const ref of refsProdutos) produtos.push(await transaction.get(ref));
+
+          for (let k = 0; k < deltas.length; k++) {
+            const snap = produtos[k];
+            // Produto apagado: nunca se cria documento fantasma.
+            if (!snap || !snap.exists()) continue;
+            const produto = snap.data() as Product;
+            const delta = deltas[k];
+            const escritas: Record<string, unknown> = {};
+            let tocou = false;
+
+            const aplicar = (campo: 'stockQty' | 'stockQtyBulk' | 'stockQtyRetail', valor?: number) => {
+              if (valor === undefined || Math.abs(valor) < 1e-9) return;
+              const atualValor = Number((produto as any)[campo]) || 0;
+              const projetado = atualValor + valor;
+              if (projetado < 0) {
+                // Não se esconde o problema: trava-se em zero e diz-se o nome.
+                if (!resultado.clamped.includes(produto.name || delta.productName)) {
+                  resultado.clamped.push(produto.name || delta.productName);
+                }
+                if (atualValor === 0) return;
+                escritas[campo] = increment(-atualValor);
+                tocou = true;
+                return;
+              }
+              escritas[campo] = increment(valor);
+              tocou = true;
+            };
+
+            aplicar('stockQty', delta.base);
+            aplicar('stockQtyBulk', delta.bulk);
+            aplicar('stockQtyRetail', delta.retail);
+
+            if (tocou) {
+              transaction.set(refsProdutos[k], escritas, { merge: true });
+              resultado.stockAdjusted += 1;
+            }
+          }
         }
       });
-    }
-
-    if (cancelled > 0 && snapshots.length > 0) {
-      await this.applyStockCorrection(snapshots);
     }
 
     this.salesCache = null;
-    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'bulk-cancel', count: cancelled } }));
-    return cancelled;
-  }
-
-  /**
-   * Correcção de stock por diferença, nunca por valor absoluto.
-   *
-   * A versão anterior gravava o saldo calculado no ecrã (`stockQty: X`). Se
-   * entre a leitura e a escrita alguém vendesse, a venda era **apagada** pelo
-   * valor antigo — perda de actualização silenciosa, sobretudo com dois postos.
-   * Aqui lê-se o saldo actual dentro da transacção e aplica-se apenas a
-   * diferença, para que as vendas entretanto registadas continuem descontadas.
-   */
-  public async applyStockCorrection(snapshots: StockCorrectionSnapshot[]): Promise<number> {
-    await this.ensureAuth();
-    const list = (snapshots || []).filter(s => s && s.productId);
-    if (list.length === 0) return 0;
-
-    const CHUNK = 100;
-    let aplicados = 0;
-
-    for (let i = 0; i < list.length; i += CHUNK) {
-      const lote = list.slice(i, i + CHUNK);
-
-      await runTransaction(db, async transaction => {
-        const refs = lote.map(item => doc(db, 'products', String(item.productId)));
-        const atuais: any[] = [];
-        for (const ref of refs) {
-          atuais.push(await transaction.get(ref));
-        }
-
-        for (let k = 0; k < lote.length; k++) {
-          const snap = atuais[k];
-          // Produto apagado: nunca se cria um documento fantasma.
-          if (!snap || !snap.exists()) continue;
-          const produto = snap.data() as Product;
-
-          const escrever = (campo: 'stockQty' | 'stockQtyBulk' | 'stockQtyRetail', alvo: number | undefined) => {
-            if (alvo === undefined) return false;
-            const atualValor = Number((produto as any)[campo]) || 0;
-            const delta = Number(alvo) - atualValor;
-            if (Math.abs(delta) < 1e-9) return false;
-            transaction.set(refs[k], { [campo]: increment(delta) }, { merge: true });
-            return true;
-          };
-
-          // Avaliar os três campos sempre: usar `||` deixaria de gravar a
-          // composição do híbrido assim que o primeiro campo fosse escrito.
-          const resultados = [
-            escrever('stockQty', lote[k].stockQty),
-            escrever('stockQtyBulk', lote[k].stockQtyBulk),
-            escrever('stockQtyRetail', lote[k].stockQtyRetail)
-          ];
-          const tocou = resultados.some(Boolean);
-
-          if (tocou) aplicados += 1;
-        }
-      });
-    }
-
     this.productsCache = null;
-    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-correction' } }));
-    return aplicados;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', action: 'cutoff', count: resultado.cancelled } }));
+    if (resultado.stockAdjusted > 0) {
+      window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'cutoff-stock' } }));
+    }
+    return resultado;
   }
 
   // --- Losses ---

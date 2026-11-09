@@ -33,13 +33,14 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 | **V-C04** | P1 | **Sem verificação de estado.** Uma venda já anulada era anulada outra vez (e re-notada), porque o estado que contava era o do ecrã. | **Fechado**: o estado é lido da base dentro da transacção; já anuladas são ignoradas. |
 | **V-C05** | P1 | **Fuso horário errado.** `toDayKey` fazia `substring(0,10)` em ISO (data **UTC**) e `selectSalesForCutoff` comparava o texto `T HH:MM` **UTC** com horas locais. Em Maputo, vendas das 22:00 às 24:00 caíam no dia seguinte e ficavam fora do corte; a janela horária estava duas horas deslocada. | **Fechado**: dia e hora calculados sempre em `Africa/Maputo`, com testes próprios (49/49). |
 | **V-C06** | P1 | Estado legado `'canceled'` não era reconhecido: vendas anuladas contavam como stock vendido. | **Fechado** em `isStockImpactingSale` e `selectSalesForCutoff`. |
-| **V-C07** | P2 | **Recibos de facturas anuladas continuam válidos.** A factura passa a `Cancelada` e ganha NC, mas o `receiptNumber` fica e o recibo entregue ao cliente não é referido na NC. | **Aberto** |
-| **V-C08** | P2 | **Auditoria agregada.** Um único registo para N vendas, sem lista de facturas nem NC emitidas. Não se prova, documento a documento, o que foi anulado. | **Aberto** |
-| **V-C09** | P2 | **Duas fases.** Anulação (transaccional) e correcção de stock (transaccional) são chamadas seguidas. Uma falha entre elas deixa vendas anuladas **sem** a correcção de stock. | **Parcial** |
-| **V-C10** | P2 | O motivo é texto livre e pode ir vazio — a nota de auditoria fica sem justificação. | **Aberto** |
+| **V-C07** | P2 | **Recibos de facturas anuladas continuam válidos.** A factura passa a `Cancelada` e ganha NC, mas o `receiptNumber` fica e o recibo entregue ao cliente não era referido. | **Fechado parcialmente**: a nota da venda e a NC passam a declarar o recibo anulado e a hora. O recibo físico continua a existir — depende do procedimento no balcão |
+| **V-C08** | P2 | **Auditoria agregada.** Um único registo para N vendas, sem lista de facturas nem NC emitidas. | **Fechado**: o registo passa a incluir o mapa `factura→nota de crédito` (até 60 pares) e o número de documentos ignorados |
+| **V-C09** | P0 | **Duas fases.** Anulação e correcção de stock eram duas transacções seguidas: uma falha entre elas deixava vendas anuladas **sem** correcção de stock. | **Fechado**: `applyCutoff` escreve vendas, notas de crédito, contador e stock no mesmo commit |
+| **V-C10** | P2 | O motivo é texto livre e podia ir vazio. | **Fechado**: mínimo de 10 caracteres, validado antes de executar |
 | **V-C11** | P2 | O modo "anular e relançar" não impede o **relançamento duplicado** no PDV: se o operador repetir, vende duas vezes. | **Aberto** |
+| **V-C14** | **P0** | **A palavra-passe do corte nunca podia estar certa.** O ecrã comparava o texto escrito com o próprio `stockPasswordHash` (`typed !== expected`). Com a palavra-passe guardada em hash — que é o formato normal — qualquer tentativa falhava; e onde fosse texto simples, a palavra-passe era válida por comparação direta, sem o helper de autorização. | **Fechado**: passa a usar `verifyAuthorizationPassword` (hash com salt) |
 | **V-C12** | P3 | `projectStock` usa `Math.max(0, …)`: a pré-visualização esconde saldos negativos em vez de os mostrar. | **Aberto** |
-| **V-C13** | P3 | `ipAddress: '127.0.0.1'` fixo no registo de auditoria. | **Aberto** |
+| **V-C13** | P3 | `ipAddress: '127.0.0.1'` fixo no registo de auditoria. | **Fechado**: IP real via `/api/client-info` |
 
 ---
 
@@ -50,6 +51,9 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 3. **Corrigido o fuso horário** no módulo de domínio, com três asserções novas no teste.
 4. **Integrado** o botão "Corte de Inventário" no cabeçalho da Gestão de Facturas, abrindo a ferramenta em modal.
 5. **Compactado** o painel da ferramenta: cabeçalho e secções mais baixos, tipografia reduzida, cartões de modo mais pequenos, corpo com altura máxima e scroll interno — cabe numa janela sem arrastar a página.
+6. **Unificada a execução** em `applyCutoff`: anulação + notas de crédito + contador + stock num só commit.
+7. **Corrigida a palavra-passe** (V-C14): comparava o texto com o hash guardado.
+8. **Motivo obrigatório**, IP real e resultado detalhado no ecrã (NC emitidas, documentos ignorados, stock travado em zero, operação dividida em lotes).
 
 ## 4. Verificação
 
@@ -57,13 +61,16 @@ E a caixa **"devolver as quantidades ao stock"** (`restoreStock`): só faz senti
 
 **Não verificado:** o comportamento com dois postos a operar durante o corte, e o relançamento no PDV após anulação em massa — só se fecham em ambiente real.
 
-## 5. Plano de correcção (o que falta)
+## 5. Plano de correcção — estado
 
-| Ordem | Item | Porquê |
+| Ordem | Item | Estado |
 |---|---|---|
-| 1 | **V-C09** — juntar anulação e correcção numa só transacção (ou marcar a operação como "pendente de stock") | evita vendas anuladas sem correcção |
-| 2 | **V-C07** — a NC tem de referir o recibo anulado e o recibo deve ficar marcado | rasto documento ↔ dinheiro |
-| 3 | **V-C08** — auditoria por documento, com a lista de NC emitidas | prova para a inspecção |
-| 4 | **V-C11** — marca na venda anulada que impede relançamento duplicado | venda dupla |
-| 5 | **V-C10** — motivo obrigatório com mínimo de caracteres | justificação |
-| 6 | **V-C12/V-C13** — saldos negativos visíveis e IP real | qualidade da prova |
+| 1 | **V-C09** — anulação e stock na mesma transacção | ✅ feito |
+| 2 | **V-C07** — NC refere o recibo anulado | ✅ feito (resta o procedimento no balcão) |
+| 3 | **V-C08** — auditoria com mapa factura→NC | ✅ feito |
+| 4 | **V-C10** — motivo obrigatório | ✅ feito |
+| 5 | **V-C13** — IP real | ✅ feito |
+| 6 | **V-C14** — palavra-passe comparada com o hash | ✅ feito |
+| 7 | **V-C11** — impedir relançamento duplicado no PDV | ⏳ em aberto |
+| 8 | **V-C12** — mostrar saldos negativos na pré-visualização | ⏳ em aberto |
+| 9 | **V-C09 (lote)** — acima de 150 vendas a operação é dividida; sinalizar no registo de stock | ⏳ em aberto |
