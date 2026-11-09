@@ -19,7 +19,7 @@ import {
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
 
 interface StockModuleProps {
@@ -47,6 +47,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [reconciliationFilter, setReconciliationFilter] = useState<'all' | 'discrepancies' | 'synced'>('all');
   const [reconciliationSearch, setReconciliationSearch] = useState('');
   const [physicalCounts, setPhysicalCounts] = useState<Record<string, number>>({});
+  /** Lotes vencidos com stock: listados, nunca apagados automaticamente. */
+  const [expiredProducts, setExpiredProducts] = useState<Product[]>([]);
+  const [expiringId, setExpiringId] = useState<string | null>(null);
   const [showApplyPhysicalModal, setShowApplyPhysicalModal] = useState(false);
   const [applyPassword, setApplyPassword] = useState('');
   const [applyError, setApplyError] = useState('');
@@ -483,15 +486,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     }
 
     /**
-     * ES-01: aqui já não há expurgo automático.
+     * ES-01: o expurgo de lotes vencidos deixou de acontecer sozinho.
      *
-     * Abrir o ecrã apagava o stock de todos os artigos vencidos — sem
-     * autorização, a cada carregamento, e só no total (sacos e retalho ficavam
-     * a vender). A gestão de validade (listar vencidos, dar baixa com senha)
-     * sai deste módulo e passa para o módulo de gestão do armazém; aqui fica
-     * apenas a baixa manual por «Quebras», com motivo «Fora de Prazo».
+     * Antes, abrir o ecrã de stock apagava o stock de todos os artigos vencidos
+     * — sem autorização, a cada carregamento, e só no total (sacos e retalho
+     * ficavam a vender). Uma data mal digitada fazia desaparecer mercadoria.
+     *
+     * Agora os vencidos são apenas **listados**; a baixa é uma decisão explícita
+     * com palavra-passe de gestor.
      */
+    const todayStr = toLocalDateKey(new Date().toISOString());
     const updatedProducts: Product[] = [];
+    const vencidos: Product[] = [];
 
     for (const prod of list) {
       let changed = false;
@@ -501,11 +507,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         changed = true;
       }
 
+      if (prod.expiryDate && prod.expiryDate <= todayStr && prod.stockQty > 0) {
+        vencidos.push(prod);
+      }
+
       if (changed) {
         await dbService.saveProduct(prod);
       }
       updatedProducts.push(prod);
     }
+
+    setExpiredProducts(vencidos);
 
     setProducts(updatedProducts.sort((a, b) => a.name.localeCompare(b.name)));
     setLosses(lossList);
@@ -516,6 +528,42 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       if (p.category) customCats.add(p.category);
     });
     setCategories(Array.from(customCats));
+  };
+
+  /**
+   * Baixa de um lote vencido — acção explícita, com palavra-passe de gestor.
+   * Substitui o expurgo automático que corria ao abrir o ecrã (ES-01).
+   */
+  const handleExpireProduct = async (produto: Product) => {
+    if (isSubmitting) return;
+    const pw = await appPrompt(
+      `Dar baixa do lote vencido de ${produto.name} (${produto.stockQty} ${produto.baseUnit})?\n\n` +
+        'A mercadoria sai do stock e é registada uma perda. Introduza a palavra-passe de gestor.'
+    );
+    if (pw === null) return;
+    const configAtual = settings || (await dbService.getSettings().catch(() => null));
+    if (!(await verifyAuthorizationPassword(pw, configAtual))) {
+      triggerToast('Palavra-passe incorrecta: a baixa não foi feita.', 'error');
+      return;
+    }
+
+    setExpiringId(String(produto.id));
+    try {
+      const resultado = await dbService.expireProductBatch({
+        productId: String(produto.id),
+        operator: currentUser?.username || 'Gestor',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
+      });
+      triggerToast(
+        `${resultado.removedBase} ${produto.baseUnit} de ${resultado.productName} dados como perdidos (${resultado.costValue.toFixed(2)} MT).`,
+        'success'
+      );
+      await loadInventoryData();
+    } catch (erro: any) {
+      triggerToast(erro?.message || 'Falha ao dar baixa do lote vencido.', 'error');
+    } finally {
+      setExpiringId(null);
+    }
   };
 
   const triggerToast = (msg: string, tipo: 'success' | 'error' | 'warning' = 'success') => {
@@ -2045,6 +2093,37 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       </div>
 
       {/* --- SUB-TAB 1: INVENTÁRIO GERAL DE PRODUTOS --- */}
+      {expiredProducts.length > 0 && stockSubTab === 'inventory' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-xl px-3 py-2.5 space-y-1.5">
+          <p className="text-[11px] font-black text-rose-800 flex items-center gap-1">
+            <span className="material-symbols-outlined text-[15px]">event_busy</span>
+            {expiredProducts.length} lote(s) vencido(s) com stock — nada foi apagado
+          </p>
+          <p className="text-[10px] text-rose-700">
+            O sistema já não dá baixa sozinho. Confirme fisicamente e dê baixa, um a um, com a
+            palavra-passe de gestor.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {expiredProducts.slice(0, 6).map(produto => (
+              <button
+                key={produto.id}
+                type="button"
+                onClick={() => handleExpireProduct(produto)}
+                disabled={expiringId === String(produto.id)}
+                className="px-2 py-1 rounded-md bg-white border border-rose-300 text-[10px] font-bold text-rose-800 hover:bg-rose-100 disabled:opacity-60"
+              >
+                {produto.name} · {produto.stockQty} {produto.baseUnit}
+              </button>
+            ))}
+            {expiredProducts.length > 6 && (
+              <span className="text-[10px] text-rose-700 font-bold self-center">
+                +{expiredProducts.length - 6} outro(s)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {stockSubTab === 'inventory' && (
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto custom-scrollbar">

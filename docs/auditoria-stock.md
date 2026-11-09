@@ -46,11 +46,10 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 | **ES-05** | P2 | Comparação de datas por texto (`expiryDate <= 'AAAA-MM-DD'`): uma data com hora (`2026-11-09T00:00`) nunca é considerada vencida nesse dia. |
 | **ES-06** | P2 | Geração automática de código de barras dentro do mesmo ciclo, também gravada sem auditoria. |
 
-> **Decisão do proprietário (2026-11-09):** a gestão de validade (listar vencidos e dar baixa com
-> senha) **sai do módulo de stock** e passa para o futuro módulo de gestão do armazém. Aqui ficou
-> apenas uma coisa: **nada é apagado automaticamente**. A baixa de um lote vencido continua possível
-> hoje pelo registo de quebra manual, com motivo «Fora de Prazo». O método
-> `dbService.expireProductBatch` fica pronto para o módulo do armazém.
+> **Estado (2026-11-09):** o aviso de lotes vencidos **mantém-se** no ecrã de inventário, com baixa
+> lote a lote e senha de gestor. Chegou a ser retirado para passar ao módulo do armazém, mas o
+> proprietário corrigiu: o que queria retirar era outra coisa. Nada é apagado automaticamente — a
+> baixa é sempre uma decisão explícita.
 
 ### 2.2 Novo produto
 
@@ -251,7 +250,7 @@ verificação preparada no fim de cada fase.
 
 | # | Acção | Estado | Onde |
 |---|---|---|---|
-| 1 | Expurgo de validade deixa de ser automático | **feito** | `StockModule.loadInventoryData` já não apaga nada; a baixa de um vencido faz-se pelo registo de quebra (motivo «Fora de Prazo»). A lista de vencidos com botão por lote foi retirada deste módulo a pedido do proprietário — passa para o módulo do armazém, com `dbService.expireProductBatch` já pronto |
+| 1 | Expurgo de validade deixa de ser automático | **feito** | `StockModule.loadInventoryData` só lista; banner «lotes vencidos» com botão por lote, senha de gestor e `expireProductBatch` (três quantidades a zero na mesma transacção) |
 | 2 | Zerar as três quantidades | **feito** | `expireProductBatch` grava `stockQty = stockQtyBulk = stockQtyRetail = 0` na mesma transacção; `adjustStock`, `registerLossAtomic` e `applyPhysicalCount` derivam sempre sacos+retalho do total (ES-02, ES-33, ES-45) |
 | 3 | Código único ao criar e editar | **feito** | verificação sem distinção de maiúsculas/ espaços em novo produto e no formulário de ajuste; recusa com o nome do artigo dono (ES-07, ES-20) |
 | 4 | Ajustes por diferença, dentro de transacção | **feito** | `dbService.adjustStock` (`deltaBase` / `deltaBulk` / `absoluteBase` lido no `runTransaction`); usado pelo ajuste inline, pelo formulário do artigo e pelo stock inicial do novo produto (ES-04, ES-14, ES-21, ES-31, ES-32, ES-34, ES-45) |
@@ -292,7 +291,8 @@ verificação preparada no fim de cada fase.
 - O *toast* do módulo passou a distinguir sucesso / erro / aviso — antes um «palavra-passe errada»
   aparecia a verde.
 
-**Prova local que continua pendente** (não se prova num sandbox): ajustar o mesmo artigo em dois
+**Prova local que continua pendente** (não se prova num sandbox): dar baixa de um lote vencido num
+posto e confirmar que o outro deixa de vender; ajustar o mesmo artigo em dois
 postos ao mesmo tempo e ver um dos dois recusado (saldo insuficiente) em vez de ficar negativo;
 contar 12,5 kg e ver o saldo ficar em 12,5; quebrar 1 saco e ver 50 kg no relatório; transformar 100 kg
 de um artigo que só tem 40 e ser recusado; dar duas transformações simultâneas do mesmo saco.
