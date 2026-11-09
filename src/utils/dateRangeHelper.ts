@@ -103,31 +103,68 @@ export function getDateRangeFromPreset(preset: DateRangePreset): { startDate: st
 }
 
 /**
+ * Fuso horário operacional da empresa. Maputo é UTC+2 durante todo o ano
+ * (Moçambique não aplica horário de verão), pelo que o desvio é constante.
+ */
+export const OPERATIONAL_TIME_ZONE = 'Africa/Maputo';
+const OPERATIONAL_UTC_OFFSET = '+02:00';
+
+const localDayFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: OPERATIONAL_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+/**
+ * Devolve o dia de calendário LOCAL (YYYY-MM-DD) de um timestamp.
+ *
+ * É a peça que faltava para o PDV: `date` é gravado em UTC, e cortar a string
+ * ("2026-11-08T22:30Z".slice(0,10)) dá o dia anterior a uma venda feita às
+ * 00:30 em Maputo. Esta função converte o instante para o dia local.
+ */
+export function toLocalDateKey(value?: string | null): string {
+  if (!value) return '';
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; // já é um dia de calendário
+
+  const parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return raw.slice(0, 10);
+
+  const parts = localDayFormatter.formatToParts(parsed);
+  const year = parts.find(part => part.type === 'year')?.value ?? '';
+  const month = parts.find(part => part.type === 'month')?.value ?? '';
+  const day = parts.find(part => part.type === 'day')?.value ?? '';
+  return year && month && day ? `${year}-${month}-${day}` : raw.slice(0, 10);
+}
+
+/** Início (00:00:00.000) do dia local, expresso em UTC ISO. */
+export function localDayStartUtcIso(dateKey: string): string {
+  return new Date(`${dateKey}T00:00:00.000${OPERATIONAL_UTC_OFFSET}`).toISOString();
+}
+
+/** Fim (23:59:59.999) do dia local, expresso em UTC ISO. */
+export function localDayEndUtcIso(dateKey: string): string {
+  return new Date(`${dateKey}T23:59:59.999${OPERATIONAL_UTC_OFFSET}`).toISOString();
+}
+
+/**
  * Check if a date string falls inside the [startDate, endDate] range inclusive.
  * Handles ISO strings ("2026-09-27T10:30:00Z"), standard date strings ("2026-09-27"), and Timestamps.
  */
-export function isDateInRange(targetDateStr: string | undefined | null, startDate: string, endDate: string): boolean {
-  if (!targetDateStr) return false;
+export function isDateInRange(
+  targetDateStr: string | undefined | null,
+  startDate: string,
+  endDate: string,
+  /** Dia local já calculado (evita reconverter em listas grandes). */
+  knownDateKey?: string
+): boolean {
+  if (!targetDateStr && !knownDateKey) return false;
   if (!startDate && !endDate) return true;
 
-  // Extract YYYY-MM-DD
-  let targetClean = '';
-  if (targetDateStr.includes('T')) {
-    targetClean = targetDateStr.split('T')[0];
-  } else if (targetDateStr.length >= 10 && targetDateStr.charAt(4) === '-' && targetDateStr.charAt(7) === '-') {
-    targetClean = targetDateStr.substring(0, 10);
-  } else {
-    try {
-      const parsed = new Date(targetDateStr);
-      if (!isNaN(parsed.getTime())) {
-        targetClean = formatDateToISO(parsed);
-      } else {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  }
+  // O dia de calendário é o dia LOCAL, nunca o prefixo da string UTC.
+  const targetClean = knownDateKey || toLocalDateKey(targetDateStr);
+  if (!targetClean) return false;
 
   if (startDate && targetClean < startDate) return false;
   if (endDate && targetClean > endDate) return false;

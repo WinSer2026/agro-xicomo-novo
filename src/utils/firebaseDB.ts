@@ -18,6 +18,7 @@ import {
   limit,
   startAfter,
   getAggregateFromServer,
+  runTransaction,
   count,
   sum,
   type QueryConstraint,
@@ -85,14 +86,43 @@ export interface AuditLogPageOptions extends DateRangeQueryOptions {
   source?: 'active' | 'archive';
 }
 
+/** Lançado quando uma venda exigiria mais stock do que existe. */
+export class InsufficientStockError extends Error {
+  public readonly productName: string;
+  public readonly available: number;
+  public readonly requested: number;
+  public readonly unit: string;
+
+  constructor(productName: string, available: number, requested: number, unit: string) {
+    super(
+      `Stock insuficiente para "${productName}": disponível ${available} ${unit}, pedido ${requested} ${unit}.`
+    );
+    this.name = 'InsufficientStockError';
+    this.productName = productName;
+    this.available = available;
+    this.requested = requested;
+    this.unit = unit;
+  }
+}
+
 export interface SalesSummary {
   totalInvoiced: number;
   paidInvoiced: number;
+  /** Faturas com estado 'Pendente' (legado: documento emitido sem pagamento). */
   pendingInvoiced: number;
+  /** Vendas a crédito: dívida real de clientes. */
+  creditInvoiced: number;
+  /** Dívida total = Pendente + Crédito (nunca inclui proformas nem canceladas). */
+  debtInvoiced: number;
+  /** Proformas/cotações: documentos sem efeito financeiro. */
+  proformaInvoiced: number;
   canceledInvoiced: number;
   totalCount: number;
   paidCount: number;
   pendingCount: number;
+  creditCount: number;
+  debtCount: number;
+  proformaCount: number;
   canceledCount: number;
 }
 
@@ -103,6 +133,27 @@ export interface AuditArchiveResult {
 }
 
 const app = initializeApp(firebaseConfig);
+
+/**
+ * Autenticação anónima do Firebase.
+ *
+ * As regras do Firestore passaram a exigir `request.auth != null`. O sistema
+ * não tem login Firebase (as credenciais são da aplicação), por isso usa-se
+ * sessão anónima. Se o fornecedor "Anónimo" não estiver ativo no projeto, isto
+ * falha sem bloquear: a aplicação continua a funcionar com os fallbacks locais.
+ */
+export const authReady: Promise<boolean> = (async () => {
+  try {
+    const { getAuth, signInAnonymously } = await import('firebase/auth');
+    const auth = getAuth(app);
+    if (auth.currentUser) return true;
+    await signInAnonymously(auth);
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] Sessão anónima indisponível (modo local):', err);
+    return false;
+  }
+})();
 
 let dbInstance;
 try {
@@ -724,26 +775,73 @@ export class FirebaseDBService {
       };
     };
 
-    const [paid, pending, credit, canceled] = await Promise.all([
+    const [paid, pending, credit, canceled, proforma] = await Promise.all([
       statusAggregate('Paga'),
       statusAggregate('Pendente'),
       statusAggregate('Crédito'),
-      statusAggregate('Cancelada')
+      statusAggregate('Cancelada'),
+      statusAggregate('Proforma')
     ]);
 
     return {
       totalInvoiced: paid.total + pending.total + credit.total,
       paidInvoiced: paid.total,
-      // The existing invoice tabs expose Pendente separately from Crédito.
-      // Keep those labels truthful while still including credit invoices in the
-      // overall issued-total/count.
+      // Pendente e Crédito são estados distintos na interface, mas ambos são
+      // dívida de clientes. `debtInvoiced` é a única soma que deve alimentar
+      // indicadores de dívida.
       pendingInvoiced: pending.total,
+      creditInvoiced: credit.total,
+      debtInvoiced: pending.total + credit.total,
+      proformaInvoiced: proforma.total,
       canceledInvoiced: canceled.total,
-      totalCount: paid.count + pending.count + credit.count + canceled.count,
+      totalCount: paid.count + pending.count + credit.count + canceled.count + proforma.count,
       paidCount: paid.count,
       pendingCount: pending.count,
+      creditCount: credit.count,
+      debtCount: pending.count + credit.count,
+      proformaCount: proforma.count,
       canceledCount: canceled.count
     };
+  }
+
+  /**
+   * Numeração fiscal autoritativa (B-01).
+   *
+   * Um único documento `counters/document_numbers` guarda o último número de
+   * cada prefixo (FAC-2026, FP-2026, REC-POS-2026, REC-A4-2026). A escrita é
+   * feita numa transacção: dois terminais a vender ao mesmo tempo recebem
+   * números distintos, e o contador nunca recua.
+   *
+   * `fallbackMax` é o maior número que o cliente já viu nas vendas carregadas;
+   * serve para semear o contador na primeira utilização (continuidade com a
+   * numeração antiga) sem nunca permitir reutilizar um número existente.
+   */
+  public async nextDocumentNumber(
+    kind: 'FaturaDefinitiva' | 'FaturaProforma' | 'ReciboPOS' | 'ReciboA4',
+    year: number,
+    fallbackMax = 0
+  ): Promise<string> {
+    const prefixByKind: Record<typeof kind, string> = {
+      FaturaDefinitiva: `FAC-${year}-`,
+      FaturaProforma: `FP-${year}-`,
+      ReciboPOS: `REC-POS-${year}-`,
+      ReciboA4: `REC-A4-${year}-`
+    };
+    const prefix = prefixByKind[kind];
+    const counterRef = doc(db, 'counters', 'document_numbers');
+    const safeFallback = Number.isFinite(fallbackMax) ? Math.max(0, Math.floor(fallbackMax)) : 0;
+
+    const next = await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(counterRef);
+      const stored = snapshot.exists()
+        ? Number((snapshot.data() as Record<string, number>)[prefix] || 0)
+        : 0;
+      const value = Math.max(stored, safeFallback) + 1;
+      transaction.set(counterRef, { [prefix]: value, updatedAt: new Date().toISOString() }, { merge: true });
+      return value;
+    });
+
+    return `${prefix}${String(next).padStart(4, '0')}`;
   }
 
   public async addSale(s: Sale): Promise<void> {
@@ -773,31 +871,19 @@ export class FirebaseDBService {
     this.salesCache = null;
   }
 
+  /**
+   * Grava a venda e deduz stock na MESMA transacção.
+   *
+   * A dedução passou de `writeBatch` (que apenas garantia atomicidade) para
+   * `runTransaction`, porque a atomicidade não impede o stock negativo: sem
+   * ler o saldo actual dentro da transacção, dois terminais que leram "3"
+   * vendem ambos e o saldo fica "-7" gravado com sucesso. Agora a venda é
+   * recusada com `InsufficientStockError` e nada é escrito.
+   */
   public async addSaleWithStockDeduction(sale: Sale, deductionItems: any[]): Promise<void> {
     const saleId = String(sale.id || sale.invoiceNumber || Date.now());
-    const batch = writeBatch(db);
-    // 1. Deduct stock atomically
-    for (const item of deductionItems) {
-      if (!item || !item.productId) continue;
-      const docRef = doc(db, "products", String(item.productId));
-      if (item.hasConversion) {
-        if (item.sellingUnit === "Bulk") {
-          batch.set(docRef, { 
-            stockQtyBulk: increment(-Number(item.qtyToReduce || 0)), 
-            stockQty: increment(-Number(item.equivalentBaseQty || 0)) 
-          }, { merge: true });
-        } else {
-          batch.set(docRef, { 
-            stockQtyRetail: increment(-Number(item.qtyToReduce || 0)), 
-            stockQty: increment(-Number(item.qtyToReduce || 0)) 
-          }, { merge: true });
-        }
-      } else {
-        batch.set(docRef, { stockQty: increment(-Number(item.qtyToReduce || 0)) }, { merge: true });
-      }
-    }
 
-    // Ensure item cost snapshots
+    // Custo histórico: lido fora da transacção (não interfere com as escritas).
     const prods = await this.getProducts();
     const enrichedItems = (sale.items || []).map(item => {
       const prod = prods.find(p => String(p.id) === String(item.productId));
@@ -809,17 +895,95 @@ export class FirebaseDBService {
       };
     });
 
-    // 2. Add sale atomically in the same batch
-    const sanitizedSale = this.sanitizeData({ 
-      ...sale, 
+    const sanitizedSale = this.sanitizeData({
+      ...sale,
       id: saleId,
       items: enrichedItems,
       createdAt: sale.createdAt || new Date().toISOString(),
-      status: sale.status || 'Pendente' 
+      status: sale.status || 'Pendente'
     });
-    batch.set(doc(db, 'sales', saleId), sanitizedSale, { merge: true });
 
-    await batch.commit();
+    await runTransaction(db, async transaction => {
+      const grouped = new Map<string, {
+        bulk: number;
+        retail: number;
+        base: number;
+        productName: string;
+        unit: string;
+        checks: Array<{ field: 'stockQty' | 'stockQtyBulk' | 'stockQtyRetail'; needed: number }>;
+      }>();
+
+      for (const item of deductionItems) {
+        if (!item || !item.productId) continue;
+        const id = String(item.productId);
+        const qty = Number(item.qtyToReduce) || 0;
+        if (qty <= 0) continue;
+
+        const entry = grouped.get(id) || { bulk: 0, retail: 0, base: 0, productName: '', unit: 'un', checks: [] };
+        if (item.hasConversion && item.sellingUnit === 'Bulk') {
+          entry.bulk += qty;
+          entry.base += Number(item.equivalentBaseQty) || qty;
+          entry.checks.push({ field: 'stockQtyBulk', needed: qty });
+        } else if (item.hasConversion) {
+          entry.retail += qty;
+          entry.base += qty;
+          entry.checks.push({ field: 'stockQtyRetail', needed: qty });
+        } else {
+          entry.base += qty;
+          entry.checks.push({ field: 'stockQty', needed: qty });
+        }
+        grouped.set(id, entry);
+      }
+
+      // 1. Ler (antes de qualquer escrita, como exige a transacção).
+      const snapshots = new Map<string, any>();
+      for (const id of grouped.keys()) {
+        const snap = await transaction.get(doc(db, 'products', id));
+        snapshots.set(id, snap);
+      }
+
+      // 2. Validar disponibilidade real.
+      for (const [id, entry] of grouped.entries()) {
+        const snap = snapshots.get(id);
+        if (!snap || !snap.exists()) continue; // produto apagado: não bloqueia a venda
+        const data = snap.data() as Record<string, any>;
+        entry.productName = String(data.name || id);
+        const uniqueChecks = new Map<string, number>();
+        entry.checks.forEach(check => {
+          uniqueChecks.set(check.field, (uniqueChecks.get(check.field) || 0) + check.needed);
+        });
+        for (const [field, needed] of uniqueChecks.entries()) {
+          const available = Number(data[field]) || 0;
+          if (needed > available + 1e-9) {
+            throw new InsufficientStockError(
+              entry.productName,
+              available,
+              needed,
+              field === 'stockQtyBulk' ? String(data.parentUnit || 'saco') : String(data.baseUnit || 'un')
+            );
+          }
+        }
+      }
+
+      // 3. Escrever (uma única escrita por produto).
+      for (const [id, entry] of grouped.entries()) {
+        const snap = snapshots.get(id);
+        if (!snap || !snap.exists()) continue;
+        const updates: Record<string, unknown> = {};
+        if (entry.bulk > 0) updates.stockQtyBulk = increment(-entry.bulk);
+        if (entry.retail > 0) updates.stockQtyRetail = increment(-entry.retail);
+        if (entry.base > 0) updates.stockQty = increment(-entry.base);
+        if (Object.keys(updates).length > 0) {
+          transaction.set(doc(db, 'products', id), updates, { merge: true });
+        }
+      }
+
+      // Venda completa, sem `merge`: um documento de venda novo não pode herdar
+      // campos de uma venda anterior (era o defeito A-02). O id é único desde a
+      // origem, por isso não há risco de sobrepor outra venda.
+      transaction.set(doc(db, 'sales', saleId), sanitizedSale);
+    });
+
     this.productsCache = null;
     this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
@@ -1563,6 +1727,17 @@ export class FirebaseDBService {
   }
 
   // --- Stock Reconciliation Engine (Parte 7) ---
+  /**
+   * Reconciliação de stock.
+   *
+   * Nota importante: o sistema NÃO tem livro de movimentos de stock (nem stock
+   * inicial, nem entradas de compra), pelo que não é possível reconstruir o
+   * stock "teórico" absoluto de um produto simples. O que é possível — e é o
+   * que esta rotina faz agora, em vez de devolver sempre zero — é validar:
+   *  1. a composição dos produtos híbridos (sacos × fator + retalho = total);
+   *  2. a existência de saldos negativos (venda acima do disponível);
+   *  3. o consumo por vendas, perdas e transformações, para auditoria.
+   */
   public async reconcileStock(): Promise<{
     items: Array<{
       productId: string;
@@ -1574,6 +1749,9 @@ export class FirebaseDBService {
       totalLost: number;
       totalTransformedIn: number;
       totalTransformedOut: number;
+      negativeStock: boolean;
+      /** 'units' = produto simples (sem base de cálculo); 'conversion' = híbrido. */
+      basis: 'units' | 'conversion';
       status: 'Sincronizado' | 'Discrepância';
     }>;
     discrepancies: Array<any>;
@@ -1588,15 +1766,23 @@ export class FirebaseDBService {
     const transformations = await this.getTransformations();
 
     const items = [];
+    const round2 = (n: number) => Math.round(n * 100) / 100;
 
     for (const prod of products) {
-      // Calculate total sold (confirmed/paid sales only)
+      const conversionRate = Number(prod.conversionRate) || 0;
+      const isHybrid = Boolean(prod.parentUnit) && conversionRate > 1;
+      const bulkQty = Number(prod.stockQtyBulk) || 0;
+      const retailQty = Number(prod.stockQtyRetail) || 0;
+      const recordedStock = Number(prod.stockQty) || 0;
+
+      // Consumo em unidades base (um saco conta como `conversionRate` unidades).
       let totalSold = 0;
       sales.forEach(s => {
         if (s.status === 'Cancelada') return;
         (s.items || []).forEach(it => {
           if (it.productId === prod.id) {
-            totalSold += it.quantity;
+            const qty = Number(it.quantity) || 0;
+            totalSold += it.sellingUnit === 'Bulk' && isHybrid ? qty * conversionRate : qty;
           }
         });
       });
@@ -1605,7 +1791,7 @@ export class FirebaseDBService {
       let totalLost = 0;
       losses.forEach(l => {
         if (l.productId === prod.id) {
-          totalLost += l.quantity;
+          totalLost += Number(l.quantity) || 0;
         }
       });
 
@@ -1629,24 +1815,32 @@ export class FirebaseDBService {
         });
       });
 
-      const recordedStock = prod.stockQty;
-      const difference = 0; // Synchronized baseline
+      // Stock derivado: só os híbridos têm duas componentes que devem somar
+      // ao total. Nos restantes não há base de cálculo sem livro de movimentos.
+      const calculatedStock = isHybrid
+        ? round2(bulkQty * conversionRate + retailQty)
+        : recordedStock;
+      const difference = isHybrid ? round2(recordedStock - calculatedStock) : 0;
+      const negativeStock = recordedStock < 0;
+      const hasDiscrepancy = negativeStock || Math.abs(difference) > 0.001;
 
       items.push({
         productId: prod.id,
         productName: prod.name,
         recordedStock,
-        calculatedStock: recordedStock,
+        calculatedStock,
         difference,
-        totalSold,
+        totalSold: round2(totalSold),
         totalLost,
-        totalTransformedIn,
-        totalTransformedOut,
-        status: (difference === 0 ? 'Sincronizado' : 'Discrepância') as 'Sincronizado' | 'Discrepância'
+        totalTransformedIn: round2(totalTransformedIn),
+        totalTransformedOut: round2(totalTransformedOut),
+        negativeStock,
+        basis: isHybrid ? 'conversion' : 'units',
+        status: (hasDiscrepancy ? 'Discrepância' : 'Sincronizado') as 'Sincronizado' | 'Discrepância'
       });
     }
 
-    const discrepancies = items.filter(i => i.difference !== 0);
+    const discrepancies = items.filter(i => i.status === 'Discrepância');
 
     return {
       items,

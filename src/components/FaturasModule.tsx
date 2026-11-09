@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
+import { isFinancialSale, saleStatusLabel } from '../utils/saleStatus';
+import { verifyAuthorizationPassword } from '../utils/authorization';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
 import { generateNextReceiptNumber } from '../utils/sequenceHelper';
@@ -17,7 +19,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   const [sales, setSales] = useState<Sale[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [faturasSearch, setFaturasSearch] = useState('');
-  const [faturasFilter, setFaturasFilter] = useState<'Todas' | 'Pendente' | 'Paga' | 'Cancelada'>('Todas');
+  const [faturasFilter, setFaturasFilter] = useState<'Todas' | 'Pendente' | 'Crédito' | 'Paga' | 'Proforma' | 'Cancelada'>('Todas');
 
   // Date Range Filter states
   const defaultRange = getDateRangeFromPreset('Este Mês');
@@ -209,7 +211,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         let paymentSaved = false;
         try {
           const allSales = await dbService.getSales();
-          const receiptNum = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const candidate = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const receiptNum = await dbService.nextDocumentNumber(
+            'ReciboA4',
+            new Date().getFullYear(),
+            parseInt(candidate.slice(candidate.lastIndexOf('-') + 1), 10) - 1 || 0
+          );
           const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: receiptNum };
           await dbService.addSale(updatedSale);
           paymentSaved = true;
@@ -270,8 +277,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     if (!sale) return;
 
     const inputPw = (securityModal.password || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    const isValidPassword = inputPw === targetPw || inputPw === '05082' || inputPw === '0147';
+    const isValidPassword = await verifyAuthorizationPassword(inputPw, settings);
     if (!isValidPassword) {
       setSecurityModal(prev => ({ ...prev, error: 'Palavra-passe de autorização incorreta.' }));
       return;
@@ -308,9 +314,17 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
               restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
             }
           }
-          await dbService.cancelSaleWithStockRestoration(sale, restockItems);
+          await dbService.cancelSaleWithStockRestoration(
+            { ...sale, previousStatus: sale.status as Sale['previousStatus'] },
+            restockItems
+          );
         } else {
-          await dbService.addSale({ ...sale, id: String(sale.id || Date.now()), status: 'Cancelada' });
+          await dbService.addSale({
+            ...sale,
+            id: String(sale.id || Date.now()),
+            status: 'Cancelada',
+            previousStatus: sale.status as Sale['previousStatus']
+          });
         }
 
         actionPersisted = true;
@@ -330,7 +344,18 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         });
         showToast(`Venda ${sale.invoiceNumber} anulada e stock estornado com sucesso!`, 'success');
       } else {
-        const updatedSale: Sale = { ...sale, id: String(sale.id || Date.now()), status: 'Pendente' };
+        // Restaurar devolve a fatura ao estado que tinha antes do cancelamento
+        // (hoje guardado em `previousStatus`); 'Pendente' é apenas o legado.
+        const restoredStatus: Sale['status'] =
+          sale.previousStatus === 'Paga' || sale.previousStatus === 'Crédito' || sale.previousStatus === 'Pendente'
+            ? sale.previousStatus
+            : 'Pendente';
+        const updatedSale: Sale = {
+          ...sale,
+          id: String(sale.id || Date.now()),
+          status: restoredStatus,
+          previousStatus: undefined
+        };
         if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
           const deductionItems: any[] = [];
@@ -431,15 +456,25 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     return matchesInvoiceSearch(sale);
   });
 
+  const sumByStatus = (status: Sale['status']) =>
+    sales.filter(sale => sale.status === status).reduce((sum, sale) => sum + sale.total, 0);
+  const countByStatus = (status: Sale['status']) => sales.filter(sale => sale.status === status).length;
+
   const pageSummary: SalesSummary = {
-    totalInvoiced: sales.filter(sale => sale.status !== 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
-    paidInvoiced: sales.filter(sale => sale.status === 'Paga').reduce((sum, sale) => sum + sale.total, 0),
-    pendingInvoiced: sales.filter(sale => sale.status === 'Pendente').reduce((sum, sale) => sum + sale.total, 0),
-    canceledInvoiced: sales.filter(sale => sale.status === 'Cancelada').reduce((sum, sale) => sum + sale.total, 0),
+    totalInvoiced: sales.filter(isFinancialSale).reduce((sum, sale) => sum + sale.total, 0),
+    paidInvoiced: sumByStatus('Paga'),
+    pendingInvoiced: sumByStatus('Pendente'),
+    creditInvoiced: sumByStatus('Crédito'),
+    debtInvoiced: sumByStatus('Pendente') + sumByStatus('Crédito'),
+    proformaInvoiced: sumByStatus('Proforma'),
+    canceledInvoiced: sumByStatus('Cancelada'),
     totalCount: sales.length,
-    paidCount: sales.filter(sale => sale.status === 'Paga').length,
-    pendingCount: sales.filter(sale => sale.status === 'Pendente').length,
-    canceledCount: sales.filter(sale => sale.status === 'Cancelada').length
+    paidCount: countByStatus('Paga'),
+    pendingCount: countByStatus('Pendente'),
+    creditCount: countByStatus('Crédito'),
+    debtCount: countByStatus('Pendente') + countByStatus('Crédito'),
+    proformaCount: countByStatus('Proforma'),
+    canceledCount: countByStatus('Cancelada')
   };
   const periodSummary = salesSummary || pageSummary;
 
@@ -451,9 +486,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       ? periodSummary.paidInvoiced
       : faturasFilter === 'Pendente'
         ? periodSummary.pendingInvoiced
-        : 0;
+        : faturasFilter === 'Crédito'
+          ? periodSummary.creditInvoiced
+          : faturasFilter === 'Proforma'
+            ? periodSummary.proformaInvoiced
+            : 0;
   const paidInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Paga' ? periodSummary.paidInvoiced : 0;
   const pendingInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Pendente' ? periodSummary.pendingInvoiced : 0;
+  // O cartão "Pendente (Crédito)" mostra a dívida real: Pendente + Crédito.
+  const debtInvoiced = periodSummary.debtInvoiced;
   const canceledInvoiced = faturasFilter === 'Todas' || faturasFilter === 'Cancelada' ? periodSummary.canceledInvoiced : 0;
   const activeQueryCount = faturasFilter === 'Todas'
     ? periodSummary.totalCount
@@ -461,7 +502,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       ? periodSummary.paidCount
       : faturasFilter === 'Pendente'
         ? periodSummary.pendingCount
-        : periodSummary.canceledCount;
+        : faturasFilter === 'Crédito'
+          ? periodSummary.creditCount
+          : faturasFilter === 'Proforma'
+            ? periodSummary.proformaCount
+            : periodSummary.canceledCount;
 
   const getSalesForExport = async () => {
     const allSales = await dbService.getSalesForPeriod(getCurrentSalesQuery());
@@ -626,9 +671,9 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             <span className="material-symbols-outlined text-[22px]">hourglass_empty</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Pendente (Crédito)</p>
+            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Em dívida (Pendente + Crédito)</p>
             <p className="text-lg font-black text-amber-700 truncate font-mono mt-0.5">
-              {pendingInvoiced.toLocaleString()} MT
+              {debtInvoiced.toLocaleString()} MT
             </p>
           </div>
         </div>
@@ -651,14 +696,18 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
           {/* Quick filter status tabs */}
           <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs font-bold w-full lg:w-auto custom-scrollbar">
-            {(['Todas', 'Pendente', 'Paga', 'Cancelada'] as const).map(tab => {
+            {(['Todas', 'Pendente', 'Crédito', 'Paga', 'Proforma', 'Cancelada'] as const).map(tab => {
               const count = tab === 'Todas'
                 ? periodSummary.totalCount
                 : tab === 'Paga'
                   ? periodSummary.paidCount
                   : tab === 'Pendente'
                     ? periodSummary.pendingCount
-                    : periodSummary.canceledCount;
+                    : tab === 'Crédito'
+                      ? periodSummary.creditCount
+                      : tab === 'Proforma'
+                        ? periodSummary.proformaCount
+                        : periodSummary.canceledCount;
               return (
                 <button
                   key={tab}
@@ -670,7 +719,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
                   }`}
                 >
-                  {tab === 'Todas' ? 'Todas' : tab === 'Pendente' ? 'Pendentes' : tab === 'Paga' ? 'Pagas' : 'Canceladas'} ({count})
+                  {tab === 'Todas' ? 'Todas' : tab === 'Pendente' ? 'Pendentes' : tab === 'Crédito' ? 'A Crédito' : tab === 'Paga' ? 'Pagas' : tab === 'Proforma' ? 'Proformas' : 'Canceladas'} ({count})
                 </button>
               );
             })}
@@ -760,9 +809,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-150'
                             : sale.status === 'Pendente'
                               ? 'bg-amber-50 text-amber-700 border-amber-150'
-                              : 'bg-rose-50 text-rose-700 border-rose-150'
+                              : sale.status === 'Crédito'
+                                ? 'bg-orange-50 text-orange-700 border-orange-150'
+                                : sale.status === 'Proforma'
+                                  ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-150'
                         }`}>
-                          {sale.status === 'Paga' ? 'PAGA' : sale.status === 'Pendente' ? 'PENDENTE' : 'CANCELADA'}
+                          {saleStatusLabel(sale)}
                         </span>
                       </td>
 
@@ -770,7 +823,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <td className="p-2 text-right">
                         <div className="flex justify-end gap-1 flex-wrap">
                           {/* Liquidate payment buttons */}
-                          {sale.status === 'Pendente' && (
+                          {(sale.status === 'Pendente' || sale.status === 'Crédito') && (
                             <button
                               type="button"
                               onClick={() => handlePayInvoice(sale)}
@@ -1043,7 +1096,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     </div>
                                     <div className="flex justify-between text-gray-600">
                                       <span>IVA:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.includeIva ? `${(invoiceToPrint.ivaAmount || 0).toLocaleString('pt-MZ')} MT` : 'IVA INCLUSO'}</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.includeIva ? `${(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT` : 'Sem IVA'}</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-emerald-800 border-t border-gray-300 pt-1.5">
                                       <span>Total Líquido:</span>
@@ -1113,7 +1166,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     RECIBO
                                   </div>
                                   <p className="text-gray-700 font-bold font-mono text-sm pt-2">
-                                    Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-') : `Rec-${new Date().getFullYear()}-${invoiceToPrint.invoiceNumber}`)}
+                                    Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}
                                   </p>
                                   <p className="text-gray-500 font-medium text-[10px]">
                                     Referente à Fatura Nº: <span className="font-bold font-mono text-gray-800">{invoiceToPrint.invoiceNumber}</span>
@@ -1204,7 +1257,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               </>
                             ) : (
                               <div className="border-t border-gray-200 pt-4 flex justify-between items-center text-[10px] text-gray-400 italic">
-                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-') : invoiceToPrint.invoiceNumber)}</span>
+                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</span>
                                 <span className="font-semibold text-emerald-700">Continua na página seguinte... (Pág {pageIdx + 1} de {chunks.length})</span>
                               </div>
                             )}
@@ -1300,8 +1353,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
-                        <span>IVA INCLUÍDO (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total * 0.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span>IVA (16%):</span>
+                        <span className="font-mono">{(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 

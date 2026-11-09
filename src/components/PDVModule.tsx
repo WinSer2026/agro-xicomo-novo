@@ -10,8 +10,10 @@ import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/s
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
+import { isFinancialSale } from '../utils/saleStatus';
+import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
 
 interface PDVModuleProps {
@@ -133,17 +135,80 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     customSubtotalDiscount: number;
   } | null>(null);
   const isInitialLoadCompletedRef = useRef(false);
+  const activeCartStartedAtRef = useRef<string | null>(null);
+
+/**
+ * Identificador único de venda.
+ *
+ * `sale-${Date.now()}` colidia quando duas vendas eram finalizadas no mesmo
+ * milissegundo (dois postos ou duplo clique) e a segunda apagava a primeira
+ * (achado A-03). Passa a usar UUID com fallback para timestamp + sufixo.
+ */
+function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
+  const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefixo}-${uuid}`;
+}
 
   const restoreActiveCart = () => {
     if (!savedActiveCart) return;
-    setCart(savedActiveCart.cart);
+
+    // O rascunho é apagado no momento em que é recuperado: se o operador fechar
+    // o separador a seguir, não pode voltar a aparecer "venda anterior" com um
+    // carrinho já finalizado (origem de vendas duplicadas).
+    void dbService.clearActiveCart();
+
+    // Revalidação (G-03): os preços e as quantidades do rascunho podem ter
+    // ficado desactualizados. O carrinho é reconstruído com os preços actuais
+    // e limitado ao stock disponível.
+    let repriced = 0;
+    let clamped = 0;
+    const revalidated = (savedActiveCart.cart || []).map(item => {
+      const prod = products.find(p => p.id === item.productId);
+      if (!prod) return item;
+
+      const rate = Number(prod.conversionRate) || 0;
+      const hybrid = Boolean(prod.parentUnit) && rate > 1;
+      const isBulk = item.sellingUnit === 'Bulk' && hybrid;
+      const currentPrice = isBulk
+        ? (Number(prod.sellingPriceBulk) > 0 ? Number(prod.sellingPriceBulk) : Number(prod.sellingPrice) * (rate || 1))
+        : Number(prod.sellingPrice);
+
+      const available = hybrid
+        ? (isBulk ? Number(prod.stockQtyBulk) || 0 : Number(prod.stockQtyRetail) || 0)
+        : Number(prod.stockQty) || 0;
+
+      const originalQty = Number(item.quantity) || 0;
+      const safeQty = prod.isService ? originalQty : Math.max(1, Math.min(originalQty, available));
+
+      if (safeQty !== originalQty) clamped += 1;
+      if (Number(item.unitPrice) !== currentPrice) repriced += 1;
+
+      return {
+        ...item,
+        unitPrice: Number.isFinite(currentPrice) ? currentPrice : item.unitPrice,
+        quantity: safeQty,
+        totalPrice: (Number.isFinite(currentPrice) ? currentPrice : item.unitPrice) * safeQty - (item.discountValue || 0)
+      };
+    });
+
+    setCart(revalidated);
     setCustomerName(savedActiveCart.customerName);
     setPaymentMethod(savedActiveCart.paymentMethod);
     setDocumentType(savedActiveCart.documentType);
     setIncludeIva(savedActiveCart.includeIva);
     setCustomSubtotalDiscount(savedActiveCart.customSubtotalDiscount);
     setSavedActiveCart(null);
-    showToast('Venda anterior recuperada com sucesso!', 'success');
+
+    if (repriced > 0 || clamped > 0) {
+      showToast(
+        `Venda recuperada com ${repriced} preço(s) actualizado(s) e ${clamped} quantidade(s) ajustada(s) ao stock.`,
+        'warning'
+      );
+    } else {
+      showToast('Venda anterior recuperada com sucesso!', 'success');
+    }
   };
 
   const discardSavedCart = async () => {
@@ -174,7 +239,15 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
     const saveCart = async () => {
       if (cart.length > 0) {
+        // A data de início do rascunho é preservada entre gravações: serve para
+        // expirar carrinhos antigos em vez de os reabrir dias depois.
+        if (!activeCartStartedAtRef.current) {
+          activeCartStartedAtRef.current = new Date().toISOString();
+        }
         await dbService.saveActiveCart({
+          id: 'active-cart',
+          date: activeCartStartedAtRef.current,
+          createdAt: activeCartStartedAtRef.current,
           cart,
           customerName,
           paymentMethod,
@@ -183,6 +256,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
           customSubtotalDiscount
         });
       } else {
+        activeCartStartedAtRef.current = null;
         await dbService.clearActiveCart();
       }
     };
@@ -324,11 +398,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const saleDateISO = retroactiveDateTime ? new Date(retroactiveDateTime).toISOString() : new Date().toISOString();
 
       const newSale: Sale = {
-        id: 'sale-retro-' + Date.now(),
+        id: newSaleId('sale-retro'),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         manualReceiptReference: manualRec,
         date: saleDateISO,
+        dateKey: toLocalDateKey(saleDateISO),
         customerName: finalCustomerName,
         customerNuit: finalCustomerNuit,
         customerAddress: finalCustomerAddress,
@@ -750,8 +825,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     // Retrieve saved uncompleted cart
     try {
       const savedCart = await dbService.getActiveCart();
-      if (savedCart && savedCart.cart && savedCart.cart.length > 0) {
+      const draftIsFresh = (() => {
+        if (!savedCart?.cart?.length) return false;
+        const stamp = savedCart.createdAt || savedCart.date;
+        if (!stamp) return true; // rascunho legado: mantém-se, mas com aviso
+        const ageHours = (Date.now() - new Date(stamp).getTime()) / 36e5;
+        return Number.isFinite(ageHours) ? ageHours < 12 : true;
+      })();
+      if (savedCart && savedCart.cart && savedCart.cart.length > 0 && draftIsFresh) {
         setSavedActiveCart(savedCart);
+      } else if (savedCart && savedCart.cart && savedCart.cart.length > 0) {
+        // Rascunho com mais de 12 horas: descartado para não reabrir vendas
+        // antigas com preços e stock desactualizados.
+        void dbService.clearActiveCart();
       }
     } catch (err) {
       console.error('Error fetching active cart:', err);
@@ -1055,7 +1141,12 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   const addToCart = (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
     // Determine default selling unit
     const hasConversion = !!(product.parentUnit && product.conversionRate && product.conversionRate > 1);
-    const selectedUnit = preferredUnit || (hasConversion ? 'Retail' : 'Retail');
+    // O cartão do catálogo mostra o preço de atacado nos híbridos; a unidade por
+    // omissão tem de ser a mesma, senão o cliente vê 1.200 MT e paga 1.500 MT.
+    // Só cai para retalho quando não há atacado disponível.
+    const bulkAvailable = Number(product.stockQtyBulk) || 0;
+    const selectedUnit: 'Bulk' | 'Retail' =
+      preferredUnit || (hasConversion && bulkAvailable > 0 ? 'Bulk' : 'Retail');
 
     const currentCartItem = cart.find(item => item.productId === product.id && item.sellingUnit === selectedUnit);
     const existingQty = currentCartItem ? currentCartItem.quantity : 0;
@@ -1276,6 +1367,10 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     let salePersisted = false;
 
     const clearCompletedCheckout = () => {
+      // Limpeza explícita do rascunho no momento do commit: não se depende do
+      // efeito de auto-save (que só corre depois do render seguinte).
+      void dbService.clearActiveCart();
+      setSavedActiveCart(null);
       setCart([]);
       setCustomerName('Cliente Geral');
       setCustomerNuit('');
@@ -1291,6 +1386,54 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       const disc = getDiscount();
       const tot = getTotal();
       const iva = includeIva ? Math.round((sub - disc) * 0.16 * 100) / 100 : 0;
+
+      // --- Controlo do pagamento (D-06) -------------------------------------
+      // O estado da venda é financeiro: não se grava uma venda como paga sem
+      // que o valor recebido cubra o total. O painel já mostrava "Falta: X MT",
+      // mas a gravação ignorava-o.
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      const money = (n: number) =>
+        n.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const breakdownTotal = round2(
+        (paymentMethod === 'Múltiplo' ? multiPaymentLines : [])
+          .reduce((acc, line) => acc + Number(line.amount || 0), 0)
+      );
+      const typedAmount = typeof amountReceived === 'number' ? amountReceived : Number(amountReceived || 0);
+
+      let tendered = 0;
+      let change = 0;
+
+      if (paymentMethod === 'Crédito') {
+        tendered = 0;
+        change = 0;
+      } else if (paymentMethod === 'Múltiplo') {
+        if (Math.abs(breakdownTotal - tot) > 0.01) {
+          const falta = round2(tot - breakdownTotal);
+          showToast(
+            falta > 0
+              ? `Pagamento incompleto: as parcelas somam ${money(breakdownTotal)} MT e faltam ${money(falta)} MT.`
+              : `As parcelas somam ${money(breakdownTotal)} MT e excedem o total em ${money(-falta)} MT.`,
+            'error'
+          );
+          return;
+        }
+        tendered = breakdownTotal;
+        change = 0;
+      } else if (paymentMethod === 'Dinheiro') {
+        if (amountReceived !== '' && typedAmount + 0.005 < tot) {
+          showToast(
+            `Valor entregue (${money(typedAmount)} MT) inferior ao total (${money(tot)} MT).`,
+            'error'
+          );
+          return;
+        }
+        tendered = amountReceived !== '' ? typedAmount : tot;
+        change = Math.max(0, round2(tendered - tot));
+      } else {
+        // Transferência, M-Pesa, E-Mola: pagamento pelo valor exacto.
+        tendered = tot;
+        change = 0;
+      }
 
       // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
       const finalizedItems = cart.map(item => {
@@ -1309,30 +1452,50 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       // Determine document type from print option
       const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
 
-      // Determine default status: A4 definitive invoices and proformas are saved as Pendente
-      let finalStatus: Sale['status'] = 'Paga';
-      if (effectiveDocType === 'FaturaProforma' || printFormat === 'A4') {
-        finalStatus = 'Pendente';
-      } else if (paymentMethod === 'Crédito') {
-        finalStatus = 'Crédito';
-      }
-
-      // Generate sequential invoice number (Fact-2026-N) and receipt number (Rec-2026-N)
-      const existingSales = await dbService.getSales();
-      const invoiceNum = generateNextInvoiceNumber(existingSales, effectiveDocType);
-      const receiptNum = (finalStatus === 'Paga' || printFormat === 'ReciboA4' || printFormat === 'Thermal')
-        ? generateNextReceiptNumber(existingSales, printFormat)
-        : undefined;
-
+      // O estado decorre do PAGAMENTO, nunca do papel escolhido. Uma fatura A4
+      // paga em dinheiro é 'Paga'; uma venda a crédito é 'Crédito'. A proforma é
+      // um documento não fiscal e é excluída das agregações financeiras pelo
+      // `documentType`, não pelo estado — para não poluir a dívida de clientes.
       const activeBreakdown = paymentMethod === 'Múltiplo'
         ? multiPaymentLines.filter(l => l.amount > 0)
         : undefined;
+      const hasCreditLeg = (activeBreakdown || []).some(
+        line => String(line.method || '').trim().toLowerCase().startsWith('crédit')
+      );
+      const isCreditSale = paymentMethod === 'Crédito' || hasCreditLeg;
+      const finalStatus: Sale['status'] =
+        effectiveDocType === 'FaturaProforma' ? 'Proforma' : isCreditSale ? 'Crédito' : 'Paga';
+
+      // Numeração autoritativa (B-01): o contador vive no Firestore e é
+      // incrementado numa transacção, para que dois caixas nunca recebam o
+      // mesmo número. O helper do cliente é usado apenas para saber qual é o
+      // maior número já emitido, que semeia o contador na primeira utilização.
+      const existingSales = await dbService.getSales();
+      const numberYear = new Date().getFullYear();
+      const lastPartOf = (value: string) =>
+        parseInt(value.slice(value.lastIndexOf('-') + 1), 10) - 1 || 0;
+
+      const invoiceNum = await dbService.nextDocumentNumber(
+        effectiveDocType === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva',
+        numberYear,
+        lastPartOf(generateNextInvoiceNumber(existingSales, effectiveDocType))
+      );
+
+      let receiptNum: string | undefined;
+      if (finalStatus === 'Paga' && effectiveDocType === 'FaturaDefinitiva') {
+        receiptNum = await dbService.nextDocumentNumber(
+          printFormat === 'Thermal' ? 'ReciboPOS' : 'ReciboA4',
+          numberYear,
+          lastPartOf(generateNextReceiptNumber(existingSales, printFormat))
+        );
+      }
 
       const newSale: Sale = {
-        id: 'sale-' + Date.now(),
+        id: newSaleId(),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         date: new Date().toISOString(),
+        dateKey: toLocalDateKey(new Date().toISOString()),
         customerName,
         customerNuit: customerNuit || undefined,
         customerAddress: customerAddress || undefined,
@@ -1342,6 +1505,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         total: tot,
         paymentMethod,
         paymentBreakdown: activeBreakdown,
+        amountReceived: paymentMethod === 'Crédito' ? undefined : tendered,
+        changeGiven: paymentMethod === 'Crédito' ? undefined : change,
         status: finalStatus,
         documentType: effectiveDocType,
         operatorId: currentUser.username,
@@ -1420,16 +1585,19 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         setInvoiceToPrint(newSale);
         setPrintType('FaturaProforma');
       } else if (directPrint) {
-        setInvoiceToPrint(null);
-        setPrintType(null);
-
-        if (!directPrinted) {
+        if (!directPrinted && printFormat === 'Thermal') {
           documentGenerated = await runPostCommitTask({
             label: 'gerar o documento da venda',
             task: () => downloadInvoicePDF(newSale, printFormat)
           });
 
-          if (printFormat === 'Thermal' && documentGenerated) {
+          if (documentGenerated) {
+            // O fallback de impressão precisa do documento no DOM: o bloco
+            // `#thermal_receipt_80` só desenha conteúdo quando `invoiceToPrint`
+            // existe. Sem isto, o `window.print()` abria uma folha em branco.
+            setInvoiceToPrint(newSale);
+            setPrintType('Thermal');
+
             window.setTimeout(() => {
               void runPostCommitTask({
                 label: 'abrir a impressão automática',
@@ -1439,8 +1607,11 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                   showToast('Venda gravada com sucesso. A impressão automática não foi iniciada; pode reimprimir pelo histórico.', 'warning');
                 }
               });
-            }, 500);
+            }, 700);
           }
+        } else {
+          setInvoiceToPrint(null);
+          setPrintType(null);
         }
       } else {
         documentGenerated = await runPostCommitTask({
@@ -1474,6 +1645,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       if (salePersisted) {
         clearCompletedCheckout();
         showToast('A venda foi gravada com sucesso. Alguns passos posteriores não foram concluídos; consulte o histórico antes de repetir a operação.', 'warning');
+      } else if (err instanceof InsufficientStockError) {
+        showToast(err.message, 'error');
       } else {
         showToast('Erro ao gravar a venda no sistema.', 'error');
       }
@@ -1490,7 +1663,14 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
       async () => {
         let paymentSaved = false;
         try {
-          const updatedSale: Sale = { ...sale, status: 'Paga' };
+          const allSales = await dbService.getSales();
+          const candidate = generateNextReceiptNumber(allSales, 'ReciboA4');
+          const receiptNum = await dbService.nextDocumentNumber(
+            'ReciboA4',
+            new Date().getFullYear(),
+            parseInt(candidate.slice(candidate.lastIndexOf('-') + 1), 10) - 1 || 0
+          );
+          const updatedSale: Sale = { ...sale, status: 'Paga', receiptNumber: sale.receiptNumber || receiptNum };
           await dbService.addSale(updatedSale);
           paymentSaved = true;
 
@@ -1886,8 +2066,20 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
         {/* Catalog Products Container */}
         <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
           {filteredProducts.map(prod => {
-            const lowStock = !prod.isService && prod.stockQty <= 10;
-            const noStock = !prod.isService && prod.stockQty === 0;
+            // A disponibilidade não pode ser lida só de `stockQty`: nos híbridos
+            // o stock vive em `stockQtyBulk`/`stockQtyRetail`. Usa-se o maior dos
+            // dois valores (total vs. soma das componentes) para não bloquear
+            // produtos que existem nem libertar produtos que já não existem.
+            const cardRate = Number(prod.conversionRate) || 0;
+            const cardIsHybrid = Boolean(prod.parentUnit) && cardRate > 1;
+            const cardDerived = cardIsHybrid
+              ? (Number(prod.stockQtyBulk) || 0) * cardRate + (Number(prod.stockQtyRetail) || 0)
+              : 0;
+            const cardAvailable = cardIsHybrid
+              ? Math.max(Number(prod.stockQty) || 0, cardDerived)
+              : Number(prod.stockQty) || 0;
+            const lowStock = !prod.isService && cardAvailable > 0 && cardAvailable <= 10;
+            const noStock = !prod.isService && cardAvailable <= 0;
 
             return (
               <div
@@ -1925,7 +2117,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                           className="w-full h-full object-cover" 
                           referrerPolicy="no-referrer"
                           onError={(e) => {
-                            (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1595974482597-4b8da8879bc5?auto=format&fit=crop&w=400&q=80';
+                            (e.target as HTMLImageElement).src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="96"><rect width="80" height="96" fill="%23f1f5f9"/><text x="50%" y="50%" font-size="11" text-anchor="middle" fill="%2394a3b8">sem foto</text></svg>';
                           }}
                         />
                       </div>
@@ -2506,7 +2698,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
             }}
             onExportExcel={() => {
               const salesInRange = sales.filter(s => {
-                if (s.status === 'Cancelada' || s.status === 'canceled') return false;
+                if (!isFinancialSale(s)) return false;
                 if (!s.date) return false;
                 return isDateInRange(s.date, reportStartDate, reportEndDate);
               });
@@ -2534,7 +2726,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
           {(() => {
             const salesOnDate = sales.filter(s => {
-              if (s.status === 'Cancelada' || s.status === 'canceled') return false;
+              if (!isFinancialSale(s)) return false;
               if (!s.date) return false;
               return isDateInRange(s.date, reportStartDate, reportEndDate);
             });
@@ -3175,7 +3367,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                                     RECIBO
                                   </div>
                                   <p className="text-gray-700 font-bold font-mono text-sm pt-2">
-                                    Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-A4-') : `Rec-2026-${invoiceToPrint.invoiceNumber}`)}
+                                    Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}
                                   </p>
                                   <p className="text-gray-500 font-medium text-[10px]">
                                     Referente à Fatura Nº: <span className="font-bold font-mono text-gray-800">{invoiceToPrint.invoiceNumber}</span>
@@ -3281,7 +3473,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
                               </>
                             ) : (
                               <div className="border-t border-gray-200 pt-4 flex justify-between items-center text-[10px] text-gray-400 italic">
-                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-A4-') : invoiceToPrint.invoiceNumber)}</span>
+                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</span>
                                 <span className="font-semibold text-primary">Continua na página seguinte... (Pág {pageIdx + 1} de {chunks.length})</span>
                               </div>
                             )}
@@ -3375,8 +3567,8 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
 
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
-                        <span>IVA INCLUÍDO (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total * 0.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span>IVA (16%):</span>
+                        <span className="font-mono">{(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
@@ -3711,7 +3903,7 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
             </div>
 
             <div className="text-[11px] space-y-1">
-              <p>Nº: {invoiceToPrint.receiptNumber || invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-POS-').replace('Fact-', 'REC-POS-')}</p>
+              <p>Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</p>
               <p>Data: {new Date(invoiceToPrint.date).toLocaleString('pt-MZ')}</p>
               <p>Cliente: {invoiceToPrint.customerName}</p>
             </div>

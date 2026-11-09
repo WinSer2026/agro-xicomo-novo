@@ -1,8 +1,62 @@
 rules_version = '2';
+// ---------------------------------------------------------------------------
+// Regras do Firestore — AGRO-XICOMO
+//
+// ATENÇÃO: estas regras exigem autenticação (Firebase Anonymous Auth ligado no
+// projeto). A versão anterior era `allow read, write: if true`, o que expunha
+// TODA a base — vendas, credenciais (mesmo em hash), salários — a qualquer
+// pessoa que tivesse o projectId (que está no bundle do frontend).
+//
+// Antes de publicar (`firebase deploy --only firestore:rules`):
+//   1. Console Firebase → Authentication → Sign-in method → ativar "Anónimo".
+//   2. Ver docs/seguranca.md.
+//
+// O ficheiro com as regras antigas está em firestore.rules.legacy-open, apenas
+// para consulta/histórico. NÃO o publique.
+// ---------------------------------------------------------------------------
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Tudo o resto: negado por omissão.
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // Operação normal: qualquer utilizador autenticado (anónimo incluído) lê e
+    // escreve os documentos operacionais.
+    match /products/{docId}      { allow read, write: if request.auth != null; }
+    match /sales/{docId}         { allow read, write: if request.auth != null; }
+    match /losses/{docId}        { allow read, write: if request.auth != null; }
+    match /transformations/{docId} { allow read, write: if request.auth != null; }
+    match /employees/{docId}     { allow read, write: if request.auth != null; }
+    match /attendance/{docId}    { allow read, write: if request.auth != null; }
+    match /customers/{docId}     { allow read, write: if request.auth != null; }
+    match /paused_sales/{docId}  { allow read, write: if request.auth != null; }
+    match /active_cart/{docId}   { allow read, write: if request.auth != null; }
+    match /settings/{docId}      { allow read, write: if request.auth != null; }
+    match /counters/{docId}      { allow read, write: if request.auth != null; }
+    match /deletions/{docId}     { allow read, write: if request.auth != null; }
+    match /payroll_payments/{docId} { allow read, write: if request.auth != null; }
+    match /active_sessions/{docId}  { allow read, write: if request.auth != null; }
+
+    // Credenciais: leitura apenas para verificação de login (o cliente precisa
+    // de comparar o hash). Escrita restrita — só criação/atualização autenticada.
+    match /credentials/{docId} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // Auditoria: registos imutáveis depois de criados.
+    match /audit_logs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+    match /audit_logs_archive/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if false;
     }
   }
 }

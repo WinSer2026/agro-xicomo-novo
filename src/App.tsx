@@ -248,12 +248,11 @@ export default function App() {
     setGateError('');
     if (!currentUser) return;
 
-    const isMaster = currentUser.username === 'Mazive' && gatePassword === '0147';
+    // A chave mestra em texto simples foi removida: a autorização de gestor
+    // valida sempre a palavra-passe guardada (em hash) do utilizador da sessão.
     let isValid = false;
 
-    if (isMaster) {
-      isValid = true;
-    } else {
+    {
       const allCreds = await dbService.getCredentials();
       const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
       // Aceita a palavra-passe em texto simples (legado) ou com hash seguro (sha256)
@@ -392,14 +391,6 @@ export default function App() {
                 }
                 
                 const cleanUnlock = unlockPassword.trim();
-
-                // Emergency master key bypass
-                if ((currentUser.username.toLowerCase() === 'mazive' || currentUser.username.toLowerCase() === 'admin') && (cleanUnlock === '0147' || cleanUnlock === 'admin' || cleanUnlock === '05082')) {
-                  setIsSessionLocked(false);
-                  setUnlockPassword('');
-                  setLastActivity(Date.now());
-                  return;
-                }
 
                 try {
                   const allCreds = await dbService.getCredentials();

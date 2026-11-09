@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
 import { dbService } from '../utils/firebaseDB';
+import { verifyAuthorizationPassword } from '../utils/authorization';
 import { Product, LossRecord, SystemSettings } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
@@ -162,9 +163,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (!deleteProductTarget) return;
 
     const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = currentSettings.stockPasswordHash || '05082';
 
-    if (deletePassword !== expectedPass && deletePassword !== '05082' && deletePassword !== '0147') {
+    if (!(await verifyAuthorizationPassword(deletePassword, currentSettings))) {
       setDeleteError('Senha de Gestor de Stock incorreta!');
       return;
     }
@@ -204,9 +204,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setApplyError('');
 
     const currentSettings = settings || await dbService.getSettings();
-    const expectedPass = currentSettings?.stockPasswordHash || '05082';
 
-    if (applyPassword !== expectedPass && applyPassword !== '05082' && applyPassword !== '0147') {
+    if (!(await verifyAuthorizationPassword(applyPassword, currentSettings))) {
       setApplyError('Senha de autorização de gestor incorreta.');
       return;
     }
@@ -228,7 +227,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
           // If physical count is less than system recorded stock, record an automatic loss
           if (diff < 0) {
             const missingQty = Math.abs(diff);
-            const lossVal = missingQty * (prod.buyPrice || 0);
+            const lossVal = missingQty * (Number(prod.buyingPrice) || 0);
             totalLossVal += lossVal;
             lossCount++;
 
@@ -1443,10 +1442,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       return;
     }
 
-    const inputPw = (settings?.stockPasswordHash || '05082').trim();
-    const pw = prompt(`Introduza a Palavra-passe de Autorização do Stock:`);
-    if (!pw || (pw.trim() !== inputPw && pw.trim() !== '05082' && pw.trim() !== '0147')) {
-      triggerToast('A palavra-passe de segurança do stock está incorreta ou operação cancelada.');
+    const pw = window.prompt('Introduza a Palavra-passe de Autorização do Stock:');
+    if (!pw) {
+      triggerToast('Operação cancelada: é necessária a palavra-passe de autorização do stock.');
+      return;
+    }
+    if (!(await verifyAuthorizationPassword(pw, settings))) {
+      triggerToast('A palavra-passe de segurança do stock está incorreta.');
       return;
     }
 
@@ -1574,9 +1576,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     if (isSubmitting) return;
     setAdjustError('');
 
-    const inputPw = (stockPassword || '').trim();
-    const targetPw = (settings?.stockPasswordHash || '05082').trim();
-    if (inputPw !== targetPw && inputPw !== '05082' && inputPw !== '0147') {
+    if (!(await verifyAuthorizationPassword(stockPassword, settings))) {
       setAdjustError('A palavra-passe de segurança do stock está incorreta.');
       return;
     }
@@ -2474,18 +2474,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       {stockSubTab === 'reconciliation' && (() => {
         // Compute live physical vs system metrics
         const totalProducts = products.length;
-        const totalSystemVal = products.reduce((acc, p) => acc + ((p.stockQty || 0) * (p.buyPrice || 0)), 0);
+        const totalSystemVal = products.reduce((acc, p) => acc + ((p.stockQty || 0) * (Number(p.buyingPrice) || 0)), 0);
         const totalPhysicalVal = products.reduce((acc, p) => {
           const physQty = physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : (p.stockQty || 0);
-          return acc + (physQty * (p.buyPrice || 0));
+          return acc + (physQty * (Number(p.buyingPrice) || 0));
         }, 0);
         const totalFinancialDiff = totalPhysicalVal - totalSystemVal;
         
         const auditedItems = products.map(p => {
           const systemQty = p.stockQty || 0;
           const physicalQty = physicalCounts[p.id] !== undefined ? physicalCounts[p.id] : systemQty;
-          const buyPrice = p.buyPrice || 0;
-          const sellPrice = p.sellPrice || 0;
+          const buyPrice = Number(p.buyingPrice) || 0;
+          const sellPrice = Number(p.sellingPrice) || 0;
           const systemValue = systemQty * buyPrice;
           const physicalValue = physicalQty * buyPrice;
           const qtyDiff = physicalQty - systemQty;
@@ -2978,13 +2978,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         type="password"
                         value={applyPassword}
                         onChange={(e) => setApplyPassword(e.target.value)}
-                        placeholder="Digite a palavra-passe do gestor (ex: 05082)..."
+                        placeholder="Palavra-passe de autorização do gestor"
                         className="w-full border border-slate-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600"
                         required
                         autoFocus
                       />
                       <p className="text-[11px] text-slate-500 mt-1">
-                        Insira a senha de validação de gestor (código: 05082 ou 0147) para autorizar a sincronização definitiva.
+                        Insira a palavra-passe de autorização do gestor de stock para confirmar a sincronização definitiva.
                       </p>
                     </div>
 

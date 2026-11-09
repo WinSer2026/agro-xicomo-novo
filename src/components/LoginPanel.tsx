@@ -160,56 +160,12 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
       const lower = cleanUser.toLowerCase();
       const ipAddress = '197.218.10.' + Math.floor(Math.random() * 254 + 1);
 
-      // 1. Emergency Master Key & Admin Bypass Check (Técnico / Master)
-      if ((lower === 'mazive' || lower === 'admin') && (cleanPass === '0147' || cleanPass === 'admin' || cleanPass === '05082')) {
-        safeStorage.removeItem('agro_login_failed_attempts');
-        safeStorage.removeItem('agro_login_lockout_until');
-
-        // Mesmo com a chave mestre, se a conta tiver palavra-passe temporária do reset,
-        // o operador é obrigado a definir uma nova palavra-passe antes de entrar.
-        try {
-          const creds = await dbService.getCredentials();
-          const masterUser = (creds || []).find(c => c.username.toLowerCase() === lower);
-          if (masterUser && masterUser.mustChangePassword) {
-            setPendingUser(masterUser);
-            setNewPassword('');
-            setConfirmPassword('');
-            setChangePasswordError('');
-            setShowPasswordChange(true);
-            setIsSubmitting(false);
-            return;
-          }
-        } catch (e) {
-          console.warn('Master key credential check failed:', e);
-        }
-
-        const masterSessionId = 'sess-master-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
-        safeSessionStorage.setItem('agro_session_id', masterSessionId);
-
-        // Background non-blocking persistence
-        dbService.addAuditLog({
-          id: 'log-' + Date.now(),
-          timestamp: new Date().toISOString(),
-          username: cleanUser,
-          ipAddress,
-          action: 'Login com Chave Mestre de Emergência',
-          status: 'Sucesso',
-          level: 'CRITICAL',
-          details: 'Acesso master/técnico concedido com sucesso.'
-        }).catch(err => console.warn('Audit log write error:', err));
-
-        dbService.saveActiveSession({
-          id: masterSessionId,
-          username: cleanUser,
-          role: 'Técnico',
-          roles: ['Técnico'],
-          loginTime: new Date().toISOString(),
-          ipAddress
-        }).catch(err => console.warn('Active session write error:', err));
-
-        onLoginSuccess({ username: cleanUser, role: 'Técnico', roles: ['Técnico'] });
-        return;
-      }
+      // (A antiga "chave mestra de emergência" — utilizador mazive/admin com as
+      // palavras-passe 0147/admin/05082 — foi REMOVIDA. Era um backdoor em texto
+      // simples no bundle que dava acesso de Técnico a qualquer pessoa. O acesso
+      // técnico faz-se agora apenas com as credenciais guardadas em hash.
+      // Para repor uma palavra-passe sem perder o acesso, use
+      // `node scripts/hash-password.mjs "nova-palavra-passe"`.)
 
       // 2. Query normal credentials with fallback
       let allCreds: UserCredentials[] = [];

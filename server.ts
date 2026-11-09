@@ -99,6 +99,59 @@ async function startServer() {
     next();
   });
 
+  // ---------------------------------------------------------------------------
+  // Autorização das rotas locais (/api/*)
+  // ---------------------------------------------------------------------------
+  // As rotas /api/sync* e /api/backup* escrevem e apagam a base local. Até aqui
+  // não tinham qualquer verificação: qualquer cliente que alcançasse o servidor
+  // podia substituir ou apagar tudo. Passam a exigir uma de duas provas:
+  //   1. cabeçalho `x-sync-token` igual a SYNC_API_TOKEN (integrações/scripts); ou
+  //   2. pedido "mesma origem" (Sec-Fetch-Site same-origin / Origin == Host),
+  //      que é o caso do próprio frontend.
+  const SYNC_TOKEN = (process.env.SYNC_API_TOKEN || "").trim();
+  if (!SYNC_TOKEN) {
+    console.warn(
+      "[Segurança] SYNC_API_TOKEN não definido: as rotas /api só aceitam pedidos da mesma origem. " +
+        "Defina SYNC_API_TOKEN (e VITE_SYNC_API_TOKEN no frontend) para integrações externas."
+    );
+  }
+
+  function isTrustedRequest(req: Request): boolean {
+    const provided = (req.get("x-sync-token") || "").trim();
+    if (SYNC_TOKEN && provided === SYNC_TOKEN) return true;
+    if (SYNC_TOKEN && provided !== SYNC_TOKEN && provided) return false;
+
+    const fetchSite = req.get("sec-fetch-site");
+    if (fetchSite === "same-origin" || fetchSite === "same-site" || fetchSite === "none") {
+      return true;
+    }
+
+    const origin = req.get("origin");
+    const host = req.get("host");
+    if (origin && host) {
+      try {
+        return new URL(origin).host === host;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  const requireTrustedRequest = (req: Request, res: Response, next: NextFunction) => {
+    if (isTrustedRequest(req)) return next();
+    console.warn(`[Segurança] Pedido recusado em ${req.method} ${req.originalUrl} (origem não autorizada).`);
+    return res.status(403).json({ error: "Pedido não autorizado." });
+  };
+
+  // Só estas coleções podem ser escritas pela API local: evita criar chaves
+  // arbitrárias no ficheiro de dados a partir do body do pedido.
+  const SYNCABLE_STORES = new Set([
+    "products", "sales", "losses", "transformations", "employees", "attendance",
+    "audit_logs", "active_sessions", "settings", "credentials", "payroll_payments",
+    "customers", "paused_sales", "deletions", "active_cart"
+  ]);
+
   // Body parser setup
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -118,7 +171,7 @@ async function startServer() {
   });
 
   // --- Persistent Backup Endpoints (Parte 9) ---
-  app.post("/api/backup", rateLimiter(10, 60000), (req: Request, res: Response) => {
+  app.post("/api/backup", requireTrustedRequest, rateLimiter(10, 60000), (req: Request, res: Response) => {
     try {
       const backupData = req.body;
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -149,7 +202,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/backup", (req: Request, res: Response) => {
+  app.get("/api/backup", requireTrustedRequest, (req: Request, res: Response) => {
     try {
       const files = fs.readdirSync(BACKUP_DIR)
         .filter(f => f.endsWith(".json"))
@@ -169,7 +222,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/backup/download/:filename", (req: Request, res: Response) => {
+  app.get("/api/backup/download/:filename", requireTrustedRequest, (req: Request, res: Response) => {
     const filename = path.basename(req.params.filename);
     const filePath = path.join(BACKUP_DIR, filename);
     if (fs.existsSync(filePath)) {
@@ -180,15 +233,18 @@ async function startServer() {
   });
 
   // --- Dual Sync & Offline Fallback Endpoints ---
-  app.get("/api/sync", (req: Request, res: Response) => {
+  app.get("/api/sync", requireTrustedRequest, (req: Request, res: Response) => {
     const db = readDb();
     res.json(db);
   });
 
-  app.post("/api/sync/save", (req: Request, res: Response) => {
+  app.post("/api/sync/save", requireTrustedRequest, (req: Request, res: Response) => {
     const { storeName, item } = req.body;
     if (!storeName || !item || !item.id) {
       return res.status(400).json({ error: "Parâmetros inválidos para sincronização." });
+    }
+    if (!SYNCABLE_STORES.has(storeName)) {
+      return res.status(400).json({ error: "Coleção não sincronizável." });
     }
     const db = readDb();
     if (!Array.isArray(db[storeName])) db[storeName] = [];
@@ -202,10 +258,13 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/sync/save-batch", (req: Request, res: Response) => {
+  app.post("/api/sync/save-batch", requireTrustedRequest, (req: Request, res: Response) => {
     const { storeName, items } = req.body;
     if (!storeName || !Array.isArray(items)) {
       return res.status(400).json({ error: "Parâmetros inválidos para sincronização em lote." });
+    }
+    if (!SYNCABLE_STORES.has(storeName)) {
+      return res.status(400).json({ error: "Coleção não sincronizável." });
     }
     const db = readDb();
     if (!Array.isArray(db[storeName])) db[storeName] = [];
@@ -222,10 +281,13 @@ async function startServer() {
     res.json({ success: true, count: items.length });
   });
 
-  app.post("/api/sync/delete", (req: Request, res: Response) => {
+  app.post("/api/sync/delete", requireTrustedRequest, (req: Request, res: Response) => {
     const { storeName, id } = req.body;
     if (!storeName || !id) {
       return res.status(400).json({ error: "Parâmetros inválidos para eliminação." });
+    }
+    if (!SYNCABLE_STORES.has(storeName)) {
+      return res.status(400).json({ error: "Coleção não sincronizável." });
     }
     const db = readDb();
     if (Array.isArray(db[storeName])) {

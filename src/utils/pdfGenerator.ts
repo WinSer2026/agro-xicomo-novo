@@ -1,6 +1,7 @@
 import { jsPDF } from 'jspdf';
 import { Sale, SystemSettings } from '../types';
 import { numeroParaExtenso } from './numberToWords';
+import { isFinancialSale } from './saleStatus';
 
 /**
  * Gerador de PDFs profissionais para AGRO - XICOMO & SERVIÇOS, LDA.
@@ -368,21 +369,38 @@ function renderInvoiceFooter(
   doc.setTextColor(200, 0, 0); // red for discount
   doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
 
+  // IVA: só aparece quando a venda o cobrou. O valor gravado é a autoridade;
+  // o fallback recalcula 16% sobre a base líquida.
+  const invoiceHasIva = Boolean(invoice.includeIva);
+  const invoiceIvaValue = invoiceHasIva
+    ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+    : 0;
+  let a4Cursor = totalsY + 5;
+  if (invoiceHasIva) {
+    a4Cursor += 4.5;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(80, 80, 80);
+    doc.text('IVA (16%):', 130, a4Cursor);
+    doc.text(`${fmtMT(invoiceIvaValue)} MT`, 195, a4Cursor, { align: 'right' });
+  }
+
   // Divider for totals
+  const a4DividerY = a4Cursor + 3;
   doc.setDrawColor(200, 200, 200);
   doc.setLineWidth(0.2);
-  doc.line(130, totalsY + 8, 195, totalsY + 8);
+  doc.line(130, a4DividerY, 195, a4DividerY);
 
   // Total Pago
+  const a4TotalY = a4DividerY + 5;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
   doc.setTextColor(0, 0, 0);
-  doc.text('Total Pago:', 130, totalsY + 13);
+  doc.text('Total Pago:', 130, a4TotalY);
   doc.setTextColor(14, 98, 49); // Primary green
-  doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 13, { align: 'right' });
+  doc.text(`${fmtMT(invoice.total)} MT`, 195, a4TotalY, { align: 'right' });
 
   // Forma de pagamento box
-  const payY = totalsY + 17;
+  const payY = a4TotalY + 4;
   doc.setFillColor(245, 245, 245);
   doc.rect(130, payY, 65, 8, 'F');
   doc.setDrawColor(220, 220, 220);
@@ -474,7 +492,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.text('RECIBO', 162.5, 15.5, { align: 'center' });
 
       // Receipt number
-      const recNumber = invoice.receiptNumber || (invoice.invoiceNumber.startsWith('Fact-') ? invoice.invoiceNumber.replace('Fact-', 'Rec-') : invoice.invoiceNumber.startsWith('FAC-') ? invoice.invoiceNumber.replace('FAC-', 'REC-') : `Rec-2026-${invoice.invoiceNumber}`);
+      const recNumber = invoice.receiptNumber || 'S/N';
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9);
       doc.setTextColor(50, 50, 50);
@@ -623,18 +641,33 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setTextColor(200, 0, 0); // red for discount
       doc.text(`-${fmtMT(invoice.discount)} MT`, 195, totalsY + 5, { align: 'right' });
 
+      const receiptHasIva = Boolean(invoice.includeIva);
+      const receiptIvaValue = receiptHasIva
+        ? Number(invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100)
+        : 0;
+      let receiptCursor = totalsY + 5;
+      if (receiptHasIva) {
+        receiptCursor += 4.5;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(80, 80, 80);
+        doc.text('IVA (16%):', 130, receiptCursor);
+        doc.text(`${fmtMT(receiptIvaValue)} MT`, 195, receiptCursor, { align: 'right' });
+      }
+
       // Divider for totals
+      const receiptDividerY = receiptCursor + 3;
       doc.setDrawColor(200, 200, 200);
       doc.setLineWidth(0.2);
-      doc.line(130, totalsY + 8, 195, totalsY + 8);
+      doc.line(130, receiptDividerY, 195, receiptDividerY);
 
       // Total Pago
+      const receiptTotalY = receiptDividerY + 5;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10.5);
       doc.setTextColor(0, 0, 0);
-      doc.text('Total Pago:', 130, totalsY + 13.5);
+      doc.text('Total Pago:', 130, receiptTotalY);
       doc.setTextColor(14, 98, 49); // Primary green
-      doc.text(`${fmtMT(invoice.total)} MT`, 195, totalsY + 13.5, { align: 'right' });
+      doc.text(`${fmtMT(invoice.total)} MT`, 195, receiptTotalY, { align: 'right' });
 
       // Brand / License box at the bottom
       const bLineY = Math.max(258, footerStartY + 42);
@@ -670,7 +703,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(8);
       doc.setTextColor(120, 120, 120);
-      const recNumber = invoice.receiptNumber || (invoice.invoiceNumber.startsWith('Fact-') ? invoice.invoiceNumber.replace('Fact-', 'Rec-') : invoice.invoiceNumber.startsWith('FAC-') ? invoice.invoiceNumber.replace('FAC-', 'REC-') : `Rec-2026-${invoice.invoiceNumber}`);
+      const recNumber = invoice.receiptNumber || 'S/N';
       doc.text(`Recibo Nº: ${recNumber}`, 15, footerStartY + 5);
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(14, 98, 49);
@@ -827,6 +860,21 @@ export async function downloadThermalReceipt(invoice: Sale, settings: SystemSett
   doc.text('SUBTOTAL:', 4, y);
   doc.text(`${fmtMT(invoice.subtotal)} MT`, 76, y, { align: 'right' });
   y += 5;
+
+  // DESCONTO (quando exista) e IVA (quando cobrado)
+  if (Number(invoice.discount) > 0) {
+    doc.text('DESCONTO:', 4, y);
+    doc.text(`-${fmtMT(invoice.discount)} MT`, 76, y, { align: 'right' });
+    y += 5;
+  }
+  if (invoice.includeIva) {
+    const thermalIva = Number(
+      invoice.ivaAmount ?? Math.round((invoice.subtotal - invoice.discount) * 0.16 * 100) / 100
+    );
+    doc.text('IVA (16%):', 4, y);
+    doc.text(`${fmtMT(thermalIva)} MT`, 76, y, { align: 'right' });
+    y += 5;
+  }
 
   // Dashed separator
   doc.line(3, y, 77, y);
@@ -1134,6 +1182,9 @@ export async function downloadSalesReportPDF(
     } else if (sale.status === 'Cancelada') {
       doc.setTextColor(220, 38, 38);
       doc.text('CANCELADO', 160, itemY + 4.5);
+    } else if (sale.status === 'Proforma') {
+      doc.setTextColor(71, 85, 105);
+      doc.text('PROFORMA', 160, itemY + 4.5);
     } else {
       doc.setTextColor(217, 119, 6);
       doc.text('PENDENTE', 160, itemY + 4.5);
@@ -1141,7 +1192,7 @@ export async function downloadSalesReportPDF(
 
     doc.setTextColor(51, 65, 85);
     doc.text(`${fmtMT(sale.total)} MT`, 193, itemY + 4.5, { align: 'right' });
-    if (sale.status !== 'Cancelada') totalAcc += sale.total;
+    if (isFinancialSale(sale)) totalAcc += sale.total;
 
     doc.setDrawColor(241, 245, 249);
     doc.setLineWidth(0.3);

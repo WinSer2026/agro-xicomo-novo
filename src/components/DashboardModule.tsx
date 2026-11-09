@@ -2,6 +2,8 @@
 import { dbService } from '../utils/firebaseDB';
 import { Sale, Product, Employee, Attendance, SystemSettings, AppRole } from '../types';
 import { getUserRoles } from '../utils/roleHelper';
+import { isFinancialSale } from '../utils/saleStatus';
+import { toLocalDateKey } from '../utils/dateRangeHelper';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts';
 
 interface DashboardModuleProps {
@@ -82,7 +84,7 @@ export default function DashboardModule({ currentUser, onNavigate }: DashboardMo
   const todayStr = new Date().toISOString().split('T')[0];
   
   // Today's Sales
-  const todaySales = sales.filter(s => s.date.startsWith(todayStr));
+  const todaySales = sales.filter(s => isFinancialSale(s) && toLocalDateKey(s.dateKey || s.date) === todayStr);
   const todaySalesTotal = todaySales.reduce((sum, s) => sum + s.total, 0);
   const todaySalesCount = todaySales.length;
 
@@ -101,7 +103,7 @@ export default function DashboardModule({ currentUser, onNavigate }: DashboardMo
       const d = new Date();
       d.setDate(d.getDate() - i);
       const dateStr = d.toISOString().split('T')[0];
-      const daySales = sales.filter(s => s.date.startsWith(dateStr));
+      const daySales = sales.filter(s => isFinancialSale(s) && toLocalDateKey(s.dateKey || s.date) === dateStr);
       const total = daySales.reduce((sum, s) => sum + s.total, 0);
       
       days.push({

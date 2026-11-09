@@ -176,8 +176,27 @@ async function runTests() {
   const finalPage = getCursorPageMetadata(17, 50);
   assert(finalPage.itemCount === 17 && !finalPage.hasMore, 'Short final page does not offer an invalid next cursor');
 
+  // Regressão C-01: os limites do dia são os do calendário de Maputo (UTC+2),
+  // não a meia-noite UTC. O teste anterior fixava o comportamento defeituoso.
   const bounds = getInclusiveDateBounds('2026-10-01', '2026-10-07');
-  assert(bounds.start === '2026-10-01' && bounds.end === '2026-10-07T23:59:59.999Z', 'Date range includes plain dates and ISO timestamps on the ending day');
+  assert(
+    bounds.start === '2026-09-30T22:00:00.000Z' && bounds.end === '2026-10-07T21:59:59.999Z',
+    'Date range uses the Maputo day boundaries (UTC+2), not UTC midnight'
+  );
+  // 21:30Z = 23:30 de 7/10 em Maputo → pertence ao dia 7.
+  assert(
+    isDateInRange('2026-10-07T21:30:00.000Z', '2026-10-01', '2026-10-07'),
+    'A 21:30Z sale still belongs to the 7th locally (23:30 Maputo)'
+  );
+  // 22:30Z = 00:30 de 8/10 em Maputo → já é do dia seguinte.
+  assert(
+    !isDateInRange('2026-10-07T22:30:00.000Z', '2026-10-01', '2026-10-07'),
+    'A 22:30Z sale is 00:30 of the 8th locally and must not count in the 7th'
+  );
+  assert(
+    isDateInRange('2026-10-07T22:30:00.000Z', '2026-10-01', '2026-10-08'),
+    'A 22:30Z sale lands on the 8th locally'
+  );
   assert(getArchiveCutoffTimestamp('2026-04-01') === '2026-04-01T00:00:00.000Z', 'Audit archive cutoff is exclusive from the selected day start');
   assert(getSafeArchiveBatchSize(999) === 250, 'Audit archive batch stays within Firestore 500-write atomic limit');
   assert(getSafeArchiveBatchSize(200) === 200, 'Requested safe archive batch size is preserved');

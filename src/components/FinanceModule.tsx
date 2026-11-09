@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
+import { isFinancialSale } from '../utils/saleStatus';
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment } from '../types';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
@@ -96,7 +97,7 @@ export default function FinanceModule() {
   };
 
   // 1. Math formulas for calculations based on active Date Range (Parte 5 & Parte 7)
-  const filteredSales = sales.filter(s => s.status !== 'Cancelada' && isDateInRange(s.date, startDate, endDate));
+  const filteredSales = sales.filter(s => isFinancialSale(s) && isDateInRange(s.date, startDate, endDate));
   const filteredLosses = losses.filter(l => isDateInRange(l.date, startDate, endDate));
   const filteredTransformations = transformations.filter(t => t.status !== 'Cancelada' && isDateInRange(t.date || t.createdAt, startDate, endDate));
   const filteredPayroll = payrollPayments.filter(p => isDateInRange(p.paymentDate || (p.month + '-01'), startDate, endDate));

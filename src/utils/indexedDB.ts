@@ -2,6 +2,21 @@ import { safeStorage, safeSessionStorage } from "./safeStorage";
 import { Product, Sale, LossRecord, Employee, Attendance, AuditLog, ActiveSession, SystemSettings, UserCredentials, PayrollPayment, Customer, PausedSale, ProductTransformation } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 
+/**
+ * Cabeçalho de autorização das rotas locais `/api/*`.
+ *
+ * O servidor passou a recusar pedidos de origens desconhecidas. Se existir
+ * `VITE_SYNC_API_TOKEN` no build, ele é enviado como `x-sync-token`; sem token,
+ * a validação fica a cargo da verificação "mesma origem" feita pelo servidor.
+ */
+const SYNC_TOKEN = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_SYNC_API_TOKEN || '';
+
+function syncHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (SYNC_TOKEN) headers['x-sync-token'] = SYNC_TOKEN;
+  return headers;
+}
+
 const DB_NAME = 'AgroGestaoZeroDB';
 const DB_VERSION = 5;
 
@@ -66,21 +81,21 @@ export class IndexedDBService {
         if (task.type === 'save') {
           const res = await fetch('/api/sync/save', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: syncHeaders(),
             body: JSON.stringify({ storeName: task.storeName, item: task.item })
           });
           if (!res.ok) throw new Error('Save failed');
         } else if (task.type === 'save-batch') {
           const res = await fetch('/api/sync/save-batch', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: syncHeaders(),
             body: JSON.stringify({ storeName: task.storeName, items: task.items })
           });
           if (!res.ok) throw new Error('Save batch failed');
         } else if (task.type === 'delete') {
           const res = await fetch('/api/sync/delete', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: syncHeaders(),
             body: JSON.stringify({ storeName: task.storeName, id: task.id })
           });
           if (!res.ok) throw new Error('Delete failed');
@@ -113,7 +128,7 @@ export class IndexedDBService {
     }
     fetch('/api/sync/save', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: syncHeaders(),
       body: JSON.stringify({ storeName, item })
     }).then(res => {
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -128,7 +143,7 @@ export class IndexedDBService {
     }
     fetch('/api/sync/delete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: syncHeaders(),
       body: JSON.stringify({ storeName, id })
     }).then(res => {
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -142,7 +157,7 @@ export class IndexedDBService {
     if (filtered.length === 0) return;
     fetch('/api/sync/save-batch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: syncHeaders(),
       body: JSON.stringify({ storeName, items: filtered })
     }).then(res => {
       if (!res.ok) throw new Error('HTTP ' + res.status);

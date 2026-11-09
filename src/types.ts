@@ -50,6 +50,8 @@ export interface Sale {
   id: string;
   invoiceNumber: string; // Sequencial fac/rec (e.g., "FAC-2026-0001")
   date: string; // Real transaction date (ISO String or YYYY-MM-DD)
+  /** Dia de calendário local (Africa/Maputo) a que a venda pertence. */
+  dateKey?: string;
   createdAt?: string; // Timestamp when record was created in system
   customerName: string;
   customerNuit?: string;
@@ -60,7 +62,14 @@ export interface Sale {
   total: number;
   paymentMethod: 'Dinheiro' | 'Transferência' | 'M-Pesa' | 'E-Mola' | 'Crédito' | 'Múltiplo' | string;
   paymentBreakdown?: PaymentBreakdown[];
-  status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito';
+  /** Numerário entregue pelo cliente. Guardado para auditoria do troco. */
+  amountReceived?: number;
+  /** Troco devolvido ao cliente. Guardado para auditoria do troco. */
+  changeGiven?: number;
+  /** Estado anterior ao cancelamento, para que o restauro seja fiel. */
+  previousStatus?: 'Paga' | 'Pendente' | 'Crédito';
+  /** 'Proforma' = documento comercial sem efeito fiscal nem financeiro. */
+  status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito' | 'Proforma';
   documentType?: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';
   operatorId: string;
   operatorName: string;

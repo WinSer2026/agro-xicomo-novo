@@ -22,10 +22,9 @@ CREATE TABLE IF NOT EXISTS credentials (
     "mfaSecret" VARCHAR(64)
 );
 
--- Inserir as credenciais mestre iniciais se não existirem
-INSERT INTO credentials (id, username, "passwordHash", role, roles, "mfaEnabled")
-VALUES ('usr-mazive', 'Mazive', '0147', 'Técnico', '["Técnico"]'::jsonb, FALSE)
-ON CONFLICT (username) DO NOTHING;
+-- Credenciais: as palavras-passe NUNCA são guardadas em texto simples.
+-- São criadas com scripts/hash-password.mjs (formato sha256:salt:hash).
+-- (O antigo INSERT com a palavra-passe '0147' foi removido: era um backdoor.)
 
 -- 2. TABELA DE PRODUTOS E GESTÃO DE STOCK
 CREATE TABLE IF NOT EXISTS products (
