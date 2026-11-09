@@ -4,6 +4,10 @@
   Revista depois de se ver o ecrã real da consola.
 ══════════════════════════════════════════════════════════════════════════════
 
+  ESTADO: ✔ REGRAS PUBLICADAS PELO DONO EM 09/11/2026 (confirmado).
+  Este documento fica como registo do procedimento e para a próxima alteração.
+  Falta apenas a verificação final: abrir o sistema, abrir e fechar um turno.
+
   A RESPOSTA CURTA
   ----------------
   O separador já não se chama "Regras". Na consola nova chama-se
