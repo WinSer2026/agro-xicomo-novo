@@ -16,15 +16,9 @@ export interface GlobalSearchResult {
 
 interface InlineHeaderSearchProps {
   onNavigateModule: (module: 'vendas' | 'faturas' | 'stock' | 'rh' | 'financas' | 'tecnico', extraData?: any) => void;
-  /**
-   * L-06: a pesquisa global mostrava o salário de qualquer trabalhador a
-   * qualquer utilizador. Os dados de RH (e a linha de salário) só aparecem a
-   * quem tem permissão.
-   */
-  canSeeRestrictedData?: boolean;
 }
 
-export const InlineHeaderSearch: React.FC<InlineHeaderSearchProps> = ({ onNavigateModule, canSeeRestrictedData = false }) => {
+export const InlineHeaderSearch: React.FC<InlineHeaderSearchProps> = ({ onNavigateModule }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [results, setResults] = useState<GlobalSearchResult[]>([]);
@@ -149,8 +143,8 @@ export const InlineHeaderSearch: React.FC<InlineHeaderSearchProps> = ({ onNaviga
       }
     });
 
-    // 2. Trabalhadores RH (apenas para perfis autorizados)
-    if (canSeeRestrictedData) allEmployees.forEach(e => {
+    // 2. Trabalhadores RH
+    allEmployees.forEach(e => {
       const matchName = e.name.toLowerCase().includes(q);
       const matchINSS = (e.inssNumber || '').toLowerCase().includes(q);
       const matchNuit = (e.nuit || '').toLowerCase().includes(q);
@@ -163,9 +157,7 @@ export const InlineHeaderSearch: React.FC<InlineHeaderSearchProps> = ({ onNaviga
           subtitle: `INSS: ${e.inssNumber || 'N/A'} • NUIT: ${e.nuit || 'N/A'}`,
           badge: 'Trabalhador RH',
           badgeColor: 'bg-purple-100 text-purple-800',
-          detail: canSeeRestrictedData
-            ? `Salário: ${Number(e.baseSalary || 0).toLocaleString('pt-MZ')} MT`
-            : 'Dados salariais restritos',
+          detail: `Salário: ${Number(e.baseSalary || 0).toLocaleString('pt-MZ')} MT`,
           targetModule: 'rh',
           data: e
         });

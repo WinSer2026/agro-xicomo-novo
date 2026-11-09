@@ -9,8 +9,12 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx test/master_plan_test.ts",
-    "test:all": "tsc --noEmit && tsx test/master_plan_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/cash_box_test.ts && tsx test/reporting_test.ts && tsx test/sale_duplicates_test.ts && tsx test/rules_coverage_test.ts && tsx test/pdv_consistency_test.ts && tsx test/stock_debts_test.ts"
+    "test": "vitest run && tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts && tsx test/session_management_test.ts && tsx test/inactivity_lock_test.ts",
+    "test:all": "tsc --noEmit && tsx test/master_plan_test.ts && tsx test/cash_box_test.ts && tsx test/reporting_test.ts && tsx test/sale_duplicates_test.ts && tsx test/rules_coverage_test.ts && tsx test/pdv_consistency_test.ts && tsx test/stock_debts_test.ts && tsx test/inventory_cutoff_test.ts",
+    "test:stock": "tsc --noEmit && tsx test/master_plan_test.ts && tsx test/cash_box_test.ts && tsx test/reporting_test.ts && tsx test/sale_duplicates_test.ts && tsx test/rules_coverage_test.ts && tsx test/pdv_consistency_test.ts && tsx test/stock_debts_test.ts && tsx test/inventory_cutoff_test.ts",
+    "test:unit": "tsx test/master_plan_test.ts && tsx test/silent_failures_test.ts && tsx test/inventory_cutoff_test.ts && tsx test/price_and_password_integrity_test.ts && tsx test/session_management_test.ts && tsx test/inactivity_lock_test.ts",
+    "test:ui": "vitest run",
+    "deploy:hosting": "npm run build && npx firebase-tools deploy --only hosting"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -33,13 +37,18 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "jsdom": "^25.0.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^2.1.9"
   }
 }

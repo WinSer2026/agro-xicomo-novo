@@ -1,7 +1,9 @@
-﻿import { appConfirm } from '../utils/confirmDialog';
 import React, { useState, useEffect, useRef } from 'react';
 import { dbService } from '../utils/firebaseDB';
+import { uid } from '../utils/idHelper';
+import Toast, { type ToastKind } from './Toast';
 import { Employee, PerformanceRecord, ContractType } from '../types';
+import { describeError } from '../utils/errorHelper';
 
 interface EmployeeDetailModalProps {
   employee: Employee;
@@ -50,9 +52,11 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
 
   // Notification Toast State
   const [toastMsg, setToastMsg] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
 
-  const triggerToast = (msg: string) => {
+  const triggerToast = (msg: string, type: ToastKind = 'success') => {
     setToastMsg(msg);
+    setToastType(type);
     setTimeout(() => setToastMsg(''), 3000);
   };
 
@@ -145,12 +149,12 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
   const handleAddPerformanceRecord = (e: React.FormEvent) => {
     e.preventDefault();
     if (!perfEvaluator.trim() || !perfFeedback.trim()) {
-      triggerToast('Preencha o avaliador e o feedback de desempenho.');
+      triggerToast('Preencha o avaliador e o feedback de desempenho.', 'error');
       return;
     }
 
     const newRecord: PerformanceRecord = {
-      id: 'perf-' + Date.now(),
+      id: uid('perf-'),
       date: perfDate,
       evaluator: perfEvaluator.trim(),
       rating: perfRating,
@@ -169,8 +173,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
     triggerToast('Avaliação de desempenho adicionada!');
   };
 
-  const handleDeletePerformanceRecord = async (id: string) => {
-    if (await appConfirm('Deseja realmente eliminar este registo de avaliação?')) {
+  const handleDeletePerformanceRecord = (id: string) => {
+    if (confirm('Deseja realmente eliminar este registo de avaliação?')) {
       const filtered = performanceHistory.filter(x => x.id !== id);
       setPerformanceHistory(filtered);
       triggerToast('Avaliação eliminada do histórico temporário.');
@@ -180,7 +184,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
   const handleSaveAll = async () => {
     const nuitClean = nuit.replace(/\D/g, '');
     if (nuitClean.length !== 9) {
-      triggerToast('O NUIT deve conter exatamente 9 dígitos.');
+      triggerToast('O NUIT deve conter exatamente 9 dígitos.', 'error');
       return;
     }
 
@@ -213,7 +217,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
       }, 500);
     } catch (err) {
       console.error(err);
-      triggerToast('Erro ao guardar alterações no IndexedDB.');
+      triggerToast(`${describeError(err, 'Não foi possível guardar as alterações.').title} ${describeError(err).hint}`.trim(), 'error');
     }
   };
 
@@ -231,13 +235,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
 
   return (
     <div className="fixed inset-0 bg-slate-900/70 z-50 flex items-center justify-center p-4 backdrop-blur-sm transition-all animate-fade-in" id="employee_detail_modal">
-      {/* Dynamic Toast inside Modal */}
-      {toastMsg && (
-        <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 bg-emerald-800 text-white font-bold text-xs px-4 py-2.5 rounded-full shadow-2xl flex items-center gap-2 border border-emerald-600">
-          <span className="material-symbols-outlined text-sm">check_circle</span>
-          {toastMsg}
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]) */}
+      <Toast message={toastMsg} type={toastType} onDismiss={() => setToastMsg('')} />
 
       {/* Expandable/Collapsible Content Panel */}
       <div className={`bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200 transition-all duration-300 flex flex-col ${
@@ -471,8 +470,8 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
                           referrerPolicy="no-referrer"
                         />
                         <button
-                          onClick={async () => {
-                            if (await appConfirm('Remover esta fotografia?')) setPhotoUrl('');
+                          onClick={() => {
+                            if (confirm('Remover esta fotografia?')) setPhotoUrl('');
                           }}
                           className="absolute -top-2 -right-2 bg-red-600 hover:bg-red-700 text-white rounded-full p-1.5 shadow-lg transition-all"
                           title="Remover foto"
@@ -797,7 +796,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
                     <input
                       type="text"
                       required
-                      placeholder="Ex: 123456789"
+                      placeholder="Ex: 401976590"
                       value={nuit}
                       onChange={(e) => setNuit(e.target.value.replace(/\D/g, '').substring(0, 9))}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"

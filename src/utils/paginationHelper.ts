@@ -1,5 +1,3 @@
-import { localDayEndUtcIso, localDayStartUtcIso } from './dateRangeHelper';
-
 /**
  * Shared, dependency-free guards for Firestore list pagination and archival.
  * Keeping these rules here makes the limits easy to test without Firestore.
@@ -56,16 +54,12 @@ export function getInclusiveDateBounds(
   startDate?: string,
   endDate?: string
 ): { start?: string; end?: string } {
-  // As datas de calendário da interface são LOCAIS (Maputo, UTC+2). O limite
-  // tem de ser o instante UTC correspondente à meia-noite local, senão as
-  // vendas entre as 00:00 e as 01:59 caem no dia anterior.
-  const cleanStart = startDate?.trim().slice(0, 10);
-  const cleanEnd = endDate?.trim().slice(0, 10);
-  const isDay = (value?: string) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+  const start = startDate?.trim() || undefined;
+  const cleanEnd = endDate?.trim();
 
   return {
-    start: isDay(cleanStart) ? localDayStartUtcIso(cleanStart as string) : (cleanStart || undefined),
-    end: isDay(cleanEnd) ? localDayEndUtcIso(cleanEnd as string) : undefined
+    start,
+    end: cleanEnd ? `${cleanEnd.slice(0, 10)}T23:59:59.999Z` : undefined
   };
 }
 

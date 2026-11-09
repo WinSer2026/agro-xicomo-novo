@@ -1,27 +1,22 @@
-import { companyNuit, hasCompanyNuit, MISSING_NUIT_LABEL } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import { uid } from '../utils/idHelper';
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { dbService } from '../utils/firebaseDB';
+import { checkStockAddition, lineBaseQty } from '../utils/stockGuard';
 import { Product, Sale, SaleItem, PaymentInfo, SystemSettings, Customer, PausedSale, AppRole } from '../types';
 import { getSingularUnit } from '../utils/unitHelper';
-import { getUnitCost, isHybridProduct } from '../utils/priceHelper';
+import { getUnitCost, isHybridProduct, getBulkSellingPrice } from '../utils/priceHelper';
+import { clampItemDiscountValue, getItemDiscount, getMaxItemDiscountValue, getSaleTotals, ItemDiscountType } from '../utils/saleTotals';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4, downloadDailySalesReportPDF, downloadPeriodSalesReportPDF } from '../utils/pdfGenerator';
-import { generateNextInvoiceNumber, generateNextReceiptNumber } from '../utils/sequenceHelper';
+import { generateNextInvoiceNumber, generateNextReceiptNumber, reserveDocumentNumber } from '../utils/sequenceHelper';
 import { playChachingSound, sendCashDrawerPulse, printDirectThermalESC_POS, isSerialPrinterConnected } from '../utils/posHardware';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
-import { isFinancialSale, isCancelledSale, settlementDisclaimer } from '../utils/saleStatus';
-import { lineTaxAmount, normalizeTaxRate, itemTaxRate, cartTaxAmount } from '../utils/taxHelper';
-import { appAlert, appPrompt, appConfirm } from '../utils/confirmDialog';
-import { verifyAuthorizationPassword } from '../utils/authorization';
-import { canRefund, maxRefundFor, toCashDay } from '../utils/cashBox';
-import { getClientIp } from '../utils/clientInfo';
-import { checkStockAddition, lineBaseQty } from '../utils/stockGuard';
-import { findDuplicateSale, describeDuplicateRisk } from '../utils/saleDuplicates';
-import { InsufficientStockError } from '../utils/firebaseDB';
+import { describeError } from '../utils/errorHelper';
+import Toast from './Toast';
 import * as XLSX from 'xlsx';
 
 interface PDVModuleProps {
@@ -143,135 +138,17 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
     customSubtotalDiscount: number;
   } | null>(null);
   const isInitialLoadCompletedRef = useRef(false);
-  const activeCartStartedAtRef = useRef<string | null>(null);
-  // K-07: o PDV não dizia se estava sem rede — o operador continuava a vender
-  // sem saber que os dados estavam só neste posto.
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
-
-  // C-03: compara o relógio do posto com o do servidor. Um relógio adiantado
-  // ou atrasado grava vendas com a data errada e estraga os relatórios.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetch('/api/client-info', { headers: { Accept: 'application/json' } });
-        if (!response.ok) return;
-        const data = await response.json();
-        if (!cancelled && data?.serverTime) {
-          const skew = (Date.now() - new Date(data.serverTime).getTime()) / 60000;
-          setClockSkewMinutes(Math.round(skew));
-        }
-      } catch {
-        /* sem servidor: não há como comparar */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const [isOnline, setIsOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
-  const [clockSkewMinutes, setClockSkewMinutes] = useState(0);
-  /** Última quantidade válida por linha, para o blur não repor 1 (K-05). */
-  const lastValidQtyRef = useRef<Record<string, number>>({});
-
-/**
- * Identificador único de venda.
- *
- * `sale-${Date.now()}` colidia quando duas vendas eram finalizadas no mesmo
- * milissegundo (dois postos ou duplo clique) e a segunda apagava a primeira
- * (achado A-03). Passa a usar UUID com fallback para timestamp + sufixo.
- */
-/**
- * B-05: identifica o posto/caixa. Sem série, dois postos emitem a mesma
- * sequência e não há forma de saber de onde saiu cada documento.
- */
-function currentTerminalId(): string {
-  try {
-    const stored = safeStorage.getItem('agro_terminal_id');
-    if (stored) return stored;
-    const generated = `POSTO-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-    safeStorage.setItem('agro_terminal_id', generated);
-    return generated;
-  } catch {
-    return 'POSTO-?';
-  }
-}
-
-function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
-  const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return `${prefixo}-${uuid}`;
-}
 
   const restoreActiveCart = () => {
     if (!savedActiveCart) return;
-
-    // O rascunho é apagado no momento em que é recuperado: se o operador fechar
-    // o separador a seguir, não pode voltar a aparecer "venda anterior" com um
-    // carrinho já finalizado (origem de vendas duplicadas).
-    void dbService.clearActiveCart();
-
-    // Revalidação (G-03): os preços e as quantidades do rascunho podem ter
-    // ficado desactualizados. O carrinho é reconstruído com os preços actuais
-    // e limitado ao stock disponível.
-    let repriced = 0;
-    let clamped = 0;
-    const revalidated = (savedActiveCart.cart || []).map(item => {
-      const prod = products.find(p => p.id === item.productId);
-      if (!prod) return item;
-
-      const rate = Number(prod.conversionRate) || 0;
-      const hybrid = Boolean(prod.parentUnit) && rate > 1;
-      const isBulk = item.sellingUnit === 'Bulk' && hybrid;
-      const currentPrice = isBulk
-        ? (Number(prod.sellingPriceBulk) > 0 ? Number(prod.sellingPriceBulk) : Number(prod.sellingPrice) * (rate || 1))
-        : Number(prod.sellingPrice);
-
-      const available = hybrid
-        ? (isBulk ? Number(prod.stockQtyBulk) || 0 : Number(prod.stockQtyRetail) || 0)
-        : Number(prod.stockQty) || 0;
-
-      const originalQty = Number(item.quantity) || 0;
-      const safeQty = prod.isService ? originalQty : Math.max(1, Math.min(originalQty, available));
-
-      if (safeQty !== originalQty) clamped += 1;
-      if (Number(item.unitPrice) !== currentPrice) repriced += 1;
-
-      return {
-        ...item,
-        unitPrice: Number.isFinite(currentPrice) ? currentPrice : item.unitPrice,
-        quantity: safeQty,
-        totalPrice: (Number.isFinite(currentPrice) ? currentPrice : item.unitPrice) * safeQty - (item.discountValue || 0)
-      };
-    });
-
-    setCart(revalidated);
+    setCart(savedActiveCart.cart);
     setCustomerName(savedActiveCart.customerName);
     setPaymentMethod(savedActiveCart.paymentMethod);
     setDocumentType(savedActiveCart.documentType);
     setIncludeIva(savedActiveCart.includeIva);
     setCustomSubtotalDiscount(savedActiveCart.customSubtotalDiscount);
     setSavedActiveCart(null);
-
-    if (repriced > 0 || clamped > 0) {
-      showToast(
-        `Venda recuperada com ${repriced} preço(s) actualizado(s) e ${clamped} quantidade(s) ajustada(s) ao stock.`,
-        'warning'
-      );
-    } else {
-      showToast('Venda anterior recuperada com sucesso!', 'success');
-    }
+    showToast('Venda anterior recuperada com sucesso!', 'success');
   };
 
   const discardSavedCart = async () => {
@@ -280,21 +157,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     showToast('Rascunho de venda descartado.', 'success');
   };
 
-  const getSavedCartTotal = () => {
-    if (!savedActiveCart) return 0;
-    const sub = savedActiveCart.cart.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-    const getItemDisc = (item: SaleItem) => {
-      if (!item.discountValue || item.discountValue <= 0) return 0;
-      if (item.discountType === 'per_unit') return item.discountValue * item.quantity;
-      if (item.discountType === 'percent_unit') return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-      if (item.discountType === 'percent_total') return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-      return item.discountValue;
-    };
-    const itemDiscounts = savedActiveCart.cart.reduce((acc, item) => acc + getItemDisc(item), 0);
-    const disc = itemDiscounts + savedActiveCart.customSubtotalDiscount;
-    const base = Math.max(0, sub - disc);
-    return savedActiveCart.includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
-  };
+  const getSavedCartTotal = () => savedActiveCart
+    ? getSaleTotals(savedActiveCart.cart, savedActiveCart.customSubtotalDiscount, savedActiveCart.includeIva).total
+    : 0;
 
   // Auto-save active cart to IndexedDB when cart or other states change
   useEffect(() => {
@@ -302,15 +167,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
     const saveCart = async () => {
       if (cart.length > 0) {
-        // A data de início do rascunho é preservada entre gravações: serve para
-        // expirar carrinhos antigos em vez de os reabrir dias depois.
-        if (!activeCartStartedAtRef.current) {
-          activeCartStartedAtRef.current = new Date().toISOString();
-        }
         await dbService.saveActiveCart({
-          id: 'active-cart',
-          date: activeCartStartedAtRef.current,
-          createdAt: activeCartStartedAtRef.current,
           cart,
           customerName,
           paymentMethod,
@@ -319,7 +176,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           customSubtotalDiscount
         });
       } else {
-        activeCartStartedAtRef.current = null;
         await dbService.clearActiveCart();
       }
     };
@@ -353,63 +209,104 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const [retroactiveCustomerAddress, setRetroactiveCustomerAddress] = useState('');
   const [retroactiveSaveCustomer, setRetroactiveSaveCustomer] = useState(false);
   const [retroactivePaymentMethod, setRetroactivePaymentMethod] = useState<'Dinheiro' | 'Transferência' | 'M-Pesa' | 'E-Mola' | 'Crédito'>('Dinheiro');
-  // H-01: por omissão uma venda histórica NÃO desconta stock. Descontar hoje o
-  // que saiu há semanas estraga o inventário actual; o operador tem de optar
-  // conscientemente por o fazer.
-  const [retroactiveDeductStock, setRetroactiveDeductStock] = useState(false);
+  const [retroactiveDeductStock, setRetroactiveDeductStock] = useState(true);
   const [retroactiveCart, setRetroactiveCart] = useState<SaleItem[]>([]);
   const [retroactiveProductQuery, setRetroactiveProductQuery] = useState('');
   const [selectedRegisteredCustomer, setSelectedRegisteredCustomer] = useState<string>('');
   const [retroactiveCompletedSale, setRetroactiveCompletedSale] = useState<Sale | null>(null);
+  // Mostrar o progresso e erros dentro do modal, além de impedir gravações duplicadas.
+  const [isFinalizingRetroactive, setIsFinalizingRetroactive] = useState(false);
+  const retroactiveFinalizingRef = useRef(false);
+  const [retroactiveError, setRetroactiveError] = useState('');
+  const [retroactiveSlow, setRetroactiveSlow] = useState(false);
+  const retroactiveTotals = getSaleTotals(retroactiveCart);
 
-  const addProductToRetroactiveCart = (product: Product) => {
-    const existingIndex = retroactiveCart.findIndex(item => item.productId === product.id);
+  /**
+   * Lançamento retroactivo: produtos híbridos (saco + quilo) podem ser relançados
+   * na unidade em que foram realmente vendidos. Sem isto, uma venda de 2 sacos seria
+   * registada como 2 quilos e o stock de grosso nunca desceria.
+   */
+  const addProductToRetroactiveCart = (product: Product, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    const useBulk = sellingUnit === 'Bulk' && isHybridProduct(product);
+    const effectiveUnit: 'Bulk' | 'Retail' = useBulk ? 'Bulk' : 'Retail';
+    const existingIndex = retroactiveCart.findIndex(
+      item => item.productId === product.id && (item.sellingUnit || 'Retail') === effectiveUnit
+    );
     if (existingIndex >= 0) {
       setRetroactiveCart(prev => prev.map((item, idx) => 
         idx === existingIndex ? { ...item, quantity: item.quantity + 1, totalPrice: (item.quantity + 1) * item.unitPrice } : item
       ));
     } else {
+      const unitPrice = useBulk ? getBulkSellingPrice(product) : product.sellingPrice;
       const newItem: SaleItem = {
         productId: product.id,
         name: product.name,
         quantity: 1,
-        unit: product.baseUnit,
-        unitPrice: product.sellingPrice,
-        totalPrice: product.sellingPrice,
+        unit: useBulk ? (product.parentUnit || 'Sacos') : product.baseUnit,
+        unitPrice,
+        totalPrice: unitPrice,
         category: product.category || 'Outro',
-        costPrice: getUnitCost(product, 'Retail'),
-        buyingPrice: getUnitCost(product, 'Retail'),
+        costPrice: getUnitCost(product, effectiveUnit),
+        buyingPrice: getUnitCost(product, effectiveUnit),
         isService: product.isService,
-        sellingUnit: 'Retail',
-        taxRate: normalizeTaxRate((product as any).taxRate)
+        sellingUnit: effectiveUnit
       };
       setRetroactiveCart(prev => [...prev, newItem]);
     }
   };
 
-  const updateRetroactiveCartQty = (productId: string, delta: number) => {
+  const updateRetroactiveCartQty = (productId: string, delta: number, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
     setRetroactiveCart(prev => prev.map(item => {
-      if (item.productId === productId) {
+      if (item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit) {
         const newQty = Math.max(1, item.quantity + delta);
-        return { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        const updated = { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        return { ...updated, discountValue: clampItemDiscountValue(updated, updated.discountType || 'line_total', updated.discountValue || 0) };
       }
       return item;
     }));
   };
 
-  const removeRetroactiveCartItem = (productId: string) => {
-    setRetroactiveCart(prev => prev.filter(item => item.productId !== productId));
+  const updateRetroactiveCartDiscount = (productId: string, type: ItemDiscountType, value: number, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    setRetroactiveCart(prev => prev.map(item =>
+      item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit
+        ? { ...item, discountType: type, discountValue: clampItemDiscountValue(item, type, value) }
+        : item
+    ));
   };
 
-  const getRetroactiveCartTotal = () => {
-    return retroactiveCart.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
+  const removeRetroactiveCartItem = (productId: string, sellingUnit: 'Bulk' | 'Retail' = 'Retail') => {
+    setRetroactiveCart(prev => prev.filter(
+      item => !(item.productId === productId && (item.sellingUnit || 'Retail') === sellingUnit)
+    ));
   };
 
   const handleFinalizeRetroactiveSale = async () => {
+    // Um ref bloqueia mesmo dois cliques antes do próximo render do React.
+    if (retroactiveFinalizingRef.current) return;
     if (retroactiveCart.length === 0) {
-      showToast('Adicione pelo menos um produto ao carrinho da venda!', 'error');
+      setRetroactiveError('Adicione pelo menos um produto ao carrinho da venda!');
       return;
     }
+
+    const parsedDate = retroactiveDateTime ? new Date(retroactiveDateTime) : new Date();
+    if (isNaN(parsedDate.getTime())) {
+      setRetroactiveError('A data e hora da venda são inválidas. Verifique o campo "Data e Hora Real".');
+      return;
+    }
+    if (parsedDate.getTime() > Date.now() + 60000) {
+      setRetroactiveError('A data/hora da venda não pode ser no futuro. Corrija o campo "Data e Hora Real".');
+      return;
+    }
+
+    retroactiveFinalizingRef.current = true;
+    setIsFinalizingRetroactive(true);
+    setRetroactiveError('');
+    setRetroactiveSlow(false);
+
+    // Watchdog: se a gravação demorar mais de 8 s avisamos o operador. O Firestore
+    // fica pendente quando não há ligação — nunca abortamos a escrita aqui, para
+    // não duplicar vendas; apenas deixamos de estar "mudos".
+    const slowTimer = window.setTimeout(() => setRetroactiveSlow(true), 8000);
 
     let salePersisted = false;
     let completedSale: Sale | null = null;
@@ -430,9 +327,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     };
 
     try {
-      const sub = getRetroactiveCartTotal();
-      const disc = 0;
-      const tot = sub;
+      const { subtotal: sub, discount: disc, total: tot } = retroactiveTotals;
 
       let finalCustomerName = retroactiveCustomerName.trim() || 'Cliente Geral';
       let finalCustomerNuit = retroactiveCustomerNuit.trim() || undefined;
@@ -448,70 +343,52 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       if (retroactiveCustomerMode === 'manual' && retroactiveSaveCustomer && finalCustomerName && finalCustomerName !== 'Cliente Geral') {
-        const newCust: Customer = {
-          id: 'cust-' + Date.now(),
-          name: finalCustomerName,
-          nuit: finalCustomerNuit,
-          address: finalCustomerAddress
-        };
-        await dbService.saveCustomer(newCust);
-        setRegisteredCustomers(prev => [...prev, newCust]);
-      }
-
-      const existingSales = await dbService.getSales();
-      const manualRec = retroactiveReceiptNo.trim() || undefined;
-
-      // H-05: uma "venda antiga" não pode ter data futura.
-      const saleMoment = retroactiveDateTime ? new Date(retroactiveDateTime) : new Date();
-      if (Number.isNaN(saleMoment.getTime())) {
-        showToast('A data indicada para a venda antiga não é válida.', 'error');
-        return;
-      }
-      if (saleMoment.getTime() > Date.now() + 60_000) {
-        showToast('A data da venda antiga não pode estar no futuro.', 'error');
-        return;
-      }
-
-      // H-02: o mesmo recibo manuscrito não pode entrar duas vezes. Sem isto,
-      // um duplo clique lançava a mesma venda velha e duplicava a receita.
-      if (manualRec) {
-        const recKey = manualRec.toLowerCase();
-        const duplicada = existingSales.find(venda => {
-          if (isCancelledSale(venda)) return false;
-          const referencia = String(venda.manualReceiptReference || '').trim().toLowerCase();
-          const recibo = String(venda.receiptNumber || '').trim().toLowerCase();
-          return referencia === recKey || recibo === recKey;
-        });
-        if (duplicada) {
-          showToast(
-            `O recibo «${manualRec}» já foi lançado na venda ${duplicada.invoiceNumber || duplicada.id}. Confirme antes de repetir.`,
-            'error'
-          );
-          return;
+        const alreadyExists = registeredCustomers.some(
+          c => c.name.trim().toLowerCase() === finalCustomerName.trim().toLowerCase()
+        );
+        if (!alreadyExists) {
+          const newCust: Customer = {
+            id: uid('cust-'),
+            name: finalCustomerName,
+            nuit: finalCustomerNuit,
+            address: finalCustomerAddress
+          };
+          await dbService.saveCustomer(newCust);
+          setRegisteredCustomers(prev => [...prev, newCust]);
         }
       }
 
-      const invoiceNum = generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva');
-      const receiptNum = manualRec || generateNextReceiptNumber(existingSales, 'Thermal');
-      const saleDateISO = saleMoment.toISOString();
+      const existingSales = await dbService.getSales();
+      const invoiceNum = await reserveDocumentNumber(
+        generateNextInvoiceNumber(existingSales, 'FaturaDefinitiva'),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
+      const manualRec = retroactiveReceiptNo.trim() || undefined;
+      const receiptNum = manualRec || await reserveDocumentNumber(
+        generateNextReceiptNumber(existingSales, 'Thermal'),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
+      const saleDateISO = parsedDate.toISOString();
 
       const newSale: Sale = {
-        id: newSaleId('sale-retro'),
+        id: uid('sale-retro-'),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         manualReceiptReference: manualRec,
         date: saleDateISO,
-        dateKey: toLocalDateKey(saleDateISO),
+        createdAt: new Date().toISOString(),
         customerName: finalCustomerName,
         customerNuit: finalCustomerNuit,
         customerAddress: finalCustomerAddress,
-        items: retroactiveCart,
+        items: retroactiveCart.map(item => ({
+          ...item,
+          totalPrice: Math.round(((item.unitPrice * item.quantity) - getItemDiscount(item)) * 100) / 100
+        })),
         subtotal: sub,
         discount: disc,
         total: tot,
         paymentMethod: retroactivePaymentMethod,
-        // H-03: o estado segue o pagamento, não é fixado em 'Paga'.
-        status: retroactivePaymentMethod === 'Crédito' ? 'Crédito' : 'Paga',
+        status: 'Paga',
         documentType: 'FaturaDefinitiva',
         operatorId: currentUser.username,
         operatorName: currentUser.username,
@@ -522,25 +399,37 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       };
 
       if (retroactiveDeductStock) {
+        for (const item of retroactiveCart) {
+          const prod = products.find(product => product.id === item.productId);
+          if (!prod || prod.isService || item.isService) continue;
+          if (prod.stockQty < item.quantity) {
+            setRetroactiveError(`Stock insuficiente para "${prod.name}" (disponível: ${prod.stockQty}, solicitado: ${item.quantity}). Desmarque "Descontar do Stock Actual" se o inventário físico já reflecte esta saída.`);
+            setIsFinalizingRetroactive(false);
+            return;
+          }
+        }
+        // Mesma regra do PDV normal: saco desconta grosso + equivalente em unidade base;
+        // retalho desconta retalho + unidade base.
         const deductionItems = retroactiveCart.flatMap(item => {
           const prod = products.find(product => product.id === item.productId);
-          if (!prod || prod.isService) return [];
+          const quantity = Number(item.quantity) || 0;
+          if (!prod || prod.isService || item.isService || quantity <= 0) return [];
 
-          const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
+          const hasConversion = isHybridProduct(prod);
           if (hasConversion && item.sellingUnit === 'Bulk') {
             return [{
               productId: prod.id,
               hasConversion: true,
               sellingUnit: 'Bulk' as const,
-              qtyToReduce: item.quantity,
-              equivalentBaseQty: item.quantity * (prod.conversionRate || 1)
+              qtyToReduce: quantity,
+              equivalentBaseQty: quantity * (Number(prod.conversionRate) || 1)
             }];
           }
           return [{
             productId: prod.id,
             hasConversion,
             sellingUnit: hasConversion ? 'Retail' as const : undefined,
-            qtyToReduce: item.quantity
+            qtyToReduce: quantity
           }];
         });
         // Keep the historic sale and its stock movement in one atomic batch.
@@ -556,7 +445,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       closeCompletedRetroactiveSale(newSale);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -591,18 +480,27 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       if (receiptGenerated) {
-        showToast(`Venda antiga de ${tot.toLocaleString('pt-MZ')} MT registada com sucesso!`, 'success');
+        showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada com sucesso!`, 'success');
       } else {
         showToast('Venda antiga registada com sucesso. O recibo não foi gerado agora; pode reimprimir pela janela de opções.', 'warning');
       }
     } catch (err) {
-      console.error('Error finalizing retroactive sale:', err);
+      const info = describeError(err, 'Não foi possível registar a venda antiga.');
+      console.error('[PDV] Error finalizing retroactive sale:', info.raw);
       if (salePersisted && completedSale) {
         closeCompletedRetroactiveSale(completedSale);
         showToast('A venda antiga foi registada com sucesso. Alguns passos posteriores falharam; confirme-a no histórico antes de repetir.', 'warning');
       } else {
-        showToast('Erro ao registar a venda antiga.', 'error');
+        // Dupla via de feedback: o banner dentro do modal é impossível de tapar e
+        // o Toast global confirma que todas as notificações usam o portal superior.
+        setRetroactiveError(`${info.title} ${info.hint}`.trim());
+        showToast(info.title, 'error');
       }
+    } finally {
+      window.clearTimeout(slowTimer);
+      retroactiveFinalizingRef.current = false;
+      setIsFinalizingRetroactive(false);
+      setRetroactiveSlow(false);
     }
   };
 
@@ -669,7 +567,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               }
             },
             (decodedText) => {
-              console.log('[Real Scanner] Decoded Text:', decodedText);
               
               // Strict Validation: Only accept valid EAN-13 or confirmed patterns to avoid ghost scans
               const isEAN13 = /^\d{13}$/.test(decodedText);
@@ -885,7 +782,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     // PDV deliberately keeps a complete live catalogue and sales cache: it
     // needs them for barcode lookup, stock validation and receipt sequencing.
     await dbService.enableLiveCatalogAndSalesSync();
-    // Artigos desactivados saem do balcão: continuam no histórico, não à venda.
+    // Artigos desactivados saem do balcão: ficam no histórico, não à venda.
     const prodList = (await dbService.getProducts()).filter(p => p.isActive !== false);
     setProducts(prodList);
 
@@ -925,19 +822,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     // Retrieve saved uncompleted cart
     try {
       const savedCart = await dbService.getActiveCart();
-      const draftIsFresh = (() => {
-        if (!savedCart?.cart?.length) return false;
-        const stamp = savedCart.createdAt || savedCart.date;
-        if (!stamp) return true; // rascunho legado: mantém-se, mas com aviso
-        const ageHours = (Date.now() - new Date(stamp).getTime()) / 36e5;
-        return Number.isFinite(ageHours) ? ageHours < 12 : true;
-      })();
-      if (savedCart && savedCart.cart && savedCart.cart.length > 0 && draftIsFresh) {
+      if (savedCart && savedCart.cart && savedCart.cart.length > 0) {
         setSavedActiveCart(savedCart);
-      } else if (savedCart && savedCart.cart && savedCart.cart.length > 0) {
-        // Rascunho com mais de 12 horas: descartado para não reabrir vendas
-        // antigas com preços e stock desactualizados.
-        void dbService.clearActiveCart();
       }
     } catch (err) {
       console.error('Error fetching active cart:', err);
@@ -949,7 +835,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const showToast = (msg: string, type: 'success' | 'error' | 'warning' = 'success') => {
     setToastMessage(msg);
     setToastType(type);
-    setTimeout(() => setToastMessage(''), 3000);
+    // O temporizador pertence ao componente Toast. Dois temporizadores concorrentes
+    // podiam apagar uma mensagem nova quando o temporizador da mensagem anterior
+    // disparava, recriando uma falha silenciosa.
   };
 
   const handleSaveCustomer = async (e?: React.FormEvent) => {
@@ -961,7 +849,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     }
 
     const newCust: Customer = {
-      id: 'customer-' + Date.now(),
+      id: uid('customer-'),
       name: newCustomerName.trim(),
       nuit: newCustomerNuit.trim() || undefined,
       address: newCustomerAddress.trim() || undefined,
@@ -1013,7 +901,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
     const pausedAt = new Date().toISOString();
     const pausedObj: PausedSale = {
-      id: 'paused-' + Date.now(),
+      id: uid('paused-'),
       date: pausedAt,
       createdAt: pausedAt,
       customerName,
@@ -1023,10 +911,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       paymentMethod,
       documentType,
       includeIva,
-      customSubtotalDiscount,
-      operatorId: currentUser?.username,
-      operatorName: currentUser?.username,
-      terminalId: currentTerminalId()
+      customSubtotalDiscount
     };
 
     try {
@@ -1121,11 +1006,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     if (settings) {
       if (settings.barcodePrefix && cleaned.startsWith(settings.barcodePrefix)) {
         cleaned = cleaned.substring(settings.barcodePrefix.length);
-        console.log(`[Scanner Normalizer] Removed prefix "${settings.barcodePrefix}". New: "${cleaned}"`);
       }
       if (settings.barcodeSuffix && cleaned.endsWith(settings.barcodeSuffix)) {
         cleaned = cleaned.substring(0, cleaned.length - settings.barcodeSuffix.length);
-        console.log(`[Scanner Normalizer] Removed suffix "${settings.barcodeSuffix}". New: "${cleaned}"`);
       }
     }
     return cleaned.trim();
@@ -1139,22 +1022,17 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     // to bypass any React state updating/batching delay when scanning.
     const rawQuery = (barcodeInputRef.current?.value || searchQuery).trim();
     const query = normalizeCode(rawQuery);
-    console.log(`[Manual/Scan Input Search] Initiated. Query string: "${query}" | Length: ${query.length}`);
-    console.log(`[Manual/Scan Input Search] React state 'searchQuery': "${searchQuery}"`);
     
     if (!query) {
-      console.log(`[Manual/Scan Input Search] Empty query ignored.`);
       return;
     }
 
-    console.log(`[Manual/Scan Input Search] Searching catalog containing ${products.length} products...`);
 
     // Search specifically by code or SKU (exact match first)
     const found = products.find(p => {
       const codeMatch = p.code.trim().toLowerCase() === query.toLowerCase();
       const refMatch = p.reference && p.reference.trim().toLowerCase() === query.toLowerCase();
       if (codeMatch || refMatch) {
-        console.log(`[Manual/Scan Input Search MATCH FOUND] Exact match! Product: "${p.name}" | Code: "${p.code}" | Reference: "${p.reference || 'N/A'}"`);
       }
       return codeMatch || refMatch;
     });
@@ -1166,7 +1044,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         barcodeInputRef.current.value = '';
       }
     } else {
-      console.log(`[Manual/Scan Input Search] No exact match found for "${query}". Checking fallback partial similarity/inclusion...`);
       
       // Fallback: If query contains the code or code contains the query
       const partialFound = products.find(p => {
@@ -1174,7 +1051,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         const codeContainsQuery = p.code.trim().length >= 4 && p.code.trim().toLowerCase().includes(query.toLowerCase());
         
         if (queryContainsCode || codeContainsQuery) {
-          console.log(`[Manual/Scan Input Search PARTIAL MATCH FOUND] Match by similarity! Product: "${p.name}" | Code: "${p.code}" | Match Type: ${queryContainsCode ? 'Query-contains-Code' : 'Code-contains-Query'}`);
         }
         return queryContainsCode || codeContainsQuery;
       });
@@ -1189,15 +1065,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       } else {
         console.warn(`[Manual/Scan Input Search FAILED] No products matched "${query}" even with similarity fallbacks.`);
         
-        // Detailed diagnostics listing closest matches
-        const closestByLength = products.filter(p => Math.abs(p.code.trim().length - query.length) <= 3);
-        console.log(`[Manual/Scan Input Search Diagnostics] All registered product codes:`, products.map(p => p.code));
-        if (closestByLength.length > 0) {
-          console.log(`[Manual/Scan Input Search Diagnostics] Product codes of similar length (±3 chars):`, 
-            closestByLength.map(p => ({ name: p.name, code: p.code, reference: p.reference }))
-          );
-        }
-        
+        // Diagnostics of closest matches removed (debug logging cleanup).
+
         setUnrecognizedBarcode(query);
         setSelectedProductToAssociate('');
         showToast('Produto ou Serviço com este código não encontrado.', 'error');
@@ -1244,12 +1113,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const addToCart = async (product: Product, customQty = 1, preferredUnit?: 'Bulk' | 'Retail') => {
     // Determine default selling unit
     const hasConversion = !!(product.parentUnit && product.conversionRate && product.conversionRate > 1);
-    // O cartão do catálogo mostra o preço de atacado nos híbridos; a unidade por
-    // omissão tem de ser a mesma, senão o cliente vê 1.200 MT e paga 1.500 MT.
-    // Só cai para retalho quando não há atacado disponível.
-    const bulkAvailable = Number(product.stockQtyBulk) || 0;
-    const selectedUnit: 'Bulk' | 'Retail' =
-      preferredUnit || (hasConversion && bulkAvailable > 0 ? 'Bulk' : 'Retail');
+    const selectedUnit = preferredUnit || (hasConversion ? 'Retail' : 'Retail');
 
     const currentCartItem = cart.find(item => item.productId === product.id && item.sellingUnit === selectedUnit);
     const existingQty = currentCartItem ? currentCartItem.quantity : 0;
@@ -1258,13 +1122,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     /**
      * Stock verificado **aqui**, não só ao gravar.
      *
-     * Antes: a verificação usava o stock da última sincronização do ecrã — que
-     * podia ter horas — e, nos artigos híbridos, olhava para sacos e quilos como
-     * se fossem pools separados. O resultado era descobrir a falta no fim, com o
-     * carrinho montado, ou deixar passar uma venda que já não tinha mercadoria.
-     *
-     * Agora lê-se o stock do servidor neste instante e a conta é feita em
-     * unidade base, somando as duas formas de venda.
+     * Antes a conta usava o stock da última sincronização do ecrã e, nos
+     * artigos híbridos, tratava sacos e quilos como gavetas separadas. O
+     * resultado era descobrir a falta no fim, com o carrinho montado, ou
+     * deixar passar uma venda sem mercadoria. Agora lê-se o stock do servidor
+     * neste instante e a conta é feita em unidade base.
      */
     if (!product.isService) {
       const stockServidor = await dbService.getProductStock(String(product.id));
@@ -1313,8 +1175,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           totalPrice: customQty * itemPrice,
           isService: product.isService,
           sellingUnit: selectedUnit,
-          taxRate: normalizeTaxRate((product as any).taxRate),
-          conversionRate: Number(product.conversionRate) > 1 ? Number(product.conversionRate) : undefined,
           category: product.category || 'Outro',
           costPrice: getUnitCost(product, selectedUnit),
           buyingPrice: getUnitCost(product, selectedUnit)
@@ -1374,11 +1234,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     }
 
     setCart(
-      cart.map(item =>
-        item.productId === productId && item.sellingUnit === sellingUnit
-          ? { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice }
-          : item
-      )
+      cart.map(item => {
+        if (item.productId !== productId || item.sellingUnit !== sellingUnit) return item;
+        const updated = { ...item, quantity: newQty, totalPrice: newQty * item.unitPrice };
+        return { ...updated, discountValue: clampItemDiscountValue(updated, updated.discountType || 'line_total', updated.discountValue || 0) };
+      })
     );
   };
 
@@ -1387,71 +1247,18 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     showToast('Produto removido do carrinho.', 'success');
   };
 
-  const updateCartDiscount = (productId: string, type: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total', value: number, sellingUnit?: 'Bulk' | 'Retail') => {
-    setCart(
-      cart.map(item =>
-        item.productId === productId && item.sellingUnit === sellingUnit
-          ? { ...item, discountType: type, discountValue: value }
-          : item
-      )
-    );
+  const updateCartDiscount = (productId: string, type: ItemDiscountType, value: number, sellingUnit?: 'Bulk' | 'Retail') => {
+    setCart(cart.map(item =>
+      item.productId === productId && item.sellingUnit === sellingUnit
+        ? { ...item, discountType: type, discountValue: clampItemDiscountValue(item, type, value) }
+        : item
+    ));
   };
 
-  const getItemDiscount = (item: SaleItem) => {
-    if (!item.discountValue || item.discountValue <= 0) return 0;
-    if (item.discountType === 'per_unit') {
-      return item.discountValue * item.quantity;
-    }
-    if (item.discountType === 'percent_unit') {
-      return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-    }
-    if (item.discountType === 'percent_total') {
-      return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-    }
-    return item.discountValue;
-  };
-
-  const getSubtotal = () => cart.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-  
-  const getDiscount = () => {
-    // 1. Sum of all item-level discounts
-    const itemDiscounts = cart.reduce((acc, item) => acc + getItemDiscount(item), 0);
-
-    return itemDiscounts + customSubtotalDiscount;
-  };
-
-  /**
-   * IVA do carrinho, por linha e com a taxa de cada produto.
-   *
-   * O que estava errado: o total aplicava **16% fixos** sobre a base
-   * (`base * 1.16`), mas o IVA gravado na venda era calculado **por linha**, com
-   * a taxa de cada produto — e ainda por cima sobre o valor bruto, antes dos
-   * descontos. Com produtos isentos ou a 5%, o cliente pagava um valor e o
-   * documento declarava outro.
-   *
-   * Agora o total e o IVA saem da mesma conta: valor líquido de cada linha
-   * (já com os descontos repartidos proporcionalmente) × a taxa dessa linha.
-   */
-  const getIvaAmount = () => {
-    if (!includeIva) return 0;
-    const sub = getSubtotal();
-    if (sub <= 0) return 0;
-    return cartTaxAmount(
-      cart.map(item => ({
-        productId: item.productId,
-        unitPrice: item.unitPrice,
-        quantity: item.quantity,
-        taxRate: item.taxRate
-      })),
-      products,
-      (sub - getDiscount()) / sub
-    );
-  };
-
-  const getTotal = () => {
-    const base = Math.max(0, getSubtotal() - getDiscount());
-    return Math.round((base + getIvaAmount()) * 100) / 100;
-  };
+  const cartTotals = getSaleTotals(cart, customSubtotalDiscount, includeIva);
+  const getSubtotal = () => cartTotals.subtotal;
+  const getDiscount = () => cartTotals.discount;
+  const getTotal = () => cartTotals.total;
 
   const playScannerBeep = () => {
     try {
@@ -1466,12 +1273,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       osc.start();
       osc.stop(audioCtx.currentTime + 0.08);
     } catch (e) {
-      console.log("Audio Context beep error", e);
+      console.warn("Audio Context beep error", e);
     }
   };
 
   const downloadInvoicePDF = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'FaturaProforma') => {
-    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
+    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as SystemSettings;
     if (format === 'Thermal') {
       downloadThermalReceipt(sale, s);
     } else if (format === 'DoubleA5') {
@@ -1497,10 +1304,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     let salePersisted = false;
 
     const clearCompletedCheckout = () => {
-      // Limpeza explícita do rascunho no momento do commit: não se depende do
-      // efeito de auto-save (que só corre depois do render seguinte).
-      void dbService.clearActiveCart();
-      setSavedActiveCart(null);
       setCart([]);
       setCustomerName('Cliente Geral');
       setCustomerNuit('');
@@ -1512,197 +1315,94 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     };
 
     try {
-      // J-08: sem nome e NUIT da empresa, o documento sai com o cabeçalho
-      // errado. Bloqueia-se a emissão até as definições estarem preenchidas.
-      if (!hasCompanyNuit(settings)) {
-        showToast('Configure o NUIT da empresa nas definições antes de emitir documentos.', 'error');
-        void appAlert(
-          'Não é possível emitir documentos fiscais sem os dados da empresa.\n\nVá a Definições → Empresa e preencha o nome e o NUIT. Depois repita a venda.'
-        );
-        return;
-      }
-
-      // J-08: sem nome e NUIT da empresa, o documento sai com o cabeçalho
-      // errado. Bloqueia-se a emissão até as definições estarem preenchidas.
-      if (!hasCompanyNuit(settings)) {
-        showToast('Configure o NUIT da empresa nas definições antes de emitir documentos.', 'error');
-        void appAlert(
-          'Não é possível emitir documentos fiscais sem os dados da empresa.\n\nVá a Definições → Empresa e preencha o nome e o NUIT. Depois repita a venda.'
-        );
-        return;
-      }
-
       const sub = getSubtotal();
       const disc = getDiscount();
       const tot = getTotal();
+      const iva = cartTotals.ivaAmount;
 
-      // K-03: o desconto não tinha qualquer limite — o total podia ir a zero e
-      // a venda ficava registada como paga. Acima de 20% exige autorização; o
-      // desconto nunca pode exceder o subtotal.
-      if (disc > sub + 0.001) {
-        showToast('O desconto não pode ser superior ao subtotal da venda.', 'error');
+      if (paymentMethod === 'Crédito' && (!customerName || customerName.trim().toLowerCase() === 'cliente geral')) {
+        showToast('Venda a Crédito exige cliente identificado (não pode ser "Cliente Geral").', 'error');
+        setIsFinalizing(false);
         return;
       }
-      const discountPercent = sub > 0 ? (disc / sub) * 100 : 0;
-      if (discountPercent > 20) {
-        const authorization = await appPrompt(
-          `Desconto de ${discountPercent.toFixed(1)}% (${disc.toFixed(2)} MT) excede o limite de 20%.\nIntroduza a palavra-passe de autorização para continuar.`
-        );
-        if (authorization === null) return;
-        if (!(await verifyAuthorizationPassword(authorization, settings))) {
-          showToast('Autorização recusada: palavra-passe incorrecta.', 'error');
-          return;
-        }
-      }
-      // E-02: o IVA é calculado por linha, com a taxa do produto (16% por
-      // omissão). Antes era 16% fixo sobre o total, o que tornava impossível
-      // declarar produtos com outra taxa ou isentos.
-      // A mesma conta que produziu o total: documento e cobrança não divergem.
-      const iva = getIvaAmount();
 
-      // --- Controlo do pagamento (D-06) -------------------------------------
-      // O estado da venda é financeiro: não se grava uma venda como paga sem
-      // que o valor recebido cubra o total. O painel já mostrava "Falta: X MT",
-      // mas a gravação ignorava-o.
-      const round2 = (n: number) => Math.round(n * 100) / 100;
-      const money = (n: number) =>
-        n.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const breakdownTotal = round2(
-        (paymentMethod === 'Múltiplo' ? multiPaymentLines : [])
-          .reduce((acc, line) => acc + Number(line.amount || 0), 0)
-      );
-      const typedAmount = typeof amountReceived === 'number' ? amountReceived : Number(amountReceived || 0);
-
-      let tendered = 0;
-      let change = 0;
-
-      if (paymentMethod === 'Crédito') {
-        tendered = 0;
-        change = 0;
-      } else if (paymentMethod === 'Múltiplo') {
-        if (Math.abs(breakdownTotal - tot) > 0.01) {
-          const falta = round2(tot - breakdownTotal);
-          showToast(
-            falta > 0
-              ? `Pagamento incompleto: as parcelas somam ${money(breakdownTotal)} MT e faltam ${money(falta)} MT.`
-              : `As parcelas somam ${money(breakdownTotal)} MT e excedem o total em ${money(-falta)} MT.`,
-            'error'
-          );
-          return;
-        }
-        tendered = breakdownTotal;
-        change = 0;
-      } else if (paymentMethod === 'Dinheiro') {
-        if (amountReceived !== '' && typedAmount + 0.005 < tot) {
-          showToast(
-            `Valor entregue (${money(typedAmount)} MT) inferior ao total (${money(tot)} MT).`,
-            'error'
-          );
-          return;
-        }
-        tendered = amountReceived !== '' ? typedAmount : tot;
-        change = Math.max(0, round2(tendered - tot));
-      } else {
-        // Transferência, M-Pesa, E-Mola: pagamento pelo valor exacto.
-        tendered = tot;
-        change = 0;
+      if (sub > 0 && (disc / sub) > 0.30) {
+        showToast('Descontos superiores a 30% exigem autorização prévia da gerência.', 'error');
+        setIsFinalizing(false);
+        return;
       }
 
-      // Map cart items to finalized sale items with correct net prices after discount and preserved cost snapshot
+      // Determine document type from print option
+      const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
+
+      if (effectiveDocType === 'FaturaDefinitiva') {
+        for (const item of cart) {
+          const prod = products.find(p => p.id === item.productId);
+          if (prod && !prod.isService) {
+            const hasConversion = !!(prod.parentUnit && prod.conversionRate && prod.conversionRate > 1);
+            if (hasConversion && item.sellingUnit === 'Bulk') {
+              const availableBulk = prod.stockQtyBulk ?? Math.floor(prod.stockQty / (prod.conversionRate || 1));
+              if (item.quantity > availableBulk) {
+                showToast(`Stock insuficiente de "${prod.name}" (${prod.parentUnit}): disponível ${availableBulk}, solicitado ${item.quantity}.`, 'error');
+                setIsFinalizing(false);
+                return;
+              }
+            } else {
+              const availableRetail = hasConversion ? (prod.stockQtyRetail ?? prod.stockQty) : prod.stockQty;
+              if (item.quantity > availableRetail) {
+                showToast(`Stock insuficiente de "${prod.name}": disponível ${availableRetail} ${prod.baseUnit}, solicitado ${item.quantity}.`, 'error');
+                setIsFinalizing(false);
+                return;
+              }
+            }
+          }
+        }
+      }
       const finalizedItems = cart.map(item => {
         const prod = products.find(p => p.id === item.productId);
-        const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? item.unitPrice;
+        const cost = item.costPrice ?? getUnitCost(prod, item.sellingUnit) ?? (item.unitPrice * 0.6);
         const cat = item.category || prod?.category || 'Outro';
         return {
           ...item,
           category: cat,
           costPrice: cost,
           buyingPrice: cost,
-          totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item),
-          // A taxa fica gravada na linha: o histórico não depende do catálogo.
-          taxRate: normalizeTaxRate(item.taxRate ?? (prod as any)?.taxRate),
-          conversionRate: item.conversionRate
-            ?? (Number(prod?.conversionRate) > 1 ? Number(prod?.conversionRate) : undefined)
+          totalPrice: Math.round(((item.unitPrice * item.quantity) - getItemDiscount(item)) * 100) / 100
         };
       });
 
-      // Determine document type from print option
-      const effectiveDocType = printFormat === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva';
+      // Determine default status: A4 definitive invoices and proformas are saved as Pendente
+      let finalStatus: Sale['status'] = 'Paga';
+      if (effectiveDocType === 'FaturaProforma' || printFormat === 'A4') {
+        finalStatus = 'Pendente';
+      } else if (paymentMethod === 'Crédito') {
+        finalStatus = 'Crédito';
+      }
 
-      // O estado decorre do PAGAMENTO, nunca do papel escolhido. Uma fatura A4
-      // paga em dinheiro é 'Paga'; uma venda a crédito é 'Crédito'. A proforma é
-      // um documento não fiscal e é excluída das agregações financeiras pelo
-      // `documentType`, não pelo estado — para não poluir a dívida de clientes.
+      // Números sequenciais transaccionais (FAC-2026-N / REC-...): reservados
+      // atomicamente para não duplicar entre vendedores simultâneos (D-01).
+      const existingSales = await dbService.getSales();
+      const invoiceNum = await reserveDocumentNumber(
+        generateNextInvoiceNumber(existingSales, effectiveDocType),
+        (key, min) => dbService.nextDocumentNumber(key, min)
+      );
+      const needsReceipt = (finalStatus === 'Paga' || printFormat === 'ReciboA4' || printFormat === 'Thermal');
+      const receiptNum = needsReceipt
+        ? await reserveDocumentNumber(
+            generateNextReceiptNumber(existingSales, printFormat),
+            (key, min) => dbService.nextDocumentNumber(key, min)
+          )
+        : undefined;
+
       const activeBreakdown = paymentMethod === 'Múltiplo'
         ? multiPaymentLines.filter(l => l.amount > 0)
         : undefined;
-      const hasCreditLeg = (activeBreakdown || []).some(
-        line => String(line.method || '').trim().toLowerCase().startsWith('crédit')
-      );
-      const isCreditSale = paymentMethod === 'Crédito' || hasCreditLeg;
-      const finalStatus: Sale['status'] =
-        effectiveDocType === 'FaturaProforma' ? 'Proforma' : isCreditSale ? 'Crédito' : 'Paga';
-
-      // Numeração autoritativa (B-01): o contador vive no Firestore e é
-      // incrementado numa transacção, para que dois caixas nunca recebam o
-      // mesmo número. O helper do cliente é usado apenas para saber qual é o
-      // maior número já emitido, que semeia o contador na primeira utilização.
-      const existingSales = await dbService.getSales();
-      const numberYear = new Date().getFullYear();
-      const lastPartOf = (value: string) =>
-        parseInt(value.slice(value.lastIndexOf('-') + 1), 10) - 1 || 0;
-
-      const invoiceNum = await dbService.nextDocumentNumber(
-        effectiveDocType === 'FaturaProforma' ? 'FaturaProforma' : 'FaturaDefinitiva',
-        numberYear,
-        lastPartOf(generateNextInvoiceNumber(existingSales, effectiveDocType))
-      );
-
-      let receiptNum: string | undefined;
-      if (finalStatus === 'Paga' && effectiveDocType === 'FaturaDefinitiva') {
-        receiptNum = await dbService.nextDocumentNumber(
-          printFormat === 'Thermal' ? 'ReciboPOS' : 'ReciboA4',
-          numberYear,
-          lastPartOf(generateNextReceiptNumber(existingSales, printFormat))
-        );
-      }
-
-      /**
-       * V-C11: antes de gravar, verifica se já existe hoje uma venda igual.
-       * O corte de inventário anula vendas para serem relançadas; sem esta
-       * guarda, um segundo relançamento passava em silêncio e o stock saía
-       * duas vezes.
-       */
-      const conflito = findDuplicateSale(existingSales, {
-        customerName,
-        total: tot,
-        items: finalizedItems.map(item => ({
-          productId: item.productId,
-          quantity: item.quantity,
-          sellingUnit: item.sellingUnit
-        }))
-      }, toLocalDateKey(new Date().toISOString()));
-
-      if (conflito.duplicate || conflito.cancelledTwin) {
-        const confirmar = await appConfirm(
-          'VENDA POSSIVELMENTE DUPLICADA\n\n' +
-            `${describeDuplicateRisk(conflito)}\n\n` +
-            'Gravar mesmo assim? Se for engano, cancele e verifique as facturas do dia.',
-          { confirmLabel: 'Gravar assim mesmo', danger: true }
-        );
-        if (!confirmar) {
-          showToast('Venda não gravada: possível duplicação.', 'error');
-          setIsFinalizing(false);
-          return;
-        }
-      }
 
       const newSale: Sale = {
-        id: newSaleId(),
+        id: uid('sale-'),
         invoiceNumber: invoiceNum,
         receiptNumber: receiptNum,
         date: new Date().toISOString(),
-        dateKey: toLocalDateKey(new Date().toISOString()),
         customerName,
         customerNuit: customerNuit || undefined,
         customerAddress: customerAddress || undefined,
@@ -1712,13 +1412,10 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         total: tot,
         paymentMethod,
         paymentBreakdown: activeBreakdown,
-        amountReceived: paymentMethod === 'Crédito' ? undefined : tendered,
-        changeGiven: paymentMethod === 'Crédito' ? undefined : change,
         status: finalStatus,
         documentType: effectiveDocType,
         operatorId: currentUser.username,
         operatorName: currentUser.username,
-        terminalId: currentTerminalId(),
         synced: settings?.mode === 'Online',
         includeIva,
         ivaAmount: iva
@@ -1749,26 +1446,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       salePersisted = true;
-
-      /**
-       * Venda a crédito: cria o registo de dívida **antes** de libertar a
-       * operação. Sem este registo não há prazo, não há cobranças parciais e a
-       * dívida não aparece em lado nenhum — o dinheiro do cliente fica só na
-       * memória de quem vendeu.
-       */
-      if (newSale.status === 'Crédito' || newSale.status === 'Pendente') {
-        try {
-          await dbService.createDebtFromSale(newSale, Number((settings as any)?.creditTermDays) || 30);
-        } catch (erroDivida) {
-          console.error('[PDV] Falha ao criar o registo de dívida:', erroDivida);
-          void appAlert(
-            `A venda ${newSale.invoiceNumber} ficou gravada, mas o registo de dívida NÃO foi criado.\n\n` +
-              'A factura continua a aparecer como pendente, mas sem prazo nem histórico de cobrança. ' +
-              'Avise o responsável antes de fechar o dia.'
-          );
-        }
-      }
-
       // Clear the cart as soon as the transaction is committed. A later PDF or
       // refresh issue must never tempt the operator to submit the same sale.
       clearCompletedCheckout();
@@ -1776,7 +1453,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       // Audit, cash drawer, printing and screen refresh are post-commit tasks.
       // Their failures are intentionally isolated from the completed sale.
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -1795,7 +1472,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
       let directPrinted = false;
       if (isSerialPrinterConnected() && printFormat === 'Thermal') {
-        const activeConfig = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
+        const activeConfig = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as SystemSettings;
         await runPostCommitTask({
           label: 'enviar o recibo para a impressora térmica',
           task: async () => {
@@ -1813,19 +1490,16 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         setInvoiceToPrint(newSale);
         setPrintType('FaturaProforma');
       } else if (directPrint) {
-        if (!directPrinted && printFormat === 'Thermal') {
+        setInvoiceToPrint(null);
+        setPrintType(null);
+
+        if (!directPrinted) {
           documentGenerated = await runPostCommitTask({
             label: 'gerar o documento da venda',
             task: () => downloadInvoicePDF(newSale, printFormat)
           });
 
-          if (documentGenerated) {
-            // O fallback de impressão precisa do documento no DOM: o bloco
-            // `#thermal_receipt_80` só desenha conteúdo quando `invoiceToPrint`
-            // existe. Sem isto, o `window.print()` abria uma folha em branco.
-            setInvoiceToPrint(newSale);
-            setPrintType('Thermal');
-
+          if (printFormat === 'Thermal' && documentGenerated) {
             window.setTimeout(() => {
               void runPostCommitTask({
                 label: 'abrir a impressão automática',
@@ -1835,11 +1509,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   showToast('Venda gravada com sucesso. A impressão automática não foi iniciada; pode reimprimir pelo histórico.', 'warning');
                 }
               });
-            }, 700);
+            }, 500);
           }
-        } else {
-          setInvoiceToPrint(null);
-          setPrintType(null);
         }
       } else {
         documentGenerated = await runPostCommitTask({
@@ -1869,20 +1540,13 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         showToast('Venda finalizada com sucesso! Pré-visualização gerada.', 'success');
       }
     } catch (err) {
-      console.error('Erro ao finalizar venda:', err);
+      const info = describeError(err, 'Não foi possível gravar a venda no sistema.');
+      console.error('[PDV] Erro ao finalizar venda:', info.raw);
       if (salePersisted) {
         clearCompletedCheckout();
         showToast('A venda foi gravada com sucesso. Alguns passos posteriores não foram concluídos; consulte o histórico antes de repetir a operação.', 'warning');
-      } else if (err instanceof InsufficientStockError) {
-        showToast(err.message, 'error');
-        void appAlert(`Venda não registada.\n\n${err.message}`);
       } else {
-        // K-04: um toast de 4 segundos escondia o facto de a venda NÃO ter
-        // ficado gravada. Erros de gravação passam a exigir reconhecimento.
-        showToast('Erro ao gravar a venda no sistema.', 'error');
-        void appAlert(
-          `A venda NÃO foi gravada.\n\n${err instanceof Error ? err.message : 'Erro desconhecido.'}\n\nO carrinho foi mantido. Se o problema repetir, avise o responsável técnico.`
-        );
+        showToast(`${info.title} ${info.hint}`.trim(), 'error');
       }
     } finally {
       setIsFinalizing(false);
@@ -1893,40 +1557,19 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const handlePayInvoice = (sale: Sale) => {
     askConfirmation(
       'Liquidar Fatura',
-      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString('pt-MZ')} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
+      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString()} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
       async () => {
         let paymentSaved = false;
         try {
-          /**
-           * Antes: lia-se o contador, calculava-se o recibo e gravava-se a venda
-           * em duas operações. Dois postos a liquidar a mesma fatura ao mesmo
-           * tempo emitiam **dois recibos** para um só pagamento. Agora é uma
-           * transacção: verifica o estado, numera o recibo e grava.
-           */
-          const todasAsVendas = await dbService.getSales();
-          const candidato = generateNextReceiptNumber(todasAsVendas, 'ReciboA4');
-          const ultimoRecibo = parseInt(candidato.slice(candidato.lastIndexOf('-') + 1), 10) - 1 || 0;
-
-          /**
-           * Mesma rotina das Faturas: liquida a dívida, emite recibo e registra
-           * a entrada em caixa. Uma venda a crédito cobrada no PDV passa a
-           * aparecer no Livro de Caixa como dinheiro recebido.
-           */
-          const resultado = await dbService.settleDebt({
-            saleId: String(sale.id),
-            amount: Math.max(0, (Number(sale.total) || 0) - (Number(sale.amountPaid) || 0)),
-            method: sale.paymentMethod || 'Dinheiro',
-            operator: currentUser.username,
-            fallbackMax: ultimoRecibo
-          });
-          const payment = { sale: resultado.sale, receiptNumber: resultado.receiptNumber };
-
+          const updatedSale: Sale = { ...sale, status: 'Paga' };
+          await dbService.addSale(updatedSale);
           paymentSaved = true;
-          setInvoiceToPrint(payment.sale);
+
+          setInvoiceToPrint(updatedSale);
           setPrintType('ReciboA4');
           const receiptGenerated = await runPostCommitTask({
             label: 'gerar o recibo da fatura liquidada',
-            task: () => downloadInvoicePDF(payment.sale, 'ReciboA4')
+            task: () => downloadInvoicePDF(updatedSale, 'ReciboA4')
           });
           await runPostCommitTask({
             label: 'atualizar o histórico após liquidar a fatura',
@@ -1934,165 +1577,64 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           });
 
           if (receiptGenerated) {
-            showToast(`Fatura ${sale.invoiceNumber} paga com sucesso! Recibo ${payment.receiptNumber} gerado em A4.`, 'success');
+            showToast(`Fatura ${sale.invoiceNumber} paga com sucesso! Recibo gerado em A4.`, 'success');
           } else {
-            showToast(`Fatura ${sale.invoiceNumber} foi liquidada. Recibo ${payment.receiptNumber}: reimprima pelo histórico.`, 'warning');
+            showToast(`Fatura ${sale.invoiceNumber} foi liquidada com sucesso. O recibo pode ser reimpresso pelo histórico.`, 'warning');
           }
-        } catch (err: any) {
-          console.error('Erro ao liquidar fatura:', err);
+        } catch (err) {
+          const info = describeError(err, 'Não foi possível liquidar a fatura.');
+          console.error('[PDV] Erro ao liquidar fatura:', info.raw);
           if (paymentSaved) {
             showToast(`A fatura ${sale.invoiceNumber} foi liquidada com sucesso. Consulte o histórico antes de repetir a operação.`, 'warning');
           } else {
-            showToast('Erro ao liquidar fatura.', 'error');
-            void appAlert(`A fatura NÃO foi liquidada.\n\n${err?.message || 'Erro desconhecido.'}`);
+            showToast(`${info.title} ${info.hint}`.trim(), 'error');
           }
         }
       }
     );
   };
 
-  /**
-   * Anular uma factura a partir do PDV.
-   *
-   * Antes, esta acção era um clique: sem palavra-passe, sem nota de crédito e
-   * sem registo do dinheiro devolvido. A mesma anulação feita em Faturas exigia
-   * gestor, emitia NC e perguntava pelo reembolso — dois ecrãs, duas regras, a
-   * mesma base de dados. Uma factura anulada pelo PDV não tinha documento de
-   * rectificação: numa inspecção, era uma factura em falta.
-   *
-   * Agora as duas entradas fazem o mesmo: palavra-passe, NC numerada por
-   * documento definitivo, stock reposto, reembolso registado em caixa e
-   * auditoria.
-   */
   const handleCancelInvoice = (sale: Sale) => {
     askConfirmation(
       'Cancelar Fatura',
-      `Anular a fatura ${sale.invoiceNumber} (${sale.total.toLocaleString('pt-MZ')} MT).\n\n` +
-        'A anulação emite nota de crédito, repõe o stock e é registada em auditoria. ' +
-        'Exige a palavra-passe de gestor.',
+      `Deseja realmente cancelar a fatura ${sale.invoiceNumber}? Esta ação irá anular este documento no histórico de vendas de forma permanente.`,
       async () => {
         let cancellationSaved = false;
         try {
-          const password = await appPrompt(
-            `Anular ${sale.invoiceNumber}: introduza a palavra-passe de gestor.`
-          );
-          if (password === null) return;
-          if (!(await verifyAuthorizationPassword(password, settings))) {
-            showToast('Autorização recusada: palavra-passe incorrecta.', 'error');
-            return;
-          }
-
-          if (sale.status === 'Cancelada') {
-            showToast('Esta factura já está anulada.', 'error');
-            return;
-          }
-
-          // ── Reembolso: só quando o cliente já tinha pago ────────────────
-          let refundValue = 0;
-          if (canRefund(sale)) {
-            const devolveu = await appConfirm(
-              `O cliente pagou ${maxRefundFor(sale).toFixed(2)} MT nesta factura.\n\n` +
-                'Devolveu esse dinheiro agora? Se sim, fica registado no Livro de Caixa.',
-              { confirmLabel: 'Sim, devolvi', danger: true }
-            );
-            if (devolveu) refundValue = maxRefundFor(sale);
-          }
-
-          // ── Nota de crédito: só documentos definitivos ───────────────────
-          const isDefinitive = !sale.documentType || sale.documentType === 'FaturaDefinitiva';
-          const creditNoteNumber = isDefinitive
-            ? await dbService.nextDocumentNumber('NotaCredito', new Date().getFullYear(), 0)
-            : undefined;
-
-          const agora = new Date().toISOString();
-          const operador = currentUser.username;
-          const annotated: Sale = {
-            ...sale,
-            cancelledAt: agora,
-            cancelledBy: operador,
-            previousStatus: sale.status as Sale['previousStatus'],
-            ...(creditNoteNumber ? { creditNoteNumber } : {}),
-            notes: [
-              sale.notes,
-              `[PDV] Anulada em ${agora.substring(0, 16).replace('T', ' ')} por ${operador}.`,
-              creditNoteNumber ? `Nota de crédito: ${creditNoteNumber}.` : '',
-              refundValue > 0 ? `Devolvidos ${refundValue.toFixed(2)} MT ao cliente (registado em caixa).` : ''
-            ].filter(Boolean).join('\n')
-          };
-
-          if (isDefinitive) {
-            const produtos = await dbService.getProducts();
+          // Revert stock and update the invoice in the same batch whenever this
+          // is a definitive invoice. This prevents a cancelled invoice from
+          // being shown as failed after its stock has already been restored.
+          if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
+            const products = await dbService.getProducts();
             const restockItems: any[] = [];
             for (const item of (sale.items || [])) {
               if (!item) continue;
-              const prod = produtos.find(p => String(p.id) === String(item.productId));
-              if (!prod || prod.isService) continue;
-              const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
-              const qtyToAdd = Number(item.quantity) || 0;
-              if (qtyToAdd <= 0) continue;
-              if (hasConversion && item.sellingUnit === 'Bulk') {
-                restockItems.push({
-                  productId: String(prod.id),
-                  hasConversion: true,
-                  sellingUnit: 'Bulk',
-                  qtyToAdd,
-                  equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
-                });
-              } else if (hasConversion) {
-                restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
-              } else {
-                restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
+              const prod = products.find(p => String(p.id) === String(item.productId));
+              if (prod && !prod.isService) {
+                const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+                const qtyToAdd = Number(item.quantity) || 0;
+                if (qtyToAdd <= 0) continue;
+                if (hasConversion && item.sellingUnit === 'Bulk') {
+                  restockItems.push({
+                    productId: String(prod.id),
+                    hasConversion: true,
+                    sellingUnit: 'Bulk',
+                    qtyToAdd,
+                    equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+                  });
+                } else if (hasConversion) {
+                  restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
+                } else {
+                  restockItems.push({ productId: String(prod.id), hasConversion: false, qtyToAdd });
+                }
               }
             }
-            await dbService.cancelSaleWithStockRestoration(annotated, restockItems);
+            await dbService.cancelSaleWithStockRestoration(sale, restockItems);
           } else {
-            await dbService.addSale({ ...annotated, id: String(sale.id || Date.now()), status: 'Cancelada' });
+            await dbService.addSale({ ...sale, id: String(sale.id || uid('sale-')), status: 'Cancelada' });
           }
 
           cancellationSaved = true;
-
-          // ── Dinheiro devolvido ──────────────────────────────────────────
-          if (refundValue > 0) {
-            try {
-              await dbService.addCashMovement({
-                id: `cx-reembolso-${sale.id || sale.invoiceNumber}-${Date.now()}`,
-                date: agora,
-                day: toCashDay(agora),
-                type: 'Reembolso',
-                amount: -Math.abs(refundValue),
-                method: sale.paymentMethod || 'Dinheiro',
-                operator: operador,
-                authorizedBy: operador,
-                reference: sale.invoiceNumber,
-                receiptNumber: sale.receiptNumber,
-                creditNoteNumber,
-                notes: `Devolução ao cliente na anulação de ${sale.invoiceNumber} (PDV)`
-              });
-            } catch (erroReembolso) {
-              console.error('[PDV] Falha ao registar o reembolso:', erroReembolso);
-              void appAlert(
-                `A factura foi anulada, mas a devolução de ${refundValue.toFixed(2)} MT NÃO ficou registada em caixa.\n\n` +
-                  'Registe-a manualmente antes de fechar o dia.'
-              );
-            }
-          }
-
-          const ipAddress = await getClientIp().catch(() => 'desconhecido');
-          void dbService.addAuditLog({
-            id: 'log-pdv-cancel-' + Date.now(),
-            timestamp: agora,
-            username: operador,
-            ipAddress,
-            action: 'Anulação de Venda (PDV, Autorizada)',
-            status: 'Sucesso',
-            level: 'WARNING',
-            entity: 'sales',
-            details:
-              `Factura ${sale.invoiceNumber} (${sale.total} MT) anulada no PDV. ` +
-              (creditNoteNumber ? `Nota de crédito: ${creditNoteNumber}. ` : 'Documento não definitivo: sem NC. ') +
-              (refundValue > 0 ? `Reembolso de ${refundValue.toFixed(2)} MT registado.` : 'Sem reembolso registado.')
-          });
-
           await runPostCommitTasks([
             {
               label: 'atualizar o histórico depois de cancelar a fatura',
@@ -2103,18 +1645,14 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               task: () => loadPDVData()
             }
           ]);
-          showToast(
-            `Fatura ${sale.invoiceNumber} anulada${creditNoteNumber ? ` com nota de crédito ${creditNoteNumber}` : ''}` +
-              `${refundValue > 0 ? ` e ${refundValue.toFixed(2)} MT devolvidos` : ''}.`,
-            'success'
-          );
+          showToast(`Fatura ${sale.invoiceNumber} cancelada com sucesso.`, 'success');
         } catch (err) {
-          console.error('Erro ao cancelar fatura:', err);
+          const info = describeError(err, 'Não foi possível cancelar a fatura.');
+          console.error('[PDV] Erro ao cancelar fatura:', info.raw);
           if (cancellationSaved) {
-            showToast(`A fatura ${sale.invoiceNumber} foi anulada. Alguns dados visuais serão atualizados em seguida.`, 'warning');
+            showToast(`A fatura ${sale.invoiceNumber} foi cancelada com sucesso. Alguns dados visuais serão atualizados em seguida.`, 'warning');
           } else {
-            showToast('Erro ao cancelar fatura.', 'error');
-            void appAlert('A fatura NÃO foi anulada. Nada foi alterado.');
+            showToast(`${info.title} ${info.hint}`.trim(), 'error');
           }
         }
       }
@@ -2124,54 +1662,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const handleRestoreInvoice = async (sale: Sale) => {
     let restorationSaved = false;
     try {
-      /**
-       * Reemissão: a factura anulada **não volta a viver**.
-       *
-       * Antes, o PDV repunha o estado da mesma factura (mesmo número, mesmo
-       * documento) — enquanto Faturas emitia uma factura nova. O mesmo botão
-       * produzia resultados diferentes, e o número já declarado como anulado
-       * reaparecia como válido. Agora sai número novo, como em Faturas; a
-       * factura anulada e a nota de crédito ficam no histórico.
-       */
-      const anoAtual = new Date().getFullYear();
-      const vendasConhecidas = await dbService.getSales();
-      const ultimoNumero = (valor: string) => parseInt(valor.slice(valor.lastIndexOf('-') + 1), 10) - 1 || 0;
-      const novoNumero = await dbService.nextDocumentNumber(
-        'FaturaDefinitiva',
-        anoAtual,
-        ultimoNumero(generateNextInvoiceNumber(vendasConhecidas, 'FaturaDefinitiva'))
-      );
-      const agoraReemissao = new Date().toISOString();
-
-      const updatedSale: Sale = {
-        ...sale,
-        id: newSaleId(),
-        invoiceNumber: novoNumero,
-        receiptNumber: undefined,
-        creditNoteNumber: undefined,
-        cancelledAt: undefined,
-        cancelledBy: undefined,
-        stockReturned: undefined,
-        status: 'Pendente',
-        date: agoraReemissao,
-        dateKey: toLocalDateKey(agoraReemissao),
-        notes: [
-          sale.notes,
-          `[PDV] Reemitida a partir de ${sale.invoiceNumber} (anulada).`
-        ].filter(Boolean).join('\n')
-      };
+      const updatedSale: Sale = { ...sale, id: String(sale.id || uid('sale-')), status: 'Pendente' };
 
       // Reapply the original stock deduction and restore the invoice status in
       // one batch. A partial stock-only restore must never be reported as an
       // error after the action has already changed the database.
-      /**
-       * Se a anulação anterior **não** repôs stock (corte de inventário, onde a
-       * contagem física já o tinha em conta), a reemissão não pode voltar a
-       * deduzir — o produto já saiu uma vez.
-       */
-      const deveDeduzirStock = sale.stockReturned !== false;
-
-      if (deveDeduzirStock && sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
+      if (sale.status === 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
         const products = await dbService.getProducts();
         const deductionItems: any[] = [];
         for (const item of (sale.items || [])) {
@@ -2214,11 +1710,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       ]);
       showToast(`Fatura ${sale.invoiceNumber} restaurada para o estado Pendente.`, 'success');
     } catch (err) {
-      console.error('Erro ao restaurar fatura:', err);
+      const info = describeError(err, 'Não foi possível restaurar a fatura.');
+      console.error('[PDV] Erro ao restaurar fatura:', info.raw);
       if (restorationSaved) {
         showToast(`A fatura ${sale.invoiceNumber} foi restaurada com sucesso. Alguns dados visuais serão atualizados em seguida.`, 'warning');
       } else {
-        showToast('Erro ao restaurar fatura.', 'error');
+        showToast(`${info.title} ${info.hint}`.trim(), 'error');
       }
     }
   };
@@ -2281,31 +1778,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
   return (
     <div className="flex flex-col lg:h-full lg:overflow-hidden" id="pdv_module_root">
-
-      {(!isOnline || Math.abs(clockSkewMinutes) >= 5) && (
-        <div className="mb-2 flex flex-col gap-1">
-          {!isOnline && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-800">
-              <span className="material-symbols-outlined text-base">cloud_off</span>
-              <span>
-                Sem ligação ao servidor. As vendas ficam registadas neste posto e sincronizam quando a rede voltar —
-                não feche o navegador antes disso.
-              </span>
-            </div>
-          )}
-          {Math.abs(clockSkewMinutes) >= 5 && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-800">
-              <span className="material-symbols-outlined text-base">schedule</span>
-              <span>
-                O relógio deste computador está {clockSkewMinutes > 0 ? 'adiantado' : 'atrasado'} cerca de{' '}
-                {Math.abs(clockSkewMinutes)} minuto(s) em relação ao servidor. As datas e os números dos documentos
-                podem sair errados — corrija a hora do sistema.
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
+      
       {/* Top Header Actions (Portaled to App.tsx) */}
       {document.getElementById('module-header-actions') && createPortal(
         <div className="flex items-center gap-2 shrink-0 flex-nowrap">
@@ -2326,9 +1799,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               setRetroactiveCustomerAddress('');
               setRetroactiveSaveCustomer(false);
               setRetroactivePaymentMethod('Dinheiro');
-              setRetroactiveDeductStock(false);
+              setRetroactiveDeductStock(true);
               setRetroactiveCart([]);
               setRetroactiveProductQuery('');
+              setRetroactiveError('');
+              setRetroactiveSlow(false);
               setShowRetroactiveModal(true);
             }}
             className="px-2 py-1 font-extrabold text-[10px] sm:text-xs uppercase tracking-wider rounded-lg shadow-sm transition-all flex items-center gap-1 cursor-pointer bg-indigo-700 hover:bg-indigo-800 text-white whitespace-nowrap"
@@ -2385,6 +1860,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         document.getElementById('module-header-actions')!
       )}
 
+      {/* Toast global (portal z-[9999]): visível em qualquer tab e sobre qualquer modal */}
+      <Toast message={toastMessage} type={toastType} duration={10000} onDismiss={() => setToastMessage('')} />
+
       {pdvTab === 'vendas' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start lg:items-stretch lg:flex-1 lg:min-h-0 lg:overflow-hidden mt-4" id="pdv_container">
           {/* Active Cart Recovery Banner */}
@@ -2396,7 +1874,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <h4 className="font-bold text-amber-950 text-sm">Venda Anterior não Finalizada Detetada</h4>
                   <p className="text-xs text-amber-800 leading-relaxed mt-0.5">
                     O sistema recuperou uma sessão que fechou inesperadamente com <strong>{savedActiveCart.cart.length} artigo(s)</strong> no valor total de <strong>{
-                      getSavedCartTotal().toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                      getSavedCartTotal().toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                     } MT</strong> para o cliente <strong>{savedActiveCart.customerName}</strong>. Deseja restaurar este carrinho?
                   </p>
                 </div>
@@ -2420,22 +1898,6 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               </div>
             </div>
           )}
-
-          {/* Toast Notification Banner */}
-      {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-2xl flex items-center gap-3 border ${
-          toastType === 'success'
-            ? 'bg-primary text-white border-green-700'
-            : toastType === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
-              : 'bg-red-600 text-white border-red-700'
-        }`}>
-          <span className="material-symbols-outlined">
-            {toastType === 'success' ? 'check_circle' : toastType === 'warning' ? 'info' : 'warning'}
-          </span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
 
       {/* Main Product Selection Grid (8/12 widths) */}
       <div className="lg:col-span-8 flex flex-col space-y-3 lg:h-full lg:min-h-0">
@@ -2488,20 +1950,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         {/* Catalog Products Container */}
         <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
           {filteredProducts.map(prod => {
-            // A disponibilidade não pode ser lida só de `stockQty`: nos híbridos
-            // o stock vive em `stockQtyBulk`/`stockQtyRetail`. Usa-se o maior dos
-            // dois valores (total vs. soma das componentes) para não bloquear
-            // produtos que existem nem libertar produtos que já não existem.
-            const cardRate = Number(prod.conversionRate) || 0;
-            const cardIsHybrid = Boolean(prod.parentUnit) && cardRate > 1;
-            const cardDerived = cardIsHybrid
-              ? (Number(prod.stockQtyBulk) || 0) * cardRate + (Number(prod.stockQtyRetail) || 0)
-              : 0;
-            const cardAvailable = cardIsHybrid
-              ? Math.max(Number(prod.stockQty) || 0, cardDerived)
-              : Number(prod.stockQty) || 0;
-            const lowStock = !prod.isService && cardAvailable > 0 && cardAvailable <= 10;
-            const noStock = !prod.isService && cardAvailable <= 0;
+            const lowStock = !prod.isService && prod.stockQty <= 10;
+            const noStock = !prod.isService && prod.stockQty === 0;
 
             return (
               <div
@@ -2539,7 +1989,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           className="w-full h-full object-cover" 
                           referrerPolicy="no-referrer"
                           onError={(e) => {
-                            (e.target as HTMLImageElement).src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="96"><rect width="80" height="96" fill="%23f1f5f9"/><text x="50%" y="50%" font-size="11" text-anchor="middle" fill="%2394a3b8">sem foto</text></svg>';
+                            (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1595974482597-4b8da8879bc5?auto=format&fit=crop&w=400&q=80';
                           }}
                         />
                       </div>
@@ -2556,9 +2006,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           const unit = hybridUnits[prod.id] || (prod.parentUnit === 'Sacos' ? 'Bulk' : 'Retail');
                           if (prod.parentUnit && prod.conversionRate && prod.conversionRate > 1 && unit === 'Bulk') {
                             const bulkPrice = prod.sellingPriceBulk && prod.sellingPriceBulk > 0 ? prod.sellingPriceBulk : (prod.sellingPrice * prod.conversionRate);
-                            return `${bulkPrice.toLocaleString('pt-MZ')} MT / ${getSingularUnit(prod.parentUnit || 'Saco')}`;
+                            return `${bulkPrice.toLocaleString()} MT / ${getSingularUnit(prod.parentUnit || 'Saco')}`;
                           }
-                          return `${prod.sellingPrice.toLocaleString('pt-MZ')} MT / ${getSingularUnit(prod.baseUnit || 'Kg')}`;
+                          return `${prod.sellingPrice.toLocaleString()} MT / ${getSingularUnit(prod.baseUnit || 'Kg')}`;
                         })()}
                       </p>
                     </div>
@@ -2749,11 +2199,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           {item.name}
                         </p>
                         <p className="text-[10px] text-gray-500">
-                          {item.unitPrice.toLocaleString('pt-MZ')} MT / {item.unit} • Subtotal: {(item.unitPrice * item.quantity).toLocaleString('pt-MZ')} MT
+                          {item.unitPrice.toLocaleString()} MT / {item.unit} • Subtotal: {(item.unitPrice * item.quantity).toLocaleString()} MT
                         </p>
                         {getItemDiscount(item) > 0 && (
                           <p className="text-[10px] text-red-600 font-bold">
-                            Desc. Artigo: -{getItemDiscount(item).toLocaleString('pt-MZ')} MT
+                            Desc. Artigo: -{getItemDiscount(item).toLocaleString()} MT
                           </p>
                         )}
                       </div>
@@ -2775,19 +2225,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               if (valStr === '') {
                                 updateCartQty(item.productId, '', item.sellingUnit);
                               } else {
-                                const parsed = Number(valStr);
-                                if (Number.isFinite(parsed) && parsed > 0) {
-                                  lastValidQtyRef.current[item.productId] = parsed;
-                                }
-                                updateCartQty(item.productId, parsed, item.sellingUnit);
+                                updateCartQty(item.productId, Number(valStr), item.sellingUnit);
                               }
                             }}
                             onBlur={() => {
-                              // K-05: apagar o campo e sair repunha 1, mudando o
-                              // total sem o operador perceber. Repõe-se o último
-                              // valor válido dessa linha.
-                              if (item.quantity === '' || Number(item.quantity) <= 0) {
-                                updateCartQty(item.productId, lastValidQtyRef.current[item.productId] ?? 1, item.sellingUnit);
+                              if (item.quantity === '' || item.quantity <= 0) {
+                                updateCartQty(item.productId, 1, item.sellingUnit);
                               }
                             }}
                             className="w-10 text-center text-xs font-bold font-mono bg-white focus:outline-none border-l border-r border-gray-200 py-0.5"
@@ -2815,7 +2258,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <span className="text-gray-500 font-medium">Desconto:</span>
                         <select
                           value={item.discountType || 'line_total'}
-                          onChange={(e) => updateCartDiscount(item.productId, e.target.value as 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total', item.discountValue || 0, item.sellingUnit)}
+                          onChange={(e) => updateCartDiscount(item.productId, e.target.value as ItemDiscountType, item.discountValue || 0, item.sellingUnit)}
                           className="border border-gray-200 rounded px-1 py-0.5 bg-gray-50 text-[10px] focus:outline-none focus:border-primary text-gray-700 cursor-pointer font-medium"
                         >
                           <option value="line_total">Total fixo (MT)</option>
@@ -2829,10 +2272,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <input
                           type="number"
                           min="0"
+                          max={getMaxItemDiscountValue(item, item.discountType || 'line_total')}
+                          step="any"
                           value={item.discountValue || ''}
                           onChange={(e) => {
-                            const val = Math.max(0, Number(e.target.value));
-                            updateCartDiscount(item.productId, item.discountType || 'line_total', val, item.sellingUnit);
+                            updateCartDiscount(item.productId, item.discountType || 'line_total', Number(e.target.value), item.sellingUnit);
                           }}
                           placeholder="0"
                           className="w-14 border border-gray-200 rounded px-1 py-0.5 font-bold font-mono text-[10px] focus:outline-none focus:border-primary text-right"
@@ -2918,17 +2362,14 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <span className="text-[9px] font-black uppercase text-emerald-800 tracking-tight">Total Final</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1 text-center font-mono font-black text-xs">
-                  <span className="text-gray-700">{getSubtotal().toLocaleString('pt-MZ')} MT</span>
+                  <span className="text-gray-700">{getSubtotal().toLocaleString()} MT</span>
                   <span className={getDiscount() === 0 ? 'text-gray-400' : 'text-rose-600'}>
-                    -{getDiscount().toLocaleString('pt-MZ')} MT
+                    -{getDiscount().toLocaleString()} MT
                   </span>
                   <span className="text-gray-700">
-                    {includeIva
-                      ? `${Math.round((getSubtotal() - getDiscount()) * 0.16).toLocaleString('pt-MZ')} MT`
-                      : 'Isento'
-                    }
+                    {includeIva ? `${cartTotals.ivaAmount.toLocaleString()} MT` : 'Isento'}
                   </span>
-                  <span className="text-emerald-600 font-extrabold">{getTotal().toLocaleString('pt-MZ')} MT</span>
+                  <span className="text-emerald-600 font-extrabold">{getTotal().toLocaleString()} MT</span>
                 </div>
               </div>
 
@@ -2997,7 +2438,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       const diff = targetTotal - currentTotal;
                       return (
                         <div className="pt-1 border-t border-slate-200 flex justify-between items-center text-[9px] font-black">
-                          <span>Digitado: <strong className="font-mono">{currentTotal.toLocaleString('pt-MZ')} MT</strong></span>
+                          <span>Digitado: <strong className="font-mono">{currentTotal.toLocaleString()} MT</strong></span>
                           <span className={diff === 0 ? 'text-emerald-600' : diff > 0 ? 'text-orange-600' : 'text-red-600'}>
                             {diff === 0 ? '✓ Ok' : diff > 0 ? `Falta: ${diff} MT` : `Excesso: ${Math.abs(diff)} MT`}
                           </span>
@@ -3043,7 +2484,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <div className="flex items-center gap-1 text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-100 rounded px-2 py-0.5 animate-fade-in shrink-0">
                         <span>Troco:</span>
                         <span className="font-mono text-emerald-600">
-                          {(amountReceived - getTotal()).toLocaleString('pt-MZ')} MT
+                          {(amountReceived - getTotal()).toLocaleString()} MT
                         </span>
                       </div>
                     )}
@@ -3079,7 +2520,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
             <div className="flex flex-col">
               <span className="text-[9px] font-black uppercase text-gray-400 tracking-wider">Total a Pagar</span>
               <span className="text-lg sm:text-xl font-black font-mono text-emerald-700 leading-none">
-                {getTotal().toLocaleString('pt-MZ')} <span className="text-xs font-black">MT</span>
+                {getTotal().toLocaleString()} <span className="text-xs font-black">MT</span>
               </span>
             </div>
 
@@ -3121,13 +2562,13 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               setReportPreset(preset);
             }}
             onExportPDF={async () => {
-              const s = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
+              const s = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as any;
               showToast('A compilar e descarregar relatório em formato PDF...', 'success');
               await downloadPeriodSalesReportPDF(reportStartDate, reportEndDate, sales, s);
             }}
             onExportExcel={() => {
               const salesInRange = sales.filter(s => {
-                if (!isFinancialSale(s)) return false;
+                if (s.status === 'Cancelada' || s.status === 'canceled') return false;
                 if (!s.date) return false;
                 return isDateInRange(s.date, reportStartDate, reportEndDate);
               });
@@ -3155,7 +2596,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
           {(() => {
             const salesOnDate = sales.filter(s => {
-              if (!isFinancialSale(s)) return false;
+              if (s.status === 'Cancelada' || s.status === 'canceled') return false;
               if (!s.date) return false;
               return isDateInRange(s.date, reportStartDate, reportEndDate);
             });
@@ -3503,7 +2944,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   VENDA REGISTADA - EMISSÃO DE DOCUMENTO
                 </span>
                 <p className="text-[10px] text-gray-500 font-bold font-mono uppercase">
-                  Doc: {invoiceToPrint.invoiceNumber} | Total: {invoiceToPrint.total.toLocaleString('pt-MZ')} MT
+                  Doc: {invoiceToPrint.invoiceNumber} | Total: {invoiceToPrint.total.toLocaleString()} MT
                 </p>
               </div>
 
@@ -3545,7 +2986,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 {/* Primary Action to actually print/download */}
                 <button
                   onClick={() => {
-                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
+                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as any;
                     if (printType === 'Thermal') {
                       downloadThermalReceipt(invoiceToPrint, s);
                       // Trigger native print dialog too
@@ -3614,7 +3055,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   ) : null}
                                   <h2 className="text-xl font-black text-primary uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold mt-1">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
+                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
                                   <div className="text-[10px] text-gray-600 space-y-0.5 mt-1.5 border-t border-gray-100 pt-1.5">
                                     {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                                     
@@ -3684,12 +3125,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
+                                  <tr key={idx} className="hover:bg-gray-50">
                                     <td className="p-2.5 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-2.5 text-right font-mono">{item.quantity}</td>
                                     <td className="p-2.5 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-2.5 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
-                                    <td className="p-2.5 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-2.5 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
+                                    <td className="p-2.5 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString()}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -3713,15 +3154,15 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   <div className="col-span-4 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-primary font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="text-primary font-mono">{invoiceToPrint.total.toLocaleString()} MT</span>
                                     </div>
                                     <div className="flex justify-between text-[10px] font-bold text-gray-700 bg-gray-50 p-1.5 rounded border border-gray-150 mt-2">
                                       <span>Forma de Pagamento:</span>
@@ -3783,7 +3224,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   <h2 className="text-xl font-black text-primary uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   
                                   <p className="text-gray-600 font-semibold text-[11px]">
-                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
+                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
                                   </p>
                                   
                                   <p className="text-gray-500 text-[10px]">
@@ -3796,7 +3237,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                     RECIBO
                                   </div>
                                   <p className="text-gray-700 font-bold font-mono text-sm pt-2">
-                                    Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}
+                                    Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-A4-') : `Rec-2026-${invoiceToPrint.invoiceNumber}`)}
                                   </p>
                                   <p className="text-gray-500 font-medium text-[10px]">
                                     Referente à Fatura Nº: <span className="font-bold font-mono text-gray-800">{invoiceToPrint.invoiceNumber}</span>
@@ -3850,12 +3291,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
+                                  <tr key={idx} className="hover:bg-gray-50">
                                     <td className="p-3 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-3 text-right font-mono">{item.quantity}</td>
                                     <td className="p-3 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
-                                    <td className="p-3 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
+                                    <td className="p-3 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString()}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -3867,20 +3308,20 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               <>
                                 <div className="flex justify-between items-center border-t border-gray-200 pt-6 mb-8">
                                   <div className="text-[11px] text-gray-500 italic max-w-lg leading-relaxed">
-                                    {settlementDisclaimer(invoiceToPrint)}
+                                    *Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.
                                   </div>
                                   <div className="w-64 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-primary font-mono text-base">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
+                                      <span className="text-primary font-mono text-base">{invoiceToPrint.total.toLocaleString()} MT</span>
                                     </div>
                                   </div>
                                 </div>
@@ -3890,7 +3331,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
+                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
                                   </p>
                                   <p className="text-[9px] text-gray-400">
                                     Email: {settings?.email || 'agroxicomo1@gmail.com'} • Tel: {[settings?.vodacom1, settings?.movitel1].filter(Boolean).join(' / ') || '+258 84 123 4567'}
@@ -3902,7 +3343,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </>
                             ) : (
                               <div className="border-t border-gray-200 pt-4 flex justify-between items-center text-[10px] text-gray-400 italic">
-                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</span>
+                                <span>Recibo Nº: {invoiceToPrint.receiptNumber || (invoiceToPrint.invoiceNumber.startsWith('Fact-') ? invoiceToPrint.invoiceNumber.replace('Fact-', 'Rec-') : invoiceToPrint.invoiceNumber.startsWith('FAC-') ? invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-A4-') : invoiceToPrint.invoiceNumber)}</span>
                                 <span className="font-semibold text-primary">Continua na página seguinte... (Pág {pageIdx + 1} de {chunks.length})</span>
                               </div>
                             )}
@@ -3921,7 +3362,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <img src={settings.logoUrl} alt="Logo" className="max-h-10 object-contain bg-white mx-auto mb-1 block" />
                     ) : null}
                     <h3 className="text-[11px] font-black uppercase tracking-wide">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h3>
-                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
+                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
                     <div className="text-[8px] text-gray-600 space-y-0.5">
                       {settings?.email && <p>Email: {settings.email}</p>}
                       <p>Vodacom: {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
@@ -3969,8 +3410,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <div key={idx} className="space-y-0.5">
                           <div className="font-bold text-gray-900 uppercase text-[8.5px] leading-tight">{item.name}</div>
                           <div className="flex justify-between text-[8px] text-gray-600 font-mono">
-                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
-                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                           </div>
                         </div>
                       ))}
@@ -3984,26 +3425,26 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <div className="space-y-1 text-[8.5px]">
                     <div className="flex justify-between">
                       <span>SUBTOTAL:</span>
-                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
                     
                     {invoiceToPrint.discount > 0 && (
                       <div className="flex justify-between text-red-600">
                         <span>DESCONTO:</span>
-                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
                     {invoiceToPrint.includeIva && (
                       <div className="flex justify-between text-gray-600 text-[8px]">
-                        <span>IVA (16%):</span>
-                        <span className="font-mono">{(invoiceToPrint.ivaAmount ?? ((invoiceToPrint.subtotal - invoiceToPrint.discount) * 0.16)).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span>IVA INCLUÍDO (16%):</span>
+                        <span className="font-mono">{(invoiceToPrint.ivaAmount || (invoiceToPrint.total * 0.16)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
                     <div className="flex justify-between font-black text-[11px] border-t border-dashed border-gray-400 pt-1.5 mt-1 text-black">
                       <span>TOTAL PAGO:</span>
-                      <span className="font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
 
                     <div className="flex justify-between text-[8px] text-gray-700 pt-0.5 border-t border-dotted border-gray-300 mt-1">
@@ -4015,11 +3456,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <div className="space-y-0.5 pt-0.5 font-mono text-[8px]">
                         <div className="flex justify-between text-gray-600">
                           <span>VALOR ENTREGUE:</span>
-                          <span>{Number(amountReceived).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                          <span>{Number(amountReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                         </div>
                         <div className="flex justify-between text-emerald-800 font-bold">
                           <span>TROCO:</span>
-                          <span>{(Number(amountReceived) - invoiceToPrint.total).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                          <span>{(Number(amountReceived) - invoiceToPrint.total).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                         </div>
                       </div>
                     )}
@@ -4054,7 +3495,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         ) : null}
                         <h4 className="font-black text-gray-800 text-sm">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h4>
                         <div className="text-[8px] text-gray-500 space-y-0.5">
-                          <p>Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
+                          <p>Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
                           {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                           <p><strong>Vodacom:</strong> {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
                           <p><strong>Movitel:</strong> {[settings?.movitel1, settings?.movitel2, settings?.movitel3].filter(Boolean).join(' / ') || '+258 86 123 4567'}</p>
@@ -4082,7 +3523,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                             <td className="p-1 font-semibold">{item.name}</td>
                             <td className="p-1 text-right font-mono">{item.quantity}</td>
                             <td className="p-1 text-gray-500">{item.unit}</td>
-                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
+                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -4093,7 +3534,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <span className="font-bold italic">"Esta fatura tem validade até à reposição de stock"</span>
                         <span className="mt-0.5">Forma de Pagamento: <strong className="uppercase text-emerald-700 font-black">{invoiceToPrint.paymentMethod || 'Dinheiro'}</strong></span>
                       </div>
-                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span></p>
+                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString()} MT</span></p>
                     </div>
                   </div>
 
@@ -4111,7 +3552,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         ) : null}
                         <h4 className="font-black text-gray-800 text-sm">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h4>
                         <div className="text-[8px] text-gray-500 space-y-0.5">
-                          <p>Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
+                          <p>Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
                           {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                           <p><strong>Vodacom:</strong> {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
                           <p><strong>Movitel:</strong> {[settings?.movitel1, settings?.movitel2, settings?.movitel3].filter(Boolean).join(' / ') || '+258 86 123 4567'}</p>
@@ -4139,7 +3580,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                             <td className="p-1 font-semibold">{item.name}</td>
                             <td className="p-1 text-right font-mono">{item.quantity}</td>
                             <td className="p-1 text-gray-500">{item.unit}</td>
-                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
+                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -4150,7 +3591,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <span className="font-bold italic">"Esta fatura tem validade até à reposição de stock"</span>
                         <span className="mt-0.5">Forma de Pagamento: <strong className="uppercase text-emerald-700 font-black">{invoiceToPrint.paymentMethod || 'Dinheiro'}</strong></span>
                       </div>
-                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span></p>
+                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString()} MT</span></p>
                     </div>
                   </div>
                 </div>
@@ -4229,7 +3670,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                     )
                     .map(p => (
                       <option key={p.id} value={p.id}>
-                        [{p.code}] {p.name} - {p.sellingPrice.toLocaleString('pt-MZ')} MT
+                        [{p.code}] {p.name} - {p.sellingPrice.toLocaleString()} MT
                       </option>
                     ))
                   }
@@ -4323,7 +3764,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, EI'}
               </h1>
               <div className="text-[11px] mt-1">
-                <p>NUIT: {companyNuit(settings?.companyNuit)}</p>
+                <p>NUIT: {settings?.companyNuit || '401976590'}</p>
                 <p>Cel: {settings?.vodacom1 || '845197072'}</p>
                 <p>Maputo, Moçambique</p>
               </div>
@@ -4332,7 +3773,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
             </div>
 
             <div className="text-[11px] space-y-1">
-              <p>Nº: {invoiceToPrint.receiptNumber || 'S/N (não liquidado)'}</p>
+              <p>Nº: {invoiceToPrint.receiptNumber || invoiceToPrint.invoiceNumber.replace('FAC-', 'REC-POS-').replace('Fact-', 'REC-POS-')}</p>
               <p>Data: {new Date(invoiceToPrint.date).toLocaleString('pt-MZ')}</p>
               <p>Cliente: {invoiceToPrint.customerName}</p>
             </div>
@@ -4353,7 +3794,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <tr key={idx} className="border-b border-gray-100 border-dotted">
                     <td className="py-1 leading-tight">{item.name}</td>
                     <td className="py-1 text-center whitespace-nowrap">{item.quantity} {item.unit}</td>
-                    <td className="py-1 text-right whitespace-nowrap">{item.totalPrice.toLocaleString('pt-MZ')}</td>
+                    <td className="py-1 text-right whitespace-nowrap">{item.totalPrice.toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -4365,15 +3806,15 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
             <div className="text-[13px] space-y-1">
               <div className="flex justify-between w-full">
                 <span className="font-bold">Subtotal:</span>
-                <span className="text-right">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
+                <span className="text-right">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
               </div>
               <div className="flex justify-between w-full">
                 <span className="font-bold">Desconto:</span>
-                <span className="text-right">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
+                <span className="text-right">-{invoiceToPrint.discount.toLocaleString()} MT</span>
               </div>
               <div className="flex justify-between w-full font-bold text-[16px] border-t border-dashed border-black pt-2">
                 <span>TOTAL:</span>
-                <span className="text-right">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
+                <span className="text-right">{invoiceToPrint.total.toLocaleString()} MT</span>
               </div>
             </div>
 
@@ -4570,18 +4011,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       </thead>
                       <tbody className="divide-y divide-gray-100 bg-white text-gray-700">
                         {pausedSales.map((ps) => {
-                          const subTotal = ps.items.reduce((acc, item) => acc + (item.unitPrice * item.quantity), 0);
-                          const getItemDisc = (item: SaleItem) => {
-                            if (!item.discountValue || item.discountValue <= 0) return 0;
-                            if (item.discountType === 'per_unit') return item.discountValue * item.quantity;
-                            if (item.discountType === 'percent_unit') return ((item.unitPrice * item.discountValue) / 100) * item.quantity;
-                            if (item.discountType === 'percent_total') return ((item.unitPrice * item.quantity) * item.discountValue) / 100;
-                            return item.discountValue;
-                          };
-                          const itemDiscounts = ps.items.reduce((acc, item) => acc + getItemDisc(item), 0);
-                          const disc = itemDiscounts + ps.customSubtotalDiscount;
-                          const base = Math.max(0, subTotal - disc);
-                          const total = ps.includeIva ? Math.round(base * 1.16 * 100) / 100 : base;
+                          const total = getSaleTotals(ps.items, ps.customSubtotalDiscount, ps.includeIva).total;
 
                           return (
                             <tr key={ps.id} className="hover:bg-amber-50/70 hover:shadow-md transition-all border-b border-gray-100">
@@ -4601,7 +4031,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                 </div>
                               </td>
                               <td className="p-3 text-right font-black font-mono text-emerald-700 whitespace-nowrap">
-                                {total.toLocaleString('pt-MZ')} MT
+                                {total.toLocaleString()} MT
                               </td>
                               <td className="p-3">
                                 <div className="flex items-center justify-center gap-2">
@@ -4658,7 +4088,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 <button
                   type="button"
                   onClick={() => setShowRetroactiveModal(false)}
-                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer border border-white/10"
+                  disabled={isFinalizingRetroactive}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer border border-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-[18px]">close</span>
                   <span className="hidden sm:inline">Fechar (Sair)</span>
@@ -4668,8 +4099,25 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
             {/* Fullscreen Body Content */}
             <div className="p-3 sm:p-5 overflow-y-auto custom-scrollbar flex-1">
+
+              {(retroactiveError || retroactiveSlow) && (
+                <div className={`mb-4 rounded-2xl border-2 p-3.5 flex items-start gap-3 shadow-sm ${retroactiveError ? 'bg-red-50 border-red-300 text-red-800' : 'bg-amber-50 border-amber-300 text-amber-900'}`}>
+                  <span className="material-symbols-outlined text-[22px] shrink-0 mt-0.5">{retroactiveError ? 'error' : 'hourglass_top'}</span>
+                  <div className="flex-1">
+                    <p className="text-xs font-black uppercase tracking-wider">{retroactiveError ? 'Não foi possível concluir' : 'A gravação está a demorar…'}</p>
+                    <p className="text-xs leading-relaxed mt-0.5">
+                      {retroactiveError || 'A ligação pode estar lenta ou instável. Não feche esta janela: a gravação continua em curso e o resultado será apresentado assim que o servidor responder.'}
+                    </p>
+                  </div>
+                  {retroactiveError && (
+                    <button type="button" onClick={() => setRetroactiveError('')} className="opacity-60 hover:opacity-100 cursor-pointer">
+                      <span className="material-symbols-outlined text-[18px]">close</span>
+                    </button>
+                  )}
+                </div>
+              )}
               
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              <div className={`grid grid-cols-1 lg:grid-cols-12 gap-4 items-start ${isFinalizingRetroactive ? 'pointer-events-none opacity-60' : ''}`}>
                 
                 {/* 1. INFORMAÇÕES PRINCIPAIS DA VENDA (Width: 3/12 - Reduced) */}
                 <div className="lg:col-span-3 space-y-4 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-2xs">
@@ -4911,11 +4359,13 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         p.code.toLowerCase().includes(retroactiveProductQuery.toLowerCase()) ||
                         (p.category && p.category.toLowerCase().includes(retroactiveProductQuery.toLowerCase()))
                       )
-                      .map(p => (
+                      .map(p => {
+                        const hybrid = isHybridProduct(p);
+                        return (
                         <div
                           key={p.id}
-                          onClick={() => addProductToRetroactiveCart(p)}
-                          className="p-2.5 hover:bg-indigo-50/80 transition-colors flex items-center justify-between cursor-pointer group"
+                          onClick={() => { if (!hybrid) addProductToRetroactiveCart(p, 'Retail'); }}
+                          className={`p-2.5 hover:bg-indigo-50/80 transition-colors flex items-center justify-between group ${hybrid ? '' : 'cursor-pointer'}`}
                         >
                           <div className="space-y-0.5">
                             <p className="font-bold text-[11px] text-gray-900 group-hover:text-indigo-700 transition-colors">
@@ -4924,17 +4374,38 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                             <p className="text-[9.5px] text-gray-500 font-mono">
                               Cód: <span className="font-semibold text-gray-700">{p.code}</span> • <span className="font-medium text-gray-600">{p.category || 'Geral'}</span>
                             </p>
+                            {hybrid && (
+                              <div className="flex gap-1 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); addProductToRetroactiveCart(p, 'Bulk'); }}
+                                  className="px-2 py-0.5 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 rounded-lg text-[9px] font-black uppercase cursor-pointer"
+                                  title={`Vender em ${p.parentUnit || 'Sacos'} (${getBulkSellingPrice(p).toLocaleString('pt-PT')} MT)`}
+                                >
+                                  + {p.parentUnit || 'Saco'} · {getBulkSellingPrice(p).toLocaleString('pt-PT')} MT
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); addProductToRetroactiveCart(p, 'Retail'); }}
+                                  className="px-2 py-0.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-900 border border-indigo-300 rounded-lg text-[9px] font-black uppercase cursor-pointer"
+                                  title={`Vender em ${p.baseUnit} (${p.sellingPrice.toLocaleString('pt-PT')} MT)`}
+                                >
+                                  + {p.baseUnit} · {p.sellingPrice.toLocaleString('pt-PT')} MT
+                                </button>
+                              </div>
+                            )}
                           </div>
                           <div className="text-right shrink-0 ml-3">
                             <p className="font-black text-[11px] text-indigo-700 font-mono">
-                              {p.sellingPrice.toLocaleString('pt-MZ')} MT
+                              {p.sellingPrice.toLocaleString('pt-PT')} MT
                             </p>
                             <p className={`text-[9px] font-bold ${p.stockQty > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
                               {p.isService ? 'Serviço' : `${p.stockQty} stock`}
                             </p>
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                   </div>
 
                   <p className="text-[10px] text-gray-500 flex items-center justify-center gap-1 py-0.5 text-center font-medium">
@@ -4979,24 +4450,55 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           <th className="p-2.5">Artigo</th>
                           <th className="p-2.5 text-center">Preço Un.</th>
                           <th className="p-2.5 text-center">Qtd</th>
-                          <th className="p-2.5 text-right">Subtotal</th>
+                          <th className="p-2.5 text-right">Total líquido</th>
                           <th className="p-2.5 text-center">Ação</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-gray-800">
                         {retroactiveCart.map(item => (
-                          <tr key={item.productId} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="p-2.5">
+                          <tr key={`${item.productId}-${item.sellingUnit || 'Retail'}`} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="p-2.5 min-w-[195px]">
                               <p className="font-bold text-gray-900">{item.name}</p>
+                              <p className="text-[9px] font-black uppercase text-gray-500">
+                                {item.sellingUnit === 'Bulk' ? `Grosso • ${item.unit}` : `Retalho • ${item.unit}`}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-1 mt-2 text-[10px]">
+                                <label className="font-bold text-gray-500">Desconto:</label>
+                                <select
+                                  value={item.discountType || 'line_total'}
+                                  onChange={(e) => updateRetroactiveCartDiscount(item.productId, e.target.value as ItemDiscountType, item.discountValue || 0, item.sellingUnit || 'Retail')}
+                                  aria-label={`Tipo de desconto: ${item.name} (${item.unit})`}
+                                  className="border border-gray-200 rounded px-1 py-1 bg-slate-50 text-gray-700 focus:outline-none focus:border-indigo-600"
+                                >
+                                  <option value="line_total">Total fixo (MT)</option>
+                                  <option value="per_unit">Unitário fixo (MT)</option>
+                                  <option value="percent_total">Total percentual (%)</option>
+                                  <option value="percent_unit">Unitário percentual (%)</option>
+                                </select>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max={getMaxItemDiscountValue(item, item.discountType || 'line_total')}
+                                  step="any"
+                                  value={item.discountValue || ''}
+                                  onChange={(e) => updateRetroactiveCartDiscount(item.productId, item.discountType || 'line_total', Number(e.target.value), item.sellingUnit || 'Retail')}
+                                  aria-label={`Valor do desconto: ${item.name} (${item.unit})`}
+                                  placeholder="0"
+                                  className="w-16 border border-gray-200 rounded px-1 py-1 text-right font-bold font-mono focus:outline-none focus:border-indigo-600"
+                                />
+                                <span className="font-bold text-gray-500">
+                                  {item.discountType === 'percent_total' || item.discountType === 'percent_unit' ? '%' : 'MT'}
+                                </span>
+                              </div>
                             </td>
                             <td className="p-2.5 text-center font-mono font-semibold text-[10px]">
-                              {item.unitPrice.toLocaleString('pt-MZ')} MT
+                              {item.unitPrice.toLocaleString('pt-PT')} MT
                             </td>
                             <td className="p-2.5 text-center">
                               <div className="inline-flex items-center border border-gray-300 rounded-lg overflow-hidden bg-slate-50 shadow-2xs">
                                 <button
                                   type="button"
-                                  onClick={() => updateRetroactiveCartQty(item.productId, -1)}
+                                  onClick={() => updateRetroactiveCartQty(item.productId, -1, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                   className="px-2 py-0.5 text-gray-700 hover:bg-gray-200 font-black text-xs cursor-pointer transition-colors"
                                 >
                                   -
@@ -5006,20 +4508,25 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                 </span>
                                 <button
                                   type="button"
-                                  onClick={() => updateRetroactiveCartQty(item.productId, 1)}
+                                  onClick={() => updateRetroactiveCartQty(item.productId, 1, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                   className="px-2 py-0.5 text-gray-700 hover:bg-gray-200 font-black text-xs cursor-pointer transition-colors"
                                 >
                                   +
                                 </button>
                               </div>
                             </td>
-                            <td className="p-2.5 text-right font-black font-mono text-indigo-700 text-[11px]">
-                              {(item.unitPrice * item.quantity).toLocaleString('pt-MZ')} MT
+                            <td className="p-2.5 text-right font-black font-mono text-indigo-700 text-[11px] whitespace-nowrap">
+                              {((item.unitPrice * item.quantity) - getItemDiscount(item)).toLocaleString('pt-PT')} MT
+                              {getItemDiscount(item) > 0 && (
+                                <span className="block text-[9px] text-rose-600 font-semibold">
+                                  Desc. -{getItemDiscount(item).toLocaleString('pt-PT')} MT
+                                </span>
+                              )}
                             </td>
                             <td className="p-2.5 text-center">
                               <button
                                 type="button"
-                                onClick={() => removeRetroactiveCartItem(item.productId)}
+                                onClick={() => removeRetroactiveCartItem(item.productId, item.sellingUnit === 'Bulk' ? 'Bulk' : 'Retail')}
                                 className="p-1 text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                                 title="Remover item"
                               >
@@ -5044,31 +4551,47 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 <button
                   type="button"
                   onClick={() => setShowRetroactiveModal(false)}
-                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer"
+                  disabled={isFinalizingRetroactive}
+                  className="px-5 py-3 border border-gray-300 text-gray-700 font-bold text-xs sm:text-sm rounded-xl hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancelar
                 </button>
 
-                <div className="text-right sm:text-left">
+                <div className="text-right sm:text-left" aria-live="polite">
+                  <p className="text-[10px] text-gray-500 font-bold">
+                    Subtotal: {retroactiveTotals.subtotal.toLocaleString('pt-PT')} MT
+                  </p>
+                  <p className="text-[10px] text-rose-600 font-bold">
+                    Desconto: -{retroactiveTotals.discount.toLocaleString('pt-PT')} MT
+                  </p>
                   <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Total Final da Venda</p>
                   <p className="text-lg sm:text-2xl font-black font-mono text-indigo-900">
-                    {getRetroactiveCartTotal().toLocaleString('pt-MZ')} MT
+                    {retroactiveTotals.total.toLocaleString('pt-PT')} MT
                   </p>
                 </div>
               </div>
 
               <button
                 type="button"
-                disabled={retroactiveCart.length === 0}
+                disabled={retroactiveCart.length === 0 || isFinalizingRetroactive}
                 onClick={handleFinalizeRetroactiveSale}
                 className={`w-full sm:w-auto px-8 py-3.5 text-xs sm:text-sm uppercase font-black tracking-wider rounded-2xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                  retroactiveCart.length === 0
+                  retroactiveCart.length === 0 || isFinalizingRetroactive
                     ? 'bg-indigo-200 text-indigo-400 cursor-not-allowed shadow-none'
                     : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-300 hover:shadow-indigo-400'
                 }`}
               >
-                <span className="material-symbols-outlined text-[20px]">check_circle</span>
-                Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-MZ')} MT)
+                {isFinalizingRetroactive ? (
+                  <>
+                    <span className="material-symbols-outlined text-[20px] animate-spin">progress_activity</span>
+                    A gravar...
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-[20px]">check_circle</span>
+                    Finalizar Registo Retroativo ({retroactiveTotals.total.toLocaleString('pt-PT')} MT)
+                  </>
+                )}
               </button>
             </div>
 
@@ -5156,6 +4679,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 type="button"
                 onClick={() => {
                   setRetroactiveCompletedSale(null);
+                  setRetroactiveError('');
+                  setRetroactiveSlow(false);
                   setShowRetroactiveModal(true);
                 }}
                 className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs rounded-xl transition-all shadow-md flex items-center gap-1.5 cursor-pointer"

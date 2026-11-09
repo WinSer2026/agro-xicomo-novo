@@ -1,53 +1,16 @@
 import { safeStorage, safeSessionStorage } from "./safeStorage";
+import { uid } from './idHelper';
 import { dbService } from './firebaseDB';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { STOCK_LIST_QUANTITIES, STOCK_LIST_VERSION } from '../data/stockListUpdate';
 import { Product, SystemSettings } from '../types';
 
 export const runStockMigration = async () => {
-  if (safeStorage.getItem('agro_stock_migrated_v1') === 'true') {
-    return;
-  }
-  
-  try {
-    const existingProducts = await dbService.getProducts();
-    const toUpdate = [];
-    
-    for (const ep of existingProducts) {
-      const initial = INITIAL_PRODUCTS.find(p => p.code === ep.code);
-      if (initial) {
-        let needsUpdate = false;
-        const up = { ...ep };
-        if (ep.stockQty !== initial.stockQty) {
-          up.stockQty = initial.stockQty;
-          needsUpdate = true;
-        }
-        if (initial.stockQtyBulk !== undefined && ep.stockQtyBulk !== initial.stockQtyBulk) {
-          up.stockQtyBulk = initial.stockQtyBulk;
-          needsUpdate = true;
-        }
-        if (initial.stockQtyRetail !== undefined && ep.stockQtyRetail !== initial.stockQtyRetail) {
-          up.stockQtyRetail = initial.stockQtyRetail;
-          needsUpdate = true;
-        }
-        
-        if (needsUpdate) {
-          toUpdate.push(up);
-        }
-      }
-    }
-    
-    if (toUpdate.length > 0) {
-      console.log(`[Migration] Updating ${toUpdate.length} products stock to match initial PDF data`);
-      await dbService.saveProducts(toUpdate);
-    }
-    
-    safeStorage.setItem('agro_stock_migrated_v1', 'true');
-    console.log('[Migration] Stock migration completed');
-  } catch (err) {
-    console.error('[Migration] Failed to migrate stock', err);
-  }
-}
+  // Desativado definitivamente: esta migração histórica só devia correr uma vez no lançamento.
+  // Executá-la no arranque dos navegadores provocava a reposição forçada das quantidades
+  // do anexo inicial e reescrita de preços por cima das alterações do gestor.
+  return;
+};
 
 /**
  * Migração do modelo de preços para produtos vendidos em SACO e em QUILO.
@@ -116,7 +79,7 @@ export const runStockListUpdate = async () => {
     await dbService.saveSettings({ ...settings, stockListVersion: STOCK_LIST_VERSION } as SystemSettings);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Sistema (Contagem Física)',
       ipAddress: '127.0.0.1',
@@ -173,44 +136,7 @@ export function deriveHybridSackCost(p: {
 }
 
 export const runHybridPriceMigration = async () => {
-  if (safeStorage.getItem('agro_hybrid_price_migrated_v1') === 'true') {
-    return;
-  }
-
-  try {
-    const products = await dbService.getProducts();
-    const toUpdate: Product[] = [];
-
-    for (const p of products) {
-      const rate = Number(p.conversionRate) || 0;
-      // Aplica-se somente aos produtos híbridos (saco + quilo/unidade)
-      if (!(p.parentUnit && rate > 1)) continue;
-
-      const sackCost = deriveHybridSackCost(p);
-      if (sackCost === null || sackCost <= 0) continue;
-
-      const updated: Product = {
-        ...p,
-        buyingPriceBulk: round2(sackCost),
-        buyingPrice: round2(sackCost / rate)
-      };
-
-      if (
-        updated.buyingPrice !== p.buyingPrice ||
-        updated.buyingPriceBulk !== p.buyingPriceBulk
-      ) {
-        toUpdate.push(updated);
-      }
-    }
-
-    if (toUpdate.length > 0) {
-      console.log(`[Migration] Hybrid sack/kg price model applied to ${toUpdate.length} product(s)`);
-      await dbService.saveProducts(toUpdate);
-    }
-
-    safeStorage.setItem('agro_hybrid_price_migrated_v1', 'true');
-    console.log('[Migration] Hybrid price migration completed');
-  } catch (err) {
-    console.error('[Migration] Failed to migrate hybrid prices', err);
-  }
-}
+  // Desativado definitivamente: recalcular preços em massa no arranque dos clientes
+  // sobrescrevia alterações manuais feitas pelo gestor de stock.
+  return;
+};

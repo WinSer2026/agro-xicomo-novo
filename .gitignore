@@ -8,3 +8,6 @@ coverage/
 !.env.example
 .vercel
 /data/
+
+# Ficheiros gerados pelos testes / relatórios
+*.pdf

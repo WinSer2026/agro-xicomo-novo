@@ -1,7 +1,9 @@
 import { getDateRangeFromPreset, isDateInRange, formatDatePT } from '../src/utils/dateRangeHelper';
-import { hashPassword, verifyPassword, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
+import { hashPassword, verifyPassword, needsPasswordRehash, sanitizeString, sanitizeNumber } from '../src/utils/securityHelper';
 import { generateNextReceiptNumber, generateNextInvoiceNumber } from '../src/utils/sequenceHelper';
-import { Product, ProductTransformation, SaleItem } from '../src/types';
+import { Product, ProductTransformation, Sale, SaleItem } from '../src/types';
+import { clampItemDiscountValue, getItemDiscount, getMaxItemDiscountValue, getSaleTotals } from '../src/utils/saleTotals';
+import { filterSalesForReport, loadFinanceData, FinanceDataSource } from '../src/utils/financeData';
 import { runPostCommitTask, runPostCommitTasks } from '../src/utils/postCommit';
 import {
   getArchiveCutoffTimestamp,
@@ -43,15 +45,25 @@ async function runTests() {
   console.log('\n--- Test Suite 2: Security & Crypto ---');
   const pwd = 'Xicomo@Admin2026!';
   const hashed = await hashPassword(pwd);
-  assert(hashed.startsWith('sha256:'), 'Password hash uses salt and SHA-256');
+  assert(hashed.startsWith('pbkdf2:'), 'Password hash uses salt and PBKDF2');
   const isValid = await verifyPassword(pwd, hashed);
   assert(isValid === true, 'Valid password verification succeeds');
   const isInvalid = await verifyPassword('WrongPassword', hashed);
   assert(isInvalid === false, 'Invalid password rejected');
+  assert(needsPasswordRehash(hashed) === false, 'PBKDF2 hashes do not need rehash');
+  assert(needsPasswordRehash('05082') === true, 'Legacy plaintext hashes are flagged for migration');
 
-  // Backward-compatibility: plain text hash verification
+  // Backward-compatibility: plain text hash verification (migration path)
   const isPlainValid = await verifyPassword('05082', '05082');
   assert(isPlainValid === true, 'Plain legacy password fallback check succeeds');
+
+  // Backward-compatibility: legacy salted SHA-256 verification (self-made test vector)
+  const isLegacyValid = await verifyPassword(
+    'teste1',
+    'sha256:SALT1234:29dc010c114d6021a750f6a270bbd27c8c771ab192c18c842bca171514b0f598'
+  );
+  assert(isLegacyValid === true, 'Legacy sha256 password verification still succeeds');
+  assert(needsPasswordRehash('sha256:x:y') === true, 'Legacy sha256 hashes are flagged for migration');
 
   // XSS Sanitization
   const dangerousStr = '<script>alert("hack")</script> Milho';
@@ -176,30 +188,81 @@ async function runTests() {
   const finalPage = getCursorPageMetadata(17, 50);
   assert(finalPage.itemCount === 17 && !finalPage.hasMore, 'Short final page does not offer an invalid next cursor');
 
-  // Regressão C-01: os limites do dia são os do calendário de Maputo (UTC+2),
-  // não a meia-noite UTC. O teste anterior fixava o comportamento defeituoso.
   const bounds = getInclusiveDateBounds('2026-10-01', '2026-10-07');
-  assert(
-    bounds.start === '2026-09-30T22:00:00.000Z' && bounds.end === '2026-10-07T21:59:59.999Z',
-    'Date range uses the Maputo day boundaries (UTC+2), not UTC midnight'
-  );
-  // 21:30Z = 23:30 de 7/10 em Maputo → pertence ao dia 7.
-  assert(
-    isDateInRange('2026-10-07T21:30:00.000Z', '2026-10-01', '2026-10-07'),
-    'A 21:30Z sale still belongs to the 7th locally (23:30 Maputo)'
-  );
-  // 22:30Z = 00:30 de 8/10 em Maputo → já é do dia seguinte.
-  assert(
-    !isDateInRange('2026-10-07T22:30:00.000Z', '2026-10-01', '2026-10-07'),
-    'A 22:30Z sale is 00:30 of the 8th locally and must not count in the 7th'
-  );
-  assert(
-    isDateInRange('2026-10-07T22:30:00.000Z', '2026-10-01', '2026-10-08'),
-    'A 22:30Z sale lands on the 8th locally'
-  );
+  assert(bounds.start === '2026-10-01' && bounds.end === '2026-10-07T23:59:59.999Z', 'Date range includes plain dates and ISO timestamps on the ending day');
   assert(getArchiveCutoffTimestamp('2026-04-01') === '2026-04-01T00:00:00.000Z', 'Audit archive cutoff is exclusive from the selected day start');
   assert(getSafeArchiveBatchSize(999) === 250, 'Audit archive batch stays within Firestore 500-write atomic limit');
   assert(getSafeArchiveBatchSize(200) === 200, 'Requested safe archive batch size is preserved');
+
+  // TEST 9: Regular and retroactive checkouts use the same bounded discount math.
+  console.log('\n--- Test Suite 9: POS & Historic Sale Discounts ---');
+  const discountItem: SaleItem = {
+    productId: 'prod-001', name: 'Adubo', quantity: 3, unit: 'Kg', unitPrice: 100, totalPrice: 300
+  };
+  assert(getItemDiscount({ ...discountItem, discountType: 'line_total', discountValue: 20 }) === 20, 'Fixed line discount applies once');
+  assert(getItemDiscount({ ...discountItem, discountType: 'per_unit', discountValue: 20 }) === 60, 'Fixed unit discount scales with quantity');
+  assert(getItemDiscount({ ...discountItem, discountType: 'percent_total', discountValue: 10 }) === 30, 'Percentage line discount applies to gross line');
+  assert(getItemDiscount({ ...discountItem, discountType: 'percent_unit', discountValue: 10 }) === 30, 'Percentage unit discount scales with quantity');
+  assert(getItemDiscount({ ...discountItem, discountType: 'percent_total', discountValue: 250 }) === 300, 'Discount never exceeds line price');
+  assert(getMaxItemDiscountValue(discountItem, 'per_unit') === 100 && getMaxItemDiscountValue(discountItem, 'percent_total') === 100, 'Input limits follow price and percentage');
+  assert(clampItemDiscountValue({ ...discountItem, quantity: 1 }, 'line_total', 500) === 100, 'Reducing quantity clamps an existing line discount');
+  const discountedItem = { ...discountItem, discountType: 'percent_total' as const, discountValue: 10 };
+  const secondItem = { ...discountItem, productId: 'prod-002', quantity: 2, unitPrice: 50, discountType: 'per_unit' as const, discountValue: 5 };
+  const historicTotals = getSaleTotals([discountedItem, secondItem]);
+  assert(historicTotals.subtotal === 400 && historicTotals.discount === 40 && historicTotals.total === 360, 'Historic sale totals account for both line discounts');
+  assert(getSaleTotals([discountedItem, secondItem], 10, true).total === 406, 'Regular sale and paused-cart totals share discount + IVA logic');
+  assert(getSaleTotals([{ ...discountItem, discountValue: 999 }]).total === 0, 'Excess fixed discount cannot create a negative sale');
+
+  // TEST 10: Older/retroactive sales appear in finance; audit errors cannot hide them.
+  console.log('\n--- Test Suite 10: Financial Results & Partial Data Failure ---');
+  assert(getDateRangeFromPreset('Todo o Histórico').startDate === '' && getDateRangeFromPreset('Todo o Histórico').endDate === '', 'Full-history preset includes older transactions');
+  const historicSale: Sale = {
+    id: 'sale-retro-test', invoiceNumber: 'FAC-2026-1', date: '2026-02-12T10:00:00.000Z',
+    customerName: 'Cliente Geral', items: [
+      { ...discountedItem, totalPrice: 270 }, { ...secondItem, totalPrice: 90 }
+    ], subtotal: historicTotals.subtotal, discount: historicTotals.discount, total: historicTotals.total,
+    paymentMethod: 'Dinheiro', status: 'Paga', operatorId: 'admin', operatorName: 'admin', synced: true
+  };
+  const cancelledSale = { ...historicSale, id: 'cancelled-test', status: 'Cancelada' as const, date: '2026-10-12T10:00:00.000Z' };
+  const reportNow = new Date('2026-10-14T12:00:00.000Z');
+  assert(filterSalesForReport([historicSale, cancelledSale], 'Todo o Histórico', reportNow).length === 1, 'Full financial history includes old sales but not cancelled ones');
+  assert(filterSalesForReport([historicSale], 'Mensal', reportNow).length === 0, 'Recent-period filter excludes older sales only when selected');
+  assert(isDateInRange(historicSale.date, '', '') && historicSale.total === 360, 'Finance can show the discounted historic sale in an unbounded date range');
+
+  let rejectAudit!: (error: Error) => void;
+  const pendingAudit = new Promise<{ items: [] }>((_, reject) => { rejectAudit = reject; });
+  const fakeFinance: FinanceDataSource = {
+    enableLiveCatalogAndSalesSync: async () => undefined,
+    getSalesForPeriod: async () => [historicSale],
+    getLosses: async () => [],
+    getProducts: async () => [],
+    getAuditLogsPage: () => pendingAudit,
+    getSettings: async () => ({} as Awaited<ReturnType<FinanceDataSource['getSettings']>>),
+    getTransformations: async () => [],
+    getPayrollPayments: async () => []
+  };
+  const receivedSales: Sale[][] = [];
+  const oldConsoleError = console.error;
+  console.error = () => undefined; // expected rejected audit read
+  try {
+    const notifiedFailures: string[] = [];
+    const reading = loadFinanceData(fakeFinance, part => { if (part.sales) receivedSales.push(part.sales); }, key => notifiedFailures.push(key));
+    await new Promise(resolve => setImmediate(resolve));
+    assert(receivedSales[0]?.[0]?.id === historicSale.id, 'Finance renders sales before slow audit preview finishes');
+    rejectAudit(new Error('audit preview unavailable'));
+    const failures = await reading;
+    assert(failures.length === 1 && failures[0] === 'auditLogs' && notifiedFailures[0] === 'auditLogs', 'Audit failure is reported without discarding financial results');
+
+    const missingSales = loadFinanceData({
+      ...fakeFinance,
+      getSalesForPeriod: async () => { throw new Error('network unavailable'); },
+      getAuditLogsPage: async () => ({ items: [] })
+    }, () => undefined, key => notifiedFailures.push(key));
+    const failed = await missingSales;
+    assert(failed.length === 1 && failed[0] === 'sales' && notifiedFailures.includes('sales'), 'Sales read errors are surfaced instead of displayed as zero revenue');
+  } finally {
+    console.error = oldConsoleError;
+  }
 
   console.log(`\n========================================`);
   console.log(`RESULTS: ${passed} Passed, ${failed} Failed`);

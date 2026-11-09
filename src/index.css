@@ -31,14 +31,8 @@
 
 /* Print specific optimizations */
 @media print {
-  /* A caixa de página por omissão é A4: uma fatura A4 impressa com Ctrl+P tem
-     de sair inteira. O talão térmico usa uma página nomeada de 80 mm. */
   @page {
-    size: A4 portrait;
-    margin: 10mm;
-  }
-  @page thermal {
-    size: 80mm auto;
+    size: 80mm auto; /* This forces the height to be dynamic based on content */
     margin: 0;
   }
   body {
@@ -50,19 +44,8 @@
   body * {
     visibility: hidden;
   }
-  /* Lista única de documentos imprimíveis. Usa ids (documentos actuais) e a
-     classe `.print-doc` (documentos futuros, sem obrigar a editar o CSS). */
-  #a4_invoice, #a4_invoice *,
-  #thermal_receipt, #thermal_receipt *,
-  #double_a5, #double_a5 *,
-  #double_a5_invoice, #double_a5_invoice *,
-  #a4_receipt, #a4_receipt *,
-  #thermal_receipt_80, #thermal_receipt_80 *,
-  .print-doc, .print-doc * {
+  #a4_invoice, #a4_invoice *, #thermal_receipt, #thermal_receipt *, #double_a5, #double_a5 *, #a4_receipt, #a4_receipt *, #thermal_receipt_80, #thermal_receipt_80 * {
     visibility: visible;
-  }
-  #thermal_receipt, #thermal_receipt_80 {
-    page: thermal;
   }
   #a4_invoice, #double_a5, #a4_receipt {
     position: relative !important;

@@ -361,6 +361,10 @@ export interface ActiveSession {
   roles?: AppRole[];
   loginTime: string;
   ipAddress: string;
+  /** Identificador do computador/posto (para encerrar sessões antigas). */
+  deviceId?: string;
+  /** Último sinal de vida — usado no bloqueio automático por inactividade. */
+  lastHeartbeat?: string;
 }
 
 export interface PaymentInfo {
@@ -400,6 +404,10 @@ export interface SystemSettings {
   companyNuit?: string;
   companyAddress?: string;
   criticalStockLevel?: number;
+  /** Minutos de inactividade até o ecrã bloquear (0 = desligado). */
+  sessionLockMinutes?: number;
+  /** Aviso mostrado ao arrancar (ex.: dia de inventário). */
+  bootstrapNotice?: string;
   printerA4?: string;
   printerThermal?: string;
   theme?: 'light' | 'dark';

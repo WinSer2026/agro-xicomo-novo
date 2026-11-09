@@ -10,7 +10,8 @@ export type DateRangePreset =
   | 'Semana Passada' 
   | 'Este Mês' 
   | 'Mês Passado' 
-  | 'Este Ano' 
+  | 'Este Ano'
+  | 'Todo o Histórico'
   | 'Personalizado';
 
 export interface DateRange {
@@ -50,6 +51,9 @@ export function getDateRangeFromPreset(preset: DateRangePreset): { startDate: st
   const todayStr = formatDateToISO(now);
 
   switch (preset) {
+    case 'Todo o Histórico':
+      return { startDate: '', endDate: '' };
+
     case 'Hoje':
       return { startDate: todayStr, endDate: todayStr };
 
@@ -102,6 +106,7 @@ export function getDateRangeFromPreset(preset: DateRangePreset): { startDate: st
   }
 }
 
+
 /**
  * Fuso horário operacional da empresa. Maputo é UTC+2 durante todo o ano
  * (Moçambique não aplica horário de verão), pelo que o desvio é constante.
@@ -149,7 +154,7 @@ export function localDayEndUtcIso(dateKey: string): string {
 }
 
 /**
- * Check if a date string falls inside the [startDate, endDate] range inclusive.
+ * Check if a date string falls inside the [startDate, endDate] range inclusive. the [startDate, endDate] range inclusive.
  * Handles ISO strings ("2026-09-27T10:30:00Z"), standard date strings ("2026-09-27"), and Timestamps.
  */
 export function isDateInRange(
@@ -162,7 +167,8 @@ export function isDateInRange(
   if (!targetDateStr && !knownDateKey) return false;
   if (!startDate && !endDate) return true;
 
-  // O dia de calendário é o dia LOCAL, nunca o prefixo da string UTC.
+  // O dia de calendário é o dia LOCAL, nunca o prefixo da string UTC:
+  // uma venda às 00:30 em Maputo está gravada como 22:30Z do dia anterior.
   const targetClean = knownDateKey || toLocalDateKey(targetDateStr);
   if (!targetClean) return false;
 

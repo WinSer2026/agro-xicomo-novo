@@ -327,7 +327,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             }
           }
 
-          issuedNumber = await dbService.nextDocumentNumber('FaturaDefinitiva', new Date().getFullYear(), 0);
+          issuedNumber = await dbService.nextDocumentNumberByKind('FaturaDefinitiva', new Date().getFullYear(), 0);
 
           const invoice: Sale = {
             ...sale,
@@ -518,7 +518,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         // (FT-31).
         const isDefinitiveInvoice = !sale.documentType || sale.documentType === 'FaturaDefinitiva';
         const creditNoteNumber = isDefinitiveInvoice
-          ? await dbService.nextDocumentNumber('NotaCredito', new Date().getFullYear(), 0)
+          ? await dbService.nextDocumentNumberByKind('NotaCredito', new Date().getFullYear(), 0)
           : undefined;
 
         const cancellationMeta: Partial<Sale> = {
@@ -685,7 +685,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         // para efeitos fiscais. Reemitir cria uma factura NOVA, com número
         // novo, e deixa o cancelamento e a nota de crédito intactos no
         // histórico (corrige FT-33, FT-35 e evita "ressuscitar" papel).
-        const newInvoiceNumber = await dbService.nextDocumentNumber(
+        const newInvoiceNumber = await dbService.nextDocumentNumberByKind(
           'FaturaDefinitiva',
           new Date().getFullYear(),
           0

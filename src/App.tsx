@@ -1,11 +1,11 @@
 import { safeStorage, safeSessionStorage } from "./utils/safeStorage";
+import { uid } from './utils/idHelper';
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { dbService } from './utils/firebaseDB';
 import { runStockMigration, runHybridPriceMigration, runStockListUpdate } from './utils/migrateStock';
 import { runCredentialsReset } from './utils/credentialsReset';
 import LoginPanel from './components/LoginPanel';
-import { DialogHost } from './components/DialogHost';
 import { InlineHeaderSearch } from './components/InlineHeaderSearch';
 import { verifyPassword } from './utils/securityHelper';
 import './index.css';
@@ -19,7 +19,7 @@ const TechnicalModule = lazy(() => import('./components/TechnicalModule'));
 import { SystemSettings, AppRole } from './types';
 import { getUserRoles } from './utils/roleHelper';
 
-type ERPModule = 'vendas' | 'faturas' | 'stock' | 'rh' | 'financas' | 'tecnico';
+type ERPModule = 'vendas' | 'faturas' | 'stock' | 'armazem' | 'rh' | 'financas' | 'tecnico';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<{ username: string; role: string; roles?: AppRole[] } | null>(null);
@@ -52,6 +52,7 @@ export default function App() {
     if (mod === 'vendas') return roles.includes('Operador');
     if (mod === 'faturas') return roles.includes('Operador') || roles.includes('Gestor de Stock');
     if (mod === 'stock') return roles.includes('Gestor de Stock');
+    if (mod === 'armazem') return roles.includes('Gestor de Stock') || roles.includes('Gestor Geral') || roles.includes('Técnico');
     if (mod === 'rh') return roles.includes('Gestor de RH');
     if (mod === 'financas') return roles.includes('Contabilista');
     if (mod === 'tecnico') return roles.includes('Técnico');
@@ -70,6 +71,7 @@ export default function App() {
     vendas: false,
     faturas: false,
     stock: false,
+    armazem: false,
     rh: false,
     financas: false,
     tecnico: false
@@ -77,26 +79,20 @@ export default function App() {
   const [gatePassword, setGatePassword] = useState('');
   const [gateError, setGateError] = useState('');
 
-  // Real-time synchronization tracking states
-  const syncMode = 'Online';
-  const [sseConnected, setSseConnected] = useState(true);
-  const [pendingCount, setPendingCount] = useState(0);
-  const [lastSyncTime, setLastSyncTime] = useState('');
-  const [isManualSyncing, setIsManualSyncing] = useState(false);
+  // NOTA (Auditoria FASE 1, F-05/T-04): os indicadores falsos de sincronização
+  // ("SSE activo", "pendentes", "última sync") foram removidos — devolviam
+  // constantes inventadas. O estado real da ligação Firestore será exposto quando
+  // existir autenticação/observabilidade server-side.
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
 
   useEffect(() => {
-    const updateSyncStatus = () => {
-      setSseConnected(dbService.isSSEActive());
-      setPendingCount(dbService.getPendingCount());
-      setLastSyncTime(dbService.getLastSyncTime());
-    };
-
-    updateSyncStatus();
-    const interval = setInterval(updateSyncStatus, 2000);
-    window.addEventListener('db-update', updateSyncStatus);
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('db-update', updateSyncStatus);
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
     };
   }, []);
 
@@ -104,17 +100,32 @@ export default function App() {
   const [criticalProducts, setCriticalProducts] = useState<any[]>([]);
   const [showAlertsDropdown, setShowAlertsDropdown] = useState(false);
 
-  // 5-Minute Inactivity Lock States
-  const [isSessionLocked, setIsSessionLocked] = useState(false);
-  const [lastActivity, setLastActivity] = useState(Date.now());
+  // Inactivity Lock States com persistência (sobrevive a F5 / recarregamento)
+  const [isSessionLocked, setIsSessionLocked] = useState(() => {
+    return safeSessionStorage.getItem('agro_session_locked') === 'true' ||
+           safeStorage.getItem('agro_session_locked') === 'true';
+  });
+  const [lastActivity, setLastActivity] = useState(() => {
+    const saved = safeSessionStorage.getItem('agro_last_activity') || safeStorage.getItem('agro_last_activity');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return !isNaN(parsed) && parsed > 0 ? parsed : Date.now();
+  });
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState('');
 
   useEffect(() => {
     if (!currentUser || isSessionLocked) return;
 
+    let lastSave = 0;
     const resetTimer = () => {
-      setLastActivity(Date.now());
+      const now = Date.now();
+      setLastActivity(now);
+      // Salva em storage com throttle de 5 segundos para não impactar performance
+      if (now - lastSave > 5000) {
+        lastSave = now;
+        safeSessionStorage.setItem('agro_last_activity', String(now));
+        safeStorage.setItem('agro_last_activity', String(now));
+      }
     };
 
     window.addEventListener('mousemove', resetTimer);
@@ -135,26 +146,33 @@ export default function App() {
   useEffect(() => {
     if (!currentUser || isSessionLocked) return;
 
+    // Bloqueio por inactividade configurável (predefinição: 15 minutos).
+    // A sessão NÃO é terminada — apenas bloqueada até reintroduzir a palavra-passe,
+    // e o carrinho em curso fica recuperável (Auditoria FASE 1, A-04).
+    const lockMinutes = Math.max(1, settings?.sessionLockMinutes || 15);
+    const lockMs = lockMinutes * 60 * 1000;
+
     const interval = setInterval(() => {
       const now = Date.now();
       const diff = now - lastActivity;
-      // 5 minutes in milliseconds is 300,000
-      if (diff >= 300000) {
+      if (diff >= lockMs) {
         setIsSessionLocked(true);
+        safeSessionStorage.setItem('agro_session_locked', 'true');
+        safeStorage.setItem('agro_session_locked', 'true');
         dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
           username: currentUser.username,
           ipAddress: '127.0.0.1',
           action: 'Sessão Auto-Bloqueada',
           status: 'Alerta',
-          details: 'A sessão de balcão foi bloqueada devido a 5 minutos de inatividade.'
-        }).catch(err => console.log('Audit log lock error:', err));
+          details: `A sessão de balcão foi bloqueada devido a ${lockMinutes} minutos de inatividade.`
+        }).catch(err => console.warn('Audit log lock error:', err));
       }
-    }, 10000); // Check every 10 seconds
+    }, 5000); // Check every 5 seconds
 
     return () => clearInterval(interval);
-  }, [currentUser, lastActivity, isSessionLocked]);
+  }, [currentUser, lastActivity, isSessionLocked, settings]);
 
   const loadCriticalProducts = async () => {
     try {
@@ -163,7 +181,7 @@ export default function App() {
       const filtered = await dbService.getLowStockProducts(critLevel);
       setCriticalProducts(filtered);
     } catch (e) {
-      console.log('Error loading critical products:', e);
+      console.warn('Error loading critical products:', e);
     }
   };
 
@@ -189,9 +207,7 @@ export default function App() {
     const initDB = async () => {
       try {
         await dbService.init();
-        await runStockMigration();
         await runStockListUpdate();
-        await runHybridPriceMigration();
         await runCredentialsReset();
 
         const globalSettings = await dbService.getSettings();
@@ -203,32 +219,22 @@ export default function App() {
         if (savedUserJson) {
           try {
             const userObj = JSON.parse(savedUserJson);
-
-            // L-12: uma sessão encerrada no módulo técnico (ou noutro posto)
-            // continuava a funcionar neste separador porque o utilizador estava
-            // guardado no sessionStorage. Valida-se contra `active_sessions`
-            // quando a base responde; sem base, mantém-se a sessão local.
-            const sessionId = safeSessionStorage.getItem('agro_session_id');
-            if (sessionId) {
-              try {
-                const sessions = await dbService.getActiveSessions();
-                if (
-                  Array.isArray(sessions) &&
-                  sessions.length > 0 &&
-                  !sessions.some(sessao => String(sessao.id) === sessionId)
-                ) {
-                  safeSessionStorage.removeItem('agro_current_user');
-                  safeSessionStorage.removeItem('agro_session_active');
-                  safeSessionStorage.removeItem('agro_session_id');
-                  setCurrentUser(null);
-                  return;
-                }
-              } catch {
-                // Base inacessível: não se derruba a sessão por causa da rede.
-              }
-            }
-
             setCurrentUser(userObj);
+
+            // Verificar se a sessão estava previamente bloqueada por inatividade antes do F5
+            const wasLocked = safeSessionStorage.getItem('agro_session_locked') === 'true' ||
+                              safeStorage.getItem('agro_session_locked') === 'true';
+            const savedLast = parseInt(safeSessionStorage.getItem('agro_last_activity') || safeStorage.getItem('agro_last_activity') || '0', 10);
+            const lockMinutes = Math.max(1, globalSettings?.sessionLockMinutes || 15);
+            const lockMs = lockMinutes * 60 * 1000;
+            const now = Date.now();
+            const isTimeExpired = savedLast > 0 && (now - savedLast >= lockMs);
+
+            if (wasLocked || isTimeExpired) {
+              setIsSessionLocked(true);
+              safeSessionStorage.setItem('agro_session_locked', 'true');
+              safeStorage.setItem('agro_session_locked', 'true');
+            }
 
             const userRoles = getUserRoles(userObj);
             if (userRoles.includes('Técnico') || userRoles.includes('Gestor Geral') || userRoles.includes('Operador')) {
@@ -269,22 +275,48 @@ export default function App() {
     initDB();
   }, []);
 
+  // Heartbeat de presença e remoção de sessão ao fechar navegador/aba
+  useEffect(() => {
+    if (!currentUser) return;
+    const activeSessionId = safeSessionStorage.getItem('agro_session_id');
+    if (!activeSessionId) return;
+
+    const interval = setInterval(() => {
+      void dbService.updateSessionHeartbeat(activeSessionId);
+    }, 2 * 60 * 1000);
+
+    const handleBeforeUnload = () => {
+      const sessId = safeSessionStorage.getItem('agro_session_id');
+      if (sessId) {
+        void dbService.removeActiveSession(sessId);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [currentUser]);
+
   const handleVerifyGate = async (e: React.FormEvent) => {
     e.preventDefault();
     setGateError('');
     if (!currentUser) return;
 
-    // A chave mestra em texto simples foi removida: a autorização de gestor
-    // valida sempre a palavra-passe guardada (em hash) do utilizador da sessão.
+    // Sem chaves mestre (Auditoria FASE 1, S-02): apenas a palavra-passe real da conta.
     let isValid = false;
-
-    {
+    try {
       const allCreds = await dbService.getCredentials();
       const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
-      // Aceita a palavra-passe em texto simples (legado) ou com hash seguro (sha256)
       if (user) {
         isValid = await verifyPassword(gatePassword.trim(), user.passwordHash);
       }
+    } catch (err) {
+      console.warn('Gate verification failed to load credentials:', err);
+      setGateError('Não foi possível validar a identidade (sem ligação à base de dados).');
+      return;
     }
 
     if (isValid) {
@@ -295,7 +327,7 @@ export default function App() {
       setGateError('Senha incorreta.');
       // Audit log failed attempt
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -309,6 +341,13 @@ export default function App() {
   const handleLoginSuccess = (user: { username: string; role: string; roles?: AppRole[] }) => {
     safeSessionStorage.setItem('agro_session_active', 'true');
     safeSessionStorage.setItem('agro_current_user', JSON.stringify(user));
+    safeSessionStorage.removeItem('agro_session_locked');
+    safeStorage.removeItem('agro_session_locked');
+    const now = Date.now();
+    setLastActivity(now);
+    safeSessionStorage.setItem('agro_last_activity', String(now));
+    safeStorage.setItem('agro_last_activity', String(now));
+    setIsSessionLocked(false);
     setCurrentUser(user);
     
     const userRoles = getUserRoles(user);
@@ -341,6 +380,10 @@ export default function App() {
     const activeSessionId = safeSessionStorage.getItem('agro_session_id');
     safeSessionStorage.removeItem('agro_session_active');
     safeSessionStorage.removeItem('agro_session_id');
+    safeSessionStorage.removeItem('agro_session_locked');
+    safeSessionStorage.removeItem('agro_last_activity');
+    safeStorage.removeItem('agro_session_locked');
+    safeStorage.removeItem('agro_last_activity');
     safeSessionStorage.clear();
     if (currentUser) {
       // Remove specific device session without terminating other sessions. The
@@ -360,7 +403,7 @@ export default function App() {
       }
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
         ipAddress: '127.0.0.1',
@@ -384,17 +427,21 @@ export default function App() {
 
   // If no logged in user, force login screen
   if (!currentUser) {
-    return (
-      <>
-        <LoginPanel onLoginSuccess={handleLoginSuccess} />
-        <DialogHost />
-      </>
-    );
+    return <LoginPanel onLoginSuccess={handleLoginSuccess} />;
   }
 
   return (
     <div className={`flex h-screen bg-background overflow-hidden font-sans text-slate-900 ${theme === 'dark' ? 'dark-mode' : ''}`}>
-      
+
+      {/* Banda global de ligação: sem internet as escritas ficam penduradas no
+          Firestore e o operador tem de saber porquê. */}
+      {!isOnline && (
+        <div className="fixed top-0 inset-x-0 z-[9998] bg-amber-500 text-slate-950 px-4 py-2 text-center text-xs font-black uppercase tracking-wider shadow-lg flex items-center justify-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">wifi_off</span>
+          Sem ligação à internet — as operações ficam em espera e serão sincronizadas quando a rede voltar.
+        </div>
+      )}
+
       {/* 5-Minute Inactivity Auto-Lock Screen Overlay */}
       {isSessionLocked && (
         <div className="fixed inset-0 bg-slate-950/90 z-[9999] flex items-center justify-center backdrop-blur-md">
@@ -405,7 +452,7 @@ export default function App() {
             
             <h2 className="text-xl font-extrabold text-white uppercase tracking-tight">Sessão Bloqueada</h2>
             <p className="text-slate-400 text-xs mt-2 leading-relaxed">
-              Esta sessão foi bloqueada automaticamente por motivos de segurança após 5 minutos de inatividade de balcão.
+              Esta sessão foi bloqueada automaticamente por motivos de segurança após {Math.max(1, settings?.sessionLockMinutes || 15)} minutos de inatividade de balcão.
             </p>
 
             <div className="mt-6 text-left">
@@ -423,14 +470,21 @@ export default function App() {
                 
                 const cleanUnlock = unlockPassword.trim();
 
+                // Sem chaves mestre (Auditoria FASE 1, S-02): apenas a palavra-passe real da conta.
                 try {
                   const allCreds = await dbService.getCredentials();
                   const user = allCreds.find(c => c.username.toLowerCase() === currentUser.username.toLowerCase());
                   const isMatch = user ? await verifyPassword(cleanUnlock, user.passwordHash) : false;
                   if (isMatch) {
                     setIsSessionLocked(false);
+                    safeSessionStorage.removeItem('agro_session_locked');
+                    safeStorage.removeItem('agro_session_locked');
+                    const now = Date.now();
+                    setLastActivity(now);
+                    safeSessionStorage.setItem('agro_last_activity', String(now));
+                    safeStorage.setItem('agro_last_activity', String(now));
                     setUnlockPassword('');
-                    setLastActivity(Date.now());
+                    setUnlockError('');
                   } else {
                     setUnlockError('Palavra-passe incorreta.');
                   }
@@ -470,6 +524,8 @@ export default function App() {
             <button
               onClick={() => {
                 setIsSessionLocked(false);
+                safeSessionStorage.removeItem('agro_session_locked');
+                safeStorage.removeItem('agro_session_locked');
                 setUnlockPassword('');
                 handleLogout();
               }}
@@ -585,6 +641,20 @@ export default function App() {
               </button>
             )}
 
+            {isModuleAccessible('armazem') && (
+              <button
+                onClick={() => selectModule('armazem')}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-all whitespace-nowrap ${
+                  activeModule === 'armazem'
+                    ? 'bg-emerald-600 text-white font-medium shadow-sm'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <span className="material-symbols-outlined text-[16px]">warehouse</span>
+                Gestão de Armazém
+              </button>
+            )}
+
             {isModuleAccessible('rh') && (
               <button
                 onClick={() => selectModule('rh')}
@@ -681,15 +751,7 @@ export default function App() {
           {/* Operator Section */}
           <div className="flex items-center gap-2 sm:gap-3 md:gap-4 shrink-0">
             {activeModule !== 'stock' && (
-              <InlineHeaderSearch
-                onNavigateModule={(mod) => selectModule(mod)}
-                canSeeRestrictedData={Boolean(
-                  currentUser &&
-                  (getUserRoles(currentUser).includes('Técnico') ||
-                    getUserRoles(currentUser).includes('Gestor Geral') ||
-                    getUserRoles(currentUser).includes('Gestor de RH'))
-                )}
-              />
+              <InlineHeaderSearch onNavigateModule={(mod) => selectModule(mod)} />
             )}
 
             {/* Critical Stock Alerts Bell */}
@@ -778,6 +840,7 @@ export default function App() {
                     Módulo de <span className="text-emerald-400 font-bold uppercase">{
                       activeModule === 'vendas' ? 'Ponto de Venda (PDV)' :
                       activeModule === 'stock' ? 'Stock & Inventário' :
+                      activeModule === 'armazem' ? 'Gestão de Armazém' :
                       activeModule === 'rh' ? 'Recursos Humanos (RH)' :
                       activeModule === 'financas' ? 'Contabilidade & Finanças' :
                       activeModule === 'tecnico' ? 'Painel Técnico' :
@@ -823,8 +886,28 @@ export default function App() {
               {activeModule === 'vendas' && <PDVModule currentUser={currentUser} />}
               {activeModule === 'faturas' && <FaturasModule currentUser={currentUser} />}
               {activeModule === 'stock' && <StockModule />}
+              {activeModule === 'armazem' && (
+                <div className="p-8 max-w-4xl mx-auto space-y-6">
+                  <div className="bg-white rounded-2xl p-8 border border-slate-200 shadow-sm text-center space-y-4">
+                    <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                      <span className="material-symbols-outlined text-3xl">warehouse</span>
+                    </div>
+                    <div className="space-y-1">
+                      <h2 className="text-xl font-black text-slate-800 uppercase tracking-wide">Gestão de Armazém</h2>
+                      <p className="text-sm text-slate-500 font-medium">Módulo Estrutural de Logística e Separação de Stock Físico</p>
+                    </div>
+                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-full border border-amber-200">
+                      <span className="material-symbols-outlined text-sm">construction</span>
+                      Módulo em Estruturação — Fase Estática
+                    </div>
+                    <p className="text-xs text-slate-600 max-w-xl mx-auto leading-relaxed">
+                      Este espaço reservado centralizará o registo de localizações físicas, separação de corredores, prateleiras e lotes de receção de fornecedores, mantendo a logística desacoplada da frente de venda do PDV.
+                    </p>
+                  </div>
+                </div>
+              )}
               {activeModule === 'rh' && <HRModule />}
-              {activeModule === 'financas' && <FinanceModule currentUser={currentUser} />}
+              {activeModule === 'financas' && <FinanceModule />}
               {currentUser.role === 'Técnico' && activeModule === 'tecnico' && (
                 <TechnicalModule onSettingsUpdated={async () => {
                   const globalSettings = await dbService.getSettings();
@@ -837,25 +920,6 @@ export default function App() {
         </div>
       </main>
 
-      {/* --- Syncing Background Loader --- */}
-      {isManualSyncing && (
-        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-white p-5 rounded-lg shadow-xl max-w-sm w-full border border-slate-200 text-center space-y-4">
-            <div className="relative w-12 h-12 mx-auto">
-              <div className="absolute inset-0 rounded-full border-4 border-slate-100"></div>
-              <div className="absolute inset-0 rounded-full border-4 border-t-emerald-500 border-r-transparent border-b-transparent border-l-transparent animate-spin"></div>
-            </div>
-            <div>
-              <p className="font-bold text-slate-900 text-sm">Sincronizando com a Nuvem</p>
-              <p className="text-xs text-slate-400 mt-1">A atualizar vendas, produtos e dados em tempo real...</p>
-            </div>
-            <div className="w-full bg-slate-100 rounded-full h-1">
-              <div className="bg-emerald-500 h-1 rounded-full animate-[pulse_1.5s_infinite]" style={{ width: '80%' }}></div>
-            </div>
-          </div>
-        </div>
-      )}
-      <DialogHost />
     </div>
   );
 }

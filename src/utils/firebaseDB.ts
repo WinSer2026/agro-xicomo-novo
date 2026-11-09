@@ -1068,7 +1068,28 @@ export class FirebaseDBService {
    * serve para semear o contador na primeira utilização (continuidade com a
    * numeração antiga) sem nunca permitir reutilizar um número existente.
    */
-  public async nextDocumentNumber(
+  /**
+   * Contador transaccional por prefixo (do `main`): dois postos a faturar ao
+   * mesmo tempo recebem números diferentes, nunca o mesmo.
+   */
+  public async nextDocumentNumber(counterKey: string, minimumNext: number): Promise<number> {
+    await this.ensureAuth();
+    const ref = doc(db, 'counters', counterKey);
+    return runTransaction(db, async tx => {
+      const snap = await tx.get(ref);
+      const current = snap.exists() ? Number(snap.data().value || 0) : 0;
+      const next = Math.max(current + 1, minimumNext);
+      tx.set(ref, { value: next, updatedAt: new Date().toISOString() }, { merge: true });
+      return next;
+    });
+  }
+
+  /**
+   * Numeração por tipo de documento com prefixo do ano (linha desta sessão).
+   * Devolve o número já formatado («FAC-2026-0007»), procurando o máximo das
+   * vendas existentes quando o contador ainda não existe.
+   */
+  public async nextDocumentNumberByKind(
     kind: 'FaturaDefinitiva' | 'FaturaProforma' | 'ReciboPOS' | 'ReciboA4' | 'NotaCredito',
     year: number,
     fallbackMax = 0
@@ -3175,6 +3196,69 @@ export class FirebaseDBService {
     this.activeSessionsCache = list.sort((a, b) => b.loginTime.localeCompare(a.loginTime));
     return this.activeSessionsCache;
   }
+  /**
+   * Encerra sessões antigas do mesmo utilizador/IP/dispositivo (do `main`).
+   * Trazido na fusão: o ecrã de login conta com este método para não deixar
+   * sessões de ontem abertas.
+   */
+  public async terminatePreviousSessions(params: {
+    username?: string;
+    ipAddress?: string;
+    deviceId?: string;
+    excludeSessionId?: string;
+  }): Promise<string[]> {
+    const list = await this.getAll<ActiveSession>('active_sessions');
+    const now = Date.now();
+    const MAX_SESSION_AGE_MS = 12 * 60 * 60 * 1000;
+    const terminatedIds: string[] = [];
+
+    const normUser = params.username ? params.username.toLowerCase().trim() : '';
+    const normIp =
+      params.ipAddress && params.ipAddress !== 'N/D' && params.ipAddress !== 'Local / N/D'
+        ? params.ipAddress.trim()
+        : '';
+    const normDev = params.deviceId ? params.deviceId.trim() : '';
+
+    for (const sess of list) {
+      if (params.excludeSessionId && sess.id === params.excludeSessionId) continue;
+
+      const sessUser = (sess.username || '').toLowerCase().trim();
+      const sessIp = (sess.ipAddress || '').trim();
+      const sessDev = (sess.deviceId || '').trim();
+      const sessTime = new Date(sess.loginTime).getTime();
+      const isStale = isNaN(sessTime) || now - sessTime > MAX_SESSION_AGE_MS;
+
+      const isSameUser = Boolean(normUser && sessUser === normUser);
+      const isSameIp = Boolean(normIp && sessIp && sessIp !== 'N/D' && sessIp !== 'Local / N/D' && sessIp === normIp);
+      const isSameDevice = Boolean(normDev && sessDev && sessDev === normDev);
+
+      if (isSameUser || isSameIp || isSameDevice || isStale) {
+        try {
+          await this.removeActiveSession(sess.id);
+          terminatedIds.push(sess.id);
+        } catch (e) {
+          console.warn('[SessionCleanup] Erro ao remover sessão antiga:', sess.id, e);
+        }
+      }
+    }
+
+    return terminatedIds;
+  }
+
+  /** Sinal de vida da sessão (bloqueio por inactividade). */
+  public async updateSessionHeartbeat(sessionId: string): Promise<void> {
+    if (!sessionId) return;
+    try {
+      const nowIso = new Date().toISOString();
+      if (this.activeSessionsCache) {
+        const item = this.activeSessionsCache.find(x => x.id === sessionId);
+        if (item) item.lastHeartbeat = nowIso;
+      }
+    } catch {
+      // Heartbeat não pode rebentar a aplicação por falhar.
+    }
+  }
+
   public async saveActiveSession(s: ActiveSession): Promise<void> { 
     await this.upsert('active_sessions', s.id, s);
     if (!this.activeSessionsCache) this.activeSessionsCache = [];

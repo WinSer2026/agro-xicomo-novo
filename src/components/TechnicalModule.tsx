@@ -1,17 +1,16 @@
-import { companyNuit } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
+import Toast, { type ToastKind } from './Toast';
+import { uid } from '../utils/idHelper';
+import { describeError } from '../utils/errorHelper';
+import { useConfirmDialog } from './ConfirmDialog';
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
-import { dbService, getFirebaseAuthDiagnostics, type FirestorePageCursor, type FirebaseAuthDiagnostics } from '../utils/firebaseDB';
-import { appConfirm, appPrompt } from '../utils/confirmDialog';
-import { findNumberingGaps, describeGaps, type NumberingKind } from '../utils/numberingAudit';
-import { verifyAuthorizationPassword } from '../utils/authorization';
+import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
 import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
-import DatabaseSchemaViewer from './DatabaseSchemaViewer';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, formatDatePT } from '../utils/dateRangeHelper';
-import { hashPassword, validateAccessPassword } from '../utils/securityHelper';
+import { hashPassword, validateAccessPassword, decidePasswordUpdate } from '../utils/securityHelper';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
 import * as XLSX from 'xlsx';
 import { 
@@ -34,7 +33,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [users, setUsers] = useState<UserCredentials[]>([]);
 
   // Active Technical Panel Tab
-  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'schema' | 'ai_assistant' | 'cloud_firebase' | 'sessions'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'logs' | 'sessions'>('settings');
   const [settingsSubTab, setSettingsSubTab] = useState<'empresa' | 'bancos' | 'impressoras' | 'backups' | 'sistema'>('empresa');
 
   // Logs Date Range Filter
@@ -56,28 +55,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     date.setMonth(date.getMonth() - 6);
     return date.toISOString().slice(0, 10);
   });
-
-  // Reconciliation Tool States
-  const [techReconcileData, setTechReconcileData] = useState<any | null>(null);
-  const [isTechReconciling, setIsTechReconciling] = useState(false);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
-
-  // Firebase Cloud Management States
-  const [firebaseUrlInput, setFirebaseUrlInput] = useState('');
-  const [firebaseKeyInput, setFirebaseKeyInput] = useState('');
-  const [testingFirebase, setTestingFirebase] = useState(false);
-  const [firebaseTestResult, setFirebaseTestResult] = useState<{ success: boolean; message: string; latencyMs?: number } | null>(null);
-  const [syncingFirebase, setSyncingFirebase] = useState(false);
-  const [firebaseSyncLogs, setFirebaseSyncLogs] = useState<string[]>([]);
-  const [firebaseSyncSummary, setFirebaseSyncSummary] = useState<Record<string, { local: number; cloud: number; synced: number }> | null>(null);
-
-  // AI Assistant Tab States
-  const [aiPrompt, setAiPrompt] = useState('');
-  const [aiAttachedFiles, setAiAttachedFiles] = useState<Array<{ id: string; base64: string; mime: string; name: string }>>([]);
-  const [aiVoiceRecording, setAiVoiceRecording] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiResponse, setAiResponse] = useState<any | null>(null);
-  const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
 
   // Editing Settings
   const [compName, setCompName] = useState('');
@@ -102,6 +80,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [email, setEmail] = useState('');
   const [companyNuit, setCompanyNuit] = useState('');
   const [criticalStockLevel, setCriticalStockLevel] = useState(10);
+  const [sessionLockMinutes, setSessionLockMinutes] = useState(15);
   const [printerA4, setPrinterA4] = useState('Microsoft Print to PDF');
   const [printerThermal, setPrinterThermal] = useState('Xprinter XP-80');
   const [barcodePrefix, setBarcodePrefix] = useState('');
@@ -115,12 +94,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const [usrUsername, setUsrUsername] = useState('');
   const [usrPassword, setUsrPassword] = useState('');
   const [usrRoles, setUsrRoles] = useState<AppRole[]>(['Operador']);
-  const [usrMfa, setUsrMfa] = useState(false);
   const [usrMustChange, setUsrMustChange] = useState(false);
   const [userToDelete, setUserToDelete] = useState<{ id: string; username: string } | null>(null);
 
   // Toast
   const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<ToastKind>('success');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [isPrinterConnected, setIsPrinterConnected] = useState(false);
@@ -180,11 +159,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     try {
       await dbService.init();
 
-      // Load Firebase config inputs
-      const supConf = dbService.getFirebaseConfig();
-      if (supConf.url) setFirebaseUrlInput(supConf.url);
-      if (supConf.key) setFirebaseKeyInput(supConf.key);
-
       // Settings, users and sessions are small operational datasets. Sales,
       // products and audit history intentionally do not load in full here.
       const [config, creds, activeSess] = await Promise.all([
@@ -216,8 +190,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setFixo1(config.fixo1 || '');
       setFixo2(config.fixo2 || '');
       setEmail(config.email || '');
-      setCompanyNuit(config.companyNuit || '');
+      setCompanyNuit(config.companyNuit || '401976590');
       setCriticalStockLevel(config.criticalStockLevel || 10);
+      setSessionLockMinutes(config.sessionLockMinutes || 15);
       setPrinterA4(config.printerA4 || 'Microsoft Print to PDF');
       setPrinterThermal(config.printerThermal || 'Xprinter XP-80');
       setBarcodePrefix(config.barcodePrefix || '');
@@ -261,7 +236,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleTerminateSession = async (sessionId: string, username: string) => {
     await dbService.removeActiveSession(sessionId);
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -273,91 +248,61 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     loadAllData();
   };
 
-  const handleClearAllSessions = async () => {
-    if (!(await appConfirm('Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.'))) return;
-    await dbService.clearActiveSessions();
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Limpeza Geral de Sessões',
-      status: 'Alerta',
-      details: 'Todas as sessões ativas foram limpas pelo técnico.'
-    });
-    showToast('Todas as sessões ativas foram limpas!');
-    loadAllData();
+  // Confirmações próprias: o window.confirm é bloqueado dentro de iframes em
+  // sandbox e devolvia sempre "cancelar" sem mostrar nada (botões "mortos").
+  const { askConfirm, dialog: confirmDialog } = useConfirmDialog();
+
+  const handleClearAllSessions = () => {
+    askConfirm(
+      'Limpar todas as sessões',
+      'Tem certeza que deseja limpar todas as sessões ativas / órfãs? Isto desconectará todos os utilizadores no sistema.',
+      async () => {
+        await dbService.clearActiveSessions();
+        void dbService.addAuditLog({
+          id: uid('log-'),
+          timestamp: new Date().toISOString(),
+          username: 'Técnico',
+          ipAddress: '127.0.0.1',
+          action: 'Limpeza Geral de Sessões',
+          status: 'Alerta',
+          details: 'Todas as sessões ativas foram limpas pelo técnico.'
+        });
+        showToast('Todas as sessões ativas foram limpas!');
+        loadAllData();
+      },
+      { danger: true, confirmLabel: 'Limpar sessões' }
+    );
   };
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, type: ToastKind = 'success') => {
     setToastMessage(msg);
+    setToastType(type);
     setTimeout(() => setToastMessage(''), 3000);
   };
 
-  // B-04: controlo de lacunas na numeração fiscal.
-  const [showNumberingModal, setShowNumberingModal] = useState(false);
-  const [firebaseDiag, setFirebaseDiag] = useState<FirebaseAuthDiagnostics | null>(null);
-  const [checkingFirebaseDiag, setCheckingFirebaseDiag] = useState(false);
-
-  const handleCheckFirebaseConnection = async () => {
-    setCheckingFirebaseDiag(true);
-    try {
-      setFirebaseDiag(await getFirebaseAuthDiagnostics());
-    } finally {
-      setCheckingFirebaseDiag(false);
-    }
-  };
-  const [numberingReport, setNumberingReport] = useState<Array<{ label: string; descricao: string; buraco: boolean }>>([]);
-  const [loadingNumbering, setLoadingNumbering] = useState(false);
-
-  const handleCheckNumbering = async () => {
-    setShowNumberingModal(true);
-    setLoadingNumbering(true);
-    try {
-      const vendas = await dbService.getSales();
-      const ano = new Date().getFullYear();
-      const tipos: Array<{ kind: NumberingKind; label: string }> = [
-        { kind: 'FaturaDefinitiva', label: `Faturas definitivas (FAC-${ano})` },
-        { kind: 'FaturaProforma', label: `Proformas (FP-${ano})` },
-        { kind: 'Recibo', label: `Recibos (REC-${ano})` },
-        { kind: 'NotaCredito', label: `Notas de crédito (NC-${ano})` }
-      ];
-      setNumberingReport(
-        tipos.map(tipo => {
-          const gap = findNumberingGaps(vendas, tipo.kind, ano);
-          return {
-            label: tipo.label,
-            descricao: describeGaps(gap),
-            buraco: gap.missing.length > 0
-          };
-        })
-      );
-    } catch {
-      setNumberingReport([]);
-      showToast('Não foi possível verificar a numeração.');
-    } finally {
-      setLoadingNumbering(false);
-    }
-  };
-
-  const handleArchiveAuditLogs = async () => {
-    if (isArchivingAuditLogs) return;
-    const confirmation = await appConfirm(
+  const handleArchiveAuditLogs = () => {
+    askConfirm(
+      'Arquivar registos de auditoria',
       `Arquivar registos de auditoria anteriores a ${formatDatePT(archiveBeforeDate)}? ` +
-      'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.'
+      'Os registos não serão apagados: serão copiados para o arquivo e removidos apenas da lista ativa.',
+      doArchiveAuditLogs,
+      { confirmLabel: 'Arquivar registos' }
     );
-    if (!confirmation) return;
+  };
+
+  const doArchiveAuditLogs = async () => {
+    if (isArchivingAuditLogs) return;
 
     setIsArchivingAuditLogs(true);
     try {
       const result = await dbService.archiveAuditLogsBefore(archiveBeforeDate, 200);
       if (result.archivedCount === 0) {
-        showToast('Não existem registos ativos anteriores à data indicada.');
+        showToast('Não existem registos ativos anteriores à data indicada.', 'warning');
         return;
       }
 
       void dbService.addAuditLog({
-        id: `log-archive-${Date.now()}`,
+        id: uid('log-archive-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -369,11 +314,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(
         result.hasMore
           ? `${result.archivedCount} registos arquivados. Existem mais; repita a operação para continuar.`
-          : `${result.archivedCount} registos arquivados com segurança.`
+          : `${result.archivedCount} registos arquivados com segurança.`,
+        result.hasMore ? 'warning' : 'success'
       );
     } catch (error) {
       console.error('[TechnicalModule] Audit archive failed:', error);
-      showToast('Não foi possível arquivar os registos. Nenhum lote parcial foi eliminado.');
+      showToast('Não foi possível arquivar os registos. Nenhum lote parcial foi eliminado.', 'error');
     } finally {
       setIsArchivingAuditLogs(false);
     }
@@ -386,7 +332,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       const exportLogs = await dbService.getAuditLogsForPeriod(getCurrentAuditQuery());
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-      const nuit = companyNuit(settings?.companyNuit);
+      const nuit = settings?.companyNuit || '401976590';
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
       doc.setTextColor(30, 41, 59);
@@ -421,7 +367,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(`Relatório de Auditoria PDF descarregado com ${exportLogs.length} registo(s).`);
     } catch (error) {
       console.error('[TechnicalModule] Audit PDF export failed:', error);
-      showToast('Não foi possível exportar o relatório de auditoria.');
+      showToast('Não foi possível exportar o relatório de auditoria.', 'error');
     } finally {
       setIsExportingAuditLogs(false);
     }
@@ -447,7 +393,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       showToast(`Planilha de Auditoria descarregada com ${exportLogs.length} registo(s).`);
     } catch (error) {
       console.error('[TechnicalModule] Audit Excel export failed:', error);
-      showToast('Não foi possível exportar a planilha de auditoria.');
+      showToast('Não foi possível exportar a planilha de auditoria.', 'error');
     } finally {
       setIsExportingAuditLogs(false);
     }
@@ -457,7 +403,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 1.5 * 1024 * 1024) {
-        showToast('Erro: O ficheiro do logotipo não deve exceder 1.5MB.');
+        showToast('Erro: O ficheiro do logotipo não deve exceder 1.5MB.', 'error');
         return;
       }
       const reader = new FileReader();
@@ -475,64 +421,89 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
-    if (!usrUsername || !usrPassword) {
-      showToast('Por favor, indique o utilizador e palavra-passe.');
+
+    const cleanUsername = usrUsername.trim();
+    if (!cleanUsername) {
+      showToast('Por favor, indique o utilizador.', 'error');
+      return;
+    }
+
+    // Na EDIÇÃO a palavra-passe pode ficar vazia (mantém-se a actual).
+    if (!usrPassword.trim() && !editingUser) {
+      showToast('Por favor, indique a palavra-passe.', 'error');
+      return;
+    }
+
+    // O username é case-insensitive no login: duplicados colidem na autenticação.
+    const duplicate = users.find(
+      u => u.username.trim().toLowerCase() === cleanUsername.toLowerCase()
+        && (!editingUser || u.id !== editingUser.id)
+    );
+    if (duplicate) {
+      showToast(`Já existe o utilizador "${duplicate.username}". Escolha outro nome.`, 'error');
       return;
     }
 
     const rolesToSave = usrRoles.length > 0 ? usrRoles : (['Operador'] as AppRole[]);
 
-    const isExistingHash = usrPassword.trim().startsWith('sha256:');
-    if (!isExistingHash) {
-      // Política oficial: mínimo 8 caracteres, com letras e números
-      const policy = validateAccessPassword(usrPassword);
-      if (!policy.strong) {
-        showToast(policy.message || 'Palavra-passe inválida.');
-        return;
-      }
+    // Decisão de palavra-passe:
+    //  - edição + campo vazio           → mantém a palavra-passe actual;
+    //  - edição + hash antigo no campo  → mantém (compatibilidade);
+    //  - palavra-passe nova             → validada pela política oficial.
+    // ANTES, o hash era carregado para o campo e tratado como palavra-passe nova,
+    // o que rejeitava a gravação das contas antigas com um erro de política.
+    const decision = decidePasswordUpdate(editingUser, usrPassword);
+    if (decision.action === 'invalid') {
+      showToast(decision.message || 'Palavra-passe inválida.', 'error');
+      return;
     }
-    const finalPasswordHash = isExistingHash ? usrPassword.trim() : await hashPassword(usrPassword.trim());
-
-    const newUser: UserCredentials = {
-      id: editingUser ? editingUser.id : 'usr-' + Date.now(),
-      username: usrUsername.trim(),
-      passwordHash: finalPasswordHash,
-      roles: rolesToSave,
-      role: rolesToSave.join(', '),
-      mfaEnabled: usrMfa,
-      mustChangePassword: isExistingHash ? (editingUser?.mustChangePassword || false) : usrMustChange,
-      passwordResetVersion: editingUser?.passwordResetVersion
-    };
 
     setIsSubmitting(true);
     try {
+      const finalPasswordHash = decision.action === 'keep'
+        ? decision.hash
+        : await hashPassword(decision.password);
+
+      const newUser: UserCredentials = {
+        id: editingUser ? editingUser.id : uid('usr-'),
+        username: cleanUsername,
+        passwordHash: finalPasswordHash,
+        roles: rolesToSave,
+        role: rolesToSave.join(', '),
+        mfaEnabled: editingUser?.mfaEnabled || false,
+        mustChangePassword: decision.action === 'keep'
+          ? (editingUser?.mustChangePassword || false)
+          : usrMustChange,
+        passwordResetVersion: editingUser?.passwordResetVersion
+      };
+
       await dbService.saveCredential(newUser);
 
-      // Log to Audit logs
+      // Auditoria: nunca pode deitar abaixo a operação principal.
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
         action: editingUser ? 'Utilizador Editado' : 'Utilizador Criado',
         status: 'Sucesso',
-        details: `Utilizador ${usrUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
-      });
+        details: `Utilizador ${cleanUsername} (${rolesToSave.join(', ')}) gravado no sistema.`
+      }).catch(err => console.warn('Audit log write error:', err));
 
       showToast(editingUser ? 'Utilizador atualizado!' : 'Novo utilizador registado!');
-      
+
       // Clear user form
       setEditingUser(null);
       setUsrUsername('');
       setUsrPassword('');
       setUsrRoles(['Operador']);
-      setUsrMfa(false);
       setUsrMustChange(false);
 
-      loadAllData();
+      await loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar utilizador.');
+      const info = describeError(err, 'Não foi possível gravar o utilizador.');
+      console.error('[Técnico] handleSaveUser:', info.raw);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -541,16 +512,18 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
   const startEditUser = (user: UserCredentials) => {
     setEditingUser(user);
     setUsrUsername(user.username);
-    setUsrPassword(user.passwordHash);
+    // O campo da palavra-passe fica VAZIO: o hash actual só é mantido se o técnico
+    // não escrever nada. Carregar o hash para o campo (como antes) fazia falhar a
+    // validação de 4-6 caracteres e bloqueava a gravação das contas antigas.
+    setUsrPassword('');
     const userRoles = getUserRoles(user);
     setUsrRoles(userRoles.length > 0 ? userRoles : ['Operador']);
-    setUsrMfa(user.mfaEnabled || false);
     setUsrMustChange(user.mustChangePassword || false);
   };
 
   const promptDeleteUser = (id: string, username: string) => {
     if (username.toLowerCase() === 'admin') {
-      showToast('O administrador padrão "admin" não pode ser eliminado.');
+      showToast('O administrador padrão "admin" não pode ser eliminado.', 'error');
       return;
     }
     setUserToDelete({ id, username });
@@ -562,7 +535,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     const { id, username } = userToDelete;
 
     if (username.toLowerCase() === 'admin') {
-      showToast('O administrador padrão "admin" não pode ser eliminado.');
+      showToast('O administrador padrão "admin" não pode ser eliminado.', 'error');
       setUserToDelete(null);
       return;
     }
@@ -572,7 +545,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.deleteCredential(id);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -585,8 +558,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setUserToDelete(null);
       loadAllData();
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao eliminar utilizador.');
+      const info = describeError(err, 'Não foi possível eliminar o utilizador.');
+      console.error('[Técnico] confirmDeleteUser:', info.raw);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -598,7 +572,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     if (isSubmitting) return;
 
     if (!compName || !stockCode) {
-      showToast('Por favor, preencha o nome da empresa e o código de stock.');
+      showToast('Por favor, preencha o nome da empresa e o código de stock.', 'error');
       return;
     }
 
@@ -626,6 +600,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       email,
       companyNuit,
       criticalStockLevel: Number(criticalStockLevel),
+      sessionLockMinutes: Math.max(1, Number(sessionLockMinutes) || 15),
       printerA4,
       printerThermal,
       barcodePrefix,
@@ -637,7 +612,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       await dbService.saveSettings(updated);
 
       void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
+        id: uid('log-'),
         timestamp: new Date().toISOString(),
         username: 'Técnico',
         ipAddress: '127.0.0.1',
@@ -652,438 +627,41 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
       });
     } catch (err) {
-      console.error(err);
-      showToast('Erro ao gravar configurações.');
+      const info = describeError(err, 'Não foi possível gravar as configurações.');
+      console.error('[Técnico] handleSaveSettings:', info.raw);
+      showToast(info.title, 'error');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   // --- firebase CLOUD MANAGEMENT HANDLERS ---
-  const handleTestFirebaseConnection = async () => {
-    setTestingFirebase(true);
-    setFirebaseTestResult(null);
-    const res = await dbService.testConnection(firebaseUrlInput, firebaseKeyInput);
-    setTestingFirebase(false);
-    setFirebaseTestResult(res);
-    if (res.success) {
-      showToast('Conectado com sucesso ao Firebase!');
-    } else {
-      showToast(`Falha na conexão: ${res.message}`);
-    }
-  };
 
-  const handleSaveFirebaseConfig = async () => {
-    if (!firebaseUrlInput || !firebaseKeyInput) {
-      showToast('Preencha a URL e a Chave Anon de API do Firebase.');
-      return;
-    }
-    dbService.setFirebaseConfig(firebaseUrlInput, firebaseKeyInput);
-    showToast('Credenciais ativadas! Sincronizando com a Nuvem...');
-    await loadAllData();
-    handleTestFirebaseConnection();
-  };
+  // NOTA DE SEGURANÇA (Auditoria FASE 1, achado T-05):
+  // Os handlers "Eliminar Histórico de Teste", "Zerar Sistema" e "Novo Exercício
+  // Fiscal" foram removidos: todos chamavam clearSystemData() e apagavam
+  // permanentemente vendas reais sem backup, violando a regra inviolável nº 1
+  // do negócio. A limpeza de dados de teste é uma operação de manutenção fora da
+  // interface, com backup obrigatório e aprovação documentada.
 
-  const handleClearFirebaseConfig = async () => {
-    dbService.clearFirebaseConfig();
-    setFirebaseUrlInput('');
-    setFirebaseKeyInput('');
-    setFirebaseTestResult(null);
-    showToast('Desconectado do Firebase. O sistema está no modo local.');
-    await loadAllData();
-  };
-
-  const handleSyncAllWithFirebase = async () => {
-    setSyncingFirebase(true);
-    setFirebaseSyncLogs(['🚀 A iniciar sincronização bidirecional das 11 tabelas com o Firebase...']);
-    setFirebaseSyncSummary(null);
-
-    const res = await dbService.syncAllWithFirebase();
-    setSyncingFirebase(false);
-    setFirebaseSyncLogs(res.logs);
-    setFirebaseSyncSummary(res.summary);
-
-    if (res.success) {
-      showToast('Sincronização com o Firebase concluída!');
-    } else {
-      showToast('Sincronização concluída com avisos. Verifique o log.');
-    }
-    await loadAllData();
-  };
-
-  // --- AI ASSISTANT SYSTEM CHANGE HANDLERS ---
-  const handleAiFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        const newFile = {
-          id: 'file-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-          base64,
-          mime: file.type,
-          name: file.name
-        };
-        setAiAttachedFiles(prev => [...prev, newFile]);
-        showToast(`Anexado com sucesso: ${file.name}`);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunks.push(e.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = (reader.result as string).split(',')[1];
-          const newFile = {
-            id: 'voice-' + Date.now(),
-            base64,
-            mime: 'audio/webm',
-            name: 'gravaçao_voz_tecnico.webm'
-          };
-          setAiAttachedFiles(prev => [...prev, newFile]);
-          showToast("Áudio de voz gravado e anexado com sucesso!");
-        };
-        reader.readAsDataURL(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      recorder.start();
-      setMediaRecorder(recorder);
-      setAiVoiceRecording(true);
-    } catch (err) {
-      console.error("Erro ao acessar microfone:", err);
-      showToast("Não foi possível acessar o microfone. Verifique as permissões.");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorder && aiVoiceRecording) {
-      mediaRecorder.stop();
-      setAiVoiceRecording(false);
-    }
-  };
-
-  const handleSendToAi = async () => {
-    if (!aiPrompt && aiAttachedFiles.length === 0) {
-      showToast("Insira um comando de texto ou anexe pelo menos um ficheiro (imagem, áudio, PDF)!");
-      return;
-    }
-
-    setAiLoading(true);
-    setAiResponse(null);
-
-    try {
-      const res = await fetch('/api/gemini/technician-ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          prompt: aiPrompt,
-          files: aiAttachedFiles.map(f => ({
-            base64: f.base64,
-            mime: f.mime,
-            name: f.name
-          }))
-        })
-      });
-
-      if (!res.ok) {
-        let errMsg = 'Falha ao processar pelo assistente IA.';
-        try {
-          const errData = await res.json();
-          errMsg = errData.error || errMsg;
-        } catch {
-          try {
-            const errText = await res.text();
-            if (errText) {
-              const titleMatch = errText.match(/<title>([\s\S]*?)<\/title>/i);
-              if (titleMatch && titleMatch[1]) {
-                errMsg = `Erro do Servidor (${res.status}): ${titleMatch[1].trim()}`;
-              } else {
-                errMsg = `Erro do Servidor (${res.status}): ${errText.substring(0, 150)}...`;
-              }
-            } else {
-              errMsg = `Erro do Servidor com status ${res.status}.`;
-            }
-          } catch {
-            errMsg = `Erro do Servidor com status ${res.status}.`;
-          }
-        }
-        throw new Error(errMsg);
-      }
-
-      const data = await res.json();
-      setAiResponse(data);
-      showToast("Sugestões analisadas pelo assistente IA!");
-    } catch (err: any) {
-      console.error(err);
-      showToast("Erro: " + err.message);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleApplyAiChanges = async () => {
-    if (!aiResponse || !aiResponse.changes) return;
-
-    try {
-      const { changes } = aiResponse;
-      let appliedCount = 0;
-
-      // 1. Apply Settings changes
-      if (changes.settings && settings) {
-        const updatedSettings = {
-          ...settings,
-          ...changes.settings
-        };
-        await dbService.saveSettings(updatedSettings);
-        appliedCount++;
-      }
-
-      // 2. Apply User changes
-      if (changes.newUser) {
-        const u = changes.newUser;
-        const newUser: UserCredentials = {
-          id: 'usr-' + Date.now(),
-          username: u.username.trim(),
-          passwordHash: u.password || u.passwordHash || '123456',
-          role: u.role || 'Operador',
-          mfaEnabled: false
-        };
-        await dbService.saveCredential(newUser);
-        appliedCount++;
-      }
-
-      // 3. Apply Product changes
-      if (changes.newProduct) {
-        const p = changes.newProduct;
-        const aiBuy = Number(p.buyingPrice) || 0;
-        const aiSell = Number(p.sellingPrice) || 0;
-        // Regra: nunca gravar preços em que a compra seja igual ou superior à venda
-        const aiPriceError = validateStandardPrices(aiBuy, aiSell, false);
-        if (!aiPriceError) {
-          const newProd: Product = {
-            id: 'prod-' + Date.now(),
-            code: p.code || 'PRD-' + Date.now().toString().substring(8),
-            name: p.name,
-            category: p.category || 'Adubos',
-            stockQty: Number(p.stockQty) || 0,
-            buyingPrice: aiBuy,
-            sellingPrice: aiSell,
-            baseUnit: p.baseUnit || 'Unidades'
-          };
-          await dbService.saveProduct(newProd);
-          appliedCount++;
-        } else {
-          console.warn('[AI Apply] Produto ignorado por violar a regra de preços:', aiPriceError);
-        }
-      }
-
-      // 4. Apply Stock Updates (Batch update)
-      if (changes.stockUpdates && Array.isArray(changes.stockUpdates)) {
-        const allProducts = await dbService.getProducts();
-        for (const update of changes.stockUpdates) {
-          const search = update.productSearch.toLowerCase();
-          const target = allProducts.find(p => 
-            p.name.toLowerCase().includes(search) || 
-            p.code.toLowerCase().includes(search)
-          );
-
-          if (target) {
-            target.stockQty += Number(update.quantityToAdd) || 0;
-
-            // Regra de preços: só aplica alterações que mantenham a compra abaixo da venda
-            const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : target.buyingPrice;
-            const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : target.sellingPrice;
-            const priceError = isHybridProduct(target)
-              ? validateHybridPrices(
-                  target.buyingPriceBulk ?? target.buyingPrice,
-                  target.sellingPriceBulk || proposedSell * (target.conversionRate || 1),
-                  proposedSell,
-                  Number(target.conversionRate) || 1
-                )
-              : validateStandardPrices(proposedBuy, proposedSell, target.isService);
-
-            if (!priceError) {
-              if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
-              if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
-            } else {
-              console.warn('[AI Apply] Preços não alterados (regra de preços):', priceError);
-            }
-            
-            // Re-calculate bulk/retail if applicable
-            if (target.parentUnit && target.conversionRate && target.conversionRate > 1) {
-              const rate = target.conversionRate;
-              target.stockQtyBulk = Math.floor(target.stockQty / rate);
-              target.stockQtyRetail = target.stockQty % rate;
-            }
-
-            await dbService.saveProduct(target);
-            appliedCount++;
-          }
-        }
-      }
-
-      if (appliedCount > 0) {
-        // Log to Audit logs
+  const handleFecharAno = () => {
+    askConfirm(
+      'Fechar o Exercício Fiscal',
+      'Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.',
+      async () => {
         void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
+          id: uid('log-'),
           timestamp: new Date().toISOString(),
-          username: 'Técnico (Assistente IA)',
+          username: 'Técnico',
           ipAddress: '127.0.0.1',
-          action: 'Alterações via Assistente IA',
+          action: 'Fecho de Exercício Fiscal',
           status: 'Sucesso',
-          details: `Aplicado com sucesso ${appliedCount} alteração(ões) baseada(s) na resposta estruturada da Inteligência Artificial.`
+          details: 'Fecho de exercício executado regulamentarmente.'
         });
-
-        showToast(`${appliedCount} Alterações aplicadas com sucesso pelo Assistente IA!`);
-        setAiResponse(null);
-        setAiPrompt('');
-        setAiAttachedFiles([]);
-        await loadAllData();
-        void Promise.resolve(onSettingsUpdated?.()).catch(error => {
-        console.warn('[TechnicalModule] Could not refresh the shared settings after a successful save:', error);
-      });
-      } else {
-        showToast("Nenhuma alteração detectada para aplicar.");
-      }
-    } catch (error: any) {
-      console.error(error);
-      showToast("Erro ao aplicar alterações: " + error.message);
-    }
-  };
-
-  // --- MAINTENANCE & SYSTEM PROCESSORS ---
-  const handleEliminarHistoricoTeste = async () => {
-    if (isSubmitting) return;
-    const conf = await appConfirm(
-      'Tem a certeza absoluta que deseja eliminar todo o histórico de vendas, facturas e recibos de teste? ' +
-      'Isto apaga vendas, quebras, assiduidade, salários pagos, vendas em pausa, transformações e o livro de movimentos de stock. ' +
-      'É irreversível e inutiliza a auditoria fiscal do período. Use apenas em dados de teste, antes de entrar em produção.'
+        showToast('Ano Fiscal fechado e arquivado com sucesso!');
+      },
+      { confirmLabel: 'Fechar exercício' }
     );
-    if (!conf) return;
-
-    const typedPassword = await appPrompt('Para confirmar, introduza a palavra-passe de gestor:');
-    if (typedPassword === null) return;
-    if (!(await verifyAuthorizationPassword(typedPassword, settings))) {
-      await appConfirm('Palavra-passe incorreta. Nada foi eliminado.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await dbService.clearSystemData();
-
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Eliminação de Histórico de Teste',
-        status: 'Sucesso',
-        details: 'Histórico de vendas, facturas e recibos de teste eliminado com sucesso pelo Técnico. Sistema pronto para produção.'
-      });
-
-      showToast('Histórico de vendas, facturas e recibos eliminado com sucesso! Pronto para produção.');
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast('Erro ao limpar histórico de teste.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleZerarSistema = async () => {
-    if (isSubmitting) return;
-    const conf = await appConfirm('TEM A CERTEZA QUE PRETENDE ZERAR O SISTEMA? Esta operação apagará permanentemente todas as vendas, quebras, assiduidade, salários pagos e o livro de movimentos de stock, mas manterá os utilizadores e o catálogo.');
-    if (!conf) return;
-
-    const typedPassword = await appPrompt('Para confirmar, introduza a palavra-passe de gestor:');
-    if (typedPassword === null) return;
-    if (!(await verifyAuthorizationPassword(typedPassword, settings))) {
-      await appConfirm('Palavra-passe incorreta. Nada foi apagado.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await dbService.clearSystemData();
-
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Zerar Sistema Executado',
-        status: 'Sucesso',
-        details: 'Manutenção realizada. Dados de faturação e transações limpos para reinstalação de exercício.'
-      });
-
-      showToast('Manutenção de limpeza concluída!');
-      loadAllData();
-    } catch (err) {
-      console.error(err);
-      showToast('Erro ao zerar o sistema.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleFecharAno = async () => {
-    const conf = await appConfirm('Pretende fechar o Exercício Fiscal Corrente? Esta operação congelará os registos ativos.');
-    if (!conf) return;
-
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Fecho de Exercício Fiscal',
-      status: 'Sucesso',
-      details: 'Fecho de exercício executado regulamentarmente.'
-    });
-
-    showToast('Ano Fiscal fechado e arquivado com sucesso!');
-  };
-
-  const handleNovoAno = async () => {
-    const conf = await appConfirm(
-      'Deseja iniciar um Novo Exercício Comercial? A numeração de facturas, proformas, recibos e notas de crédito passa a usar a série do novo ano. O histórico do ano anterior NÃO é apagado: a legislação obriga a conservá-lo para inspecção.'
-    );
-    if (!conf) return;
-
-    // Nada é apagado. A numeração já é por ano (`FAC-2026-`, `FAC-2027-`, ...),
-    // por isso um novo exercício é apenas uma mudança de data. Antes esta
-    // função chamava clearSystemData() e destruía o livro de vendas.
-
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Abertura de Novo Exercício',
-      status: 'Sucesso',
-      details: 'Novo exercício comercial estabelecido com herança de tabelas cadastrais.'
-    });
-
-    showToast('Novo Exercício Fiscal Inicializado!');
-    loadAllData();
   };
 
   const handleBackupTotal = async () => {
@@ -1122,7 +700,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     document.body.removeChild(link);
 
     void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
+      id: uid('log-'),
       timestamp: new Date().toISOString(),
       username: 'Técnico',
       ipAddress: '127.0.0.1',
@@ -1137,13 +715,9 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   return (
     <div className="space-y-6 animate-fade-in" id="tech_module">
-      {/* Toast banner */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">shield_person</span>
-          <span className="text-sm font-semibold">{toastMessage}</span>
-        </div>
-      )}
+      {/* Toast global (portal z-[9999]): visível sobre qualquer modal */}
+      <Toast message={toastMessage} type={toastType} onDismiss={() => setToastMessage('')} />
+      {confirmDialog}
 
       {/* Title */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
@@ -1212,32 +786,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
               {activeSessions.length}
             </span>
           )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('cloud_firebase')}
-          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
-            activeTab === 'cloud_firebase'
-              ? 'bg-teal-600 text-white border-teal-700 shadow-md ring-2 ring-teal-500/20'
-              : 'bg-white text-slate-700 border-slate-200 hover:border-teal-300 hover:bg-teal-50/50'
-          }`}
-        >
-          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'cloud_firebase' ? 'text-white' : 'text-teal-600'}`}>cloud_sync</span>
-          <span>Nuvem</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('schema')}
-          className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer border ${
-            activeTab === 'schema'
-              ? 'bg-slate-800 text-white border-slate-900 shadow-md ring-2 ring-slate-700/20'
-              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400 hover:bg-slate-100'
-          }`}
-        >
-          <span className={`material-symbols-outlined text-[17px] ${activeTab === 'schema' ? 'text-white' : 'text-slate-700'}`}>database</span>
-          <span>Tabelas BD</span>
         </button>
       </div>
 
@@ -1345,7 +893,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={companyNuit}
                         onChange={(e) => setCompanyNuit(e.target.value)}
-                        placeholder="Ex: 123456789"
+                        placeholder="401976590"
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary font-mono focus:ring-1 focus:ring-primary"
                       />
                     </div>
@@ -1356,6 +904,18 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         value={criticalStockLevel}
                         onChange={(e) => setCriticalStockLevel(Number(e.target.value))}
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Bloqueio de Sessão por Inactividade (min)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={240}
+                        value={sessionLockMinutes}
+                        onChange={(e) => setSessionLockMinutes(Number(e.target.value))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                        placeholder="15"
                       />
                     </div>
                   </div>
@@ -1759,7 +1319,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             setIsVirtualMode(false);
                             showToast('Impressora Térmica associada com sucesso!');
                           } else {
-                            showToast(`Falha de Conexão: ${res.error}`);
+                            showToast(`Falha de Conexão: ${res.error}`, 'error');
                           }
                         }}
                         className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
@@ -1775,7 +1335,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           setIsPrinterConnected(false);
                           setIsVirtualMode(false);
                           setHardwareError(null);
-                          showToast('Dispositivo de impressão desconectado.');
+                          showToast('Dispositivo de impressão desconectado.', 'warning');
                         }}
                         className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1.5 cursor-pointer"
                       >
@@ -1884,27 +1444,30 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             <span className="font-bold text-gray-800 text-[11px]">Ponto #{autoBackupsList.length - idx}</span>
                             <p className="text-[10px] text-gray-500 flex items-center gap-1 font-mono">
                               <span className="material-symbols-outlined text-[12px]">schedule</span>
-                              {new Date(ts).toLocaleString('pt-MZ')}
+                              {new Date(ts).toLocaleString()}
                             </p>
                           </div>
                           <button
                             type="button"
-                            onClick={async () => {
-                              const conf = await appConfirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString('pt-MZ')}? Os dados atuais serão substituídos.`);
-                              if (!conf) return;
-                              try {
-                                const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
-                                if (backupData) {
-                                  await dbService.importAllData(backupData);
-                                  showToast('Banco de dados restaurado com sucesso!');
-                                  loadAllData();
-                                } else {
-                                  showToast('Erro: Dados de backup não encontrados.');
+                            onClick={() => askConfirm(
+                              'Restaurar backup local',
+                              `Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`,
+                              async () => {
+                                try {
+                                  const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
+                                  if (backupData) {
+                                    await dbService.importAllData(backupData);
+                                    showToast('Banco de dados restaurado com sucesso!');
+                                    loadAllData();
+                                  } else {
+                                    showToast('Erro: Dados de backup não encontrados.', 'error');
+                                  }
+                                } catch (err) {
+                                  showToast('Erro ao restaurar o backup.', 'error');
                                 }
-                              } catch (err) {
-                                showToast('Erro ao restaurar o backup.');
-                              }
-                            }}
+                              },
+                              { danger: true, confirmLabel: 'Restaurar' }
+                            )}
                             className="px-2.5 py-1 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-lg text-[10px] transition-colors cursor-pointer"
                           >
                             Restaurar
@@ -1937,15 +1500,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         const file = e.target.files?.[0];
                         if (!file) return;
                         
-                        const autorizacao = await appPrompt(
-                          'Restaurar um ficheiro de backup substitui TODOS os dados actuais.\nIntroduza a palavra-passe de autorização para continuar.'
-                        );
-                        if (autorizacao === null) return;
-                        if (!(await verifyAuthorizationPassword(autorizacao, settings))) {
-                          showToast('Autorização recusada: palavra-passe incorrecta.');
-                          return;
-                        }
-
                         const reader = new FileReader();
                         reader.onload = async (event) => {
                           try {
@@ -1954,7 +1508,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             showToast('Recuperação efetuada com sucesso a partir do ficheiro de backup!');
                             loadAllData();
                           } catch (err) {
-                            showToast('Ficheiro de backup inválido ou corrompido.');
+                            showToast('Ficheiro de backup inválido ou corrompido.', 'error');
                           }
                         };
                         reader.readAsText(file);
@@ -1997,7 +1551,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                     Ciclo e Exercício Fiscal
                   </h5>
                   <p className="text-[11px] text-gray-600 leading-relaxed">
-                    Operações de fecho de exercício contábil anual e abertura do próximo ano financeiro.
+                    Operações de fecho de exercício contábil anual. O histórico de vendas é preservado na íntegra.
                   </p>
                   <div className="space-y-2 pt-1">
                     <button
@@ -2008,42 +1562,28 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       <span className="material-symbols-outlined text-[15px]">lock</span>
                       Fechar Ano Fiscal
                     </button>
-                    <button
-                      type="button"
-                      onClick={handleNovoAno}
-                      className="w-full py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[15px]">calendar_today</span>
-                      Novo Exercício Fiscal
-                    </button>
                   </div>
                 </div>
 
-                {/* Database Reset & Testing Cleansing */}
-                <div className="p-4 bg-red-50/50 border border-red-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-red-900 text-xs uppercase flex items-center gap-1.5">
-                    <span className="material-symbols-outlined text-[16px] text-red-600">warning</span>
-                    Limpeza de Teste e Reposição de Fábrica
+                {/* Data Safety Notice — replaces destructive reset tools (Auditoria FASE 1, T-05) */}
+                <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-xl space-y-3">
+                  <h5 className="font-bold text-emerald-900 text-xs uppercase flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px] text-emerald-600">verified_user</span>
+                    Protecção do Histórico de Vendas
                   </h5>
-                  <p className="text-[11px] text-red-700 leading-relaxed">
-                    Elimine transações de demonstração ou restaure o ERP para o estado inicial de implantação.
+                  <p className="text-[11px] text-emerald-800 leading-relaxed">
+                    As ferramentas de eliminação de histórico e reposição de fábrica foram removidas desta interface:
+                    o histórico de vendas é permanente e nunca pode ser apagado a partir do painel.
+                    Para manutenção com eliminação de dados de teste, contacte o suporte técnico com backup prévio obrigatório.
                   </p>
-                  <div className="space-y-2 pt-1">
+                  <div className="pt-1">
                     <button
                       type="button"
-                      onClick={handleEliminarHistoricoTeste}
-                      className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      onClick={() => setSettingsSubTab('backups')}
+                      className="w-full py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs uppercase transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                     >
-                      <span className="material-symbols-outlined text-[16px]">delete_sweep</span>
-                      Eliminar Histórico de Teste (Vendas e Facturas)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleZerarSistema}
-                      className="w-full py-2.5 bg-white hover:bg-red-100 text-red-700 border border-red-300 rounded-xl font-bold text-xs uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[16px]">delete_forever</span>
-                      Zerar Sistema (Fiscal Reset Total)
+                      <span className="material-symbols-outlined text-[16px]">backup</span>
+                      Gerir Backups em Backups & Restauração
                     </button>
                   </div>
                 </div>
@@ -2069,7 +1609,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                     <th className="p-3">Utilizador</th>
                     <th className="p-3">Nível / Role</th>
                     <th className="p-3">Palavra-passe</th>
-                    <th className="p-3 text-center">MFA Autenticação</th>
                     <th className="p-3 text-center">Ações</th>
                   </tr>
                 </thead>
@@ -2114,13 +1653,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             <span className="ml-2 text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-black uppercase">
                               Troca de senha pendente
                             </span>
-                          )}
-                        </td>
-                        <td className="p-3 text-center">
-                          {u.mfaEnabled ? (
-                            <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-bold text-[10px]">ATIVO</span>
-                          ) : (
-                            <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded text-[10px]">Desativo</span>
                           )}
                         </td>
                         <td className="p-3 text-center space-x-1">
@@ -2173,12 +1705,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder="Mínimo 8 caracteres, com letras e números"
+                  placeholder={editingUser ? 'Deixe em branco para manter a actual' : '4 a 6 caracteres (letras ou números)'}
                   maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
                 <p className="text-[10px] text-gray-500 mt-1">
-                  A palavra-passe deve ter pelo menos 8 caracteres e combinar letras com números.
+                  A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.
                 </p>
               </div>
 
@@ -2207,7 +1739,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             if (!isDisabled) {
                               if (isChecked) {
                                 if (usrRoles.length === 1) {
-                                  showToast('O utilizador deve possuir pelo menos 1 nível de permissão.');
+                                  showToast('O utilizador deve possuir pelo menos 1 nível de permissão.', 'error');
                                   return;
                                 }
                                 setUsrRoles(usrRoles.filter(item => item !== r.id));
@@ -2231,15 +1763,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 py-2">
-                <input
-                  type="checkbox"
-                  id="mfa"
-                  checked={usrMfa}
-                  onChange={(e) => setUsrMfa(e.target.checked)}
-                />
-                <label htmlFor="mfa" className="font-bold text-gray-700">Ativar Autenticação de Dois Fatores (MFA)</label>
-              </div>
 
               <div className="flex items-center gap-2 py-2">
                 <input
@@ -2269,7 +1792,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                       setUsrUsername('');
                       setUsrPassword('');
                       setUsrRoles(['Operador']);
-                      setUsrMfa(false);
                     }}
                     className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold rounded uppercase text-[10px]"
                   >
@@ -2343,67 +1865,10 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                 <span className={`material-symbols-outlined text-[16px] ${isArchivingAuditLogs ? 'animate-spin' : ''}`}>inventory_2</span>
                 {isArchivingAuditLogs ? 'A arquivar…' : 'Arquivar lote seguro'}
               </button>
-              <button
-                type="button"
-                onClick={() => void handleCheckNumbering()}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-md text-xs font-black transition-colors"
-                title="Verifica se falta algum número na sequência fiscal do ano corrente"
-              >
-                <span className="material-symbols-outlined text-[16px]">tag</span>
-                Verificar numeração
-              </button>
             </div>
           </div>
 
           <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-                <div>
-                  <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Ligação ao Firebase</h4>
-                  <p className="text-xs text-gray-500">
-                    Antes de publicar as regras do Firestore, esta linha tem de dizer "sessão ativa".
-                    Sem sessão, as regras novas recusam leituras e escritas.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void handleCheckFirebaseConnection()}
-                  disabled={checkingFirebaseDiag}
-                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 disabled:opacity-60 text-white rounded-md text-xs font-black transition-colors"
-                >
-                  <span className={`material-symbols-outlined text-[16px] ${checkingFirebaseDiag ? 'animate-spin' : ''}`}>sync</span>
-                  Verificar ligação
-                </button>
-              </div>
-
-              {firebaseDiag && (
-                <div className="grid gap-2 sm:grid-cols-2 text-xs">
-                  <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2">
-                    <span className="block text-[10px] font-bold uppercase text-gray-500">Projeto</span>
-                    <span className="font-mono text-slate-800 break-all">{firebaseDiag.projectId}</span>
-                  </div>
-                  <div className={`rounded-md border px-3 py-2 ${firebaseDiag.signedIn ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
-                    <span className="block text-[10px] font-bold uppercase text-gray-500">Sessão anónima</span>
-                    <span className={`font-bold ${firebaseDiag.signedIn ? 'text-emerald-800' : 'text-red-800'}`}>
-                      {firebaseDiag.signedIn
-                        ? `ativa (${firebaseDiag.uid ? firebaseDiag.uid.slice(0, 8) + '…' : 'uid oculto'})`
-                        : 'inativa — ative "Anónimo" em Authentication'}
-                    </span>
-                  </div>
-                  <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2 sm:col-span-2">
-                    <span className="block text-[10px] font-bold uppercase text-gray-500">Base de dados</span>
-                    <span className="font-mono text-slate-800 break-all">{firebaseDiag.databaseId}</span>
-                  </div>
-                  {firebaseDiag.error && (
-                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 sm:col-span-2">
-                      <span className="block text-[10px] font-bold uppercase text-gray-500">Erro devolvido</span>
-                      <span className="font-mono text-amber-900 break-all">{firebaseDiag.error}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
               <div>
                 <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">
@@ -2450,7 +1915,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   ) : (
                     auditLogs.map(log => (
                       <tr key={log.id} className="hover:bg-gray-50">
-                        <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString('pt-MZ')}</td>
+                        <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
                         <td className="p-3 font-bold text-gray-800">{log.username}</td>
                         <td className="p-3 font-mono text-gray-600">{log.ipAddress}</td>
                         <td className="p-3 font-semibold">{log.action}</td>
@@ -2545,7 +2010,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           {sess.role}
                         </span>
                       </td>
-                      <td className="p-3 font-mono text-gray-500">{new Date(sess.loginTime).toLocaleString('pt-MZ')}</td>
+                      <td className="p-3 font-mono text-gray-500">{new Date(sess.loginTime).toLocaleString()}</td>
                       <td className="p-3 font-mono text-gray-600">{sess.ipAddress}</td>
                       <td className="p-3 text-right">
                         <button
@@ -2564,190 +2029,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
         </div>
       )}
 
-      {activeTab === 'schema' && (
-        <DatabaseSchemaViewer />
-      )}
-
       {/* --- NUVEM & firebase MANAGEMENT VIEW --- */}
-      {activeTab === 'cloud_firebase' && (
-        <div className="space-y-6">
-          {/* Status Header Card */}
-          <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 text-white p-6 rounded-2xl shadow-xl border border-slate-700/60 relative overflow-hidden">
-            <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-emerald-400 text-2xl">cloud_sync</span>
-                  <h4 className="text-xl font-bold tracking-tight">Gestão da Nuvem & Firebase PostgreSQL</h4>
-                </div>
-                <p className="text-slate-300 text-xs max-w-2xl">
-                  Sincronização bidirecional em tempo real para inventários, vendas, colaboradores, presenças e auditoria comercial com o banco PostgreSQL.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                {dbService.isConfigured() ? (
-                  <div className="bg-emerald-500/20 border border-emerald-500/40 px-4 py-2 rounded-xl flex items-center gap-2 text-emerald-300">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span className="text-xs font-bold uppercase tracking-wider">Conectado à Nuvem</span>
-                  </div>
-                ) : (
-                  <div className="bg-amber-500/20 border border-amber-500/40 px-4 py-2 rounded-xl flex items-center gap-2 text-amber-300">
-                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
-                    <span className="text-xs font-bold uppercase tracking-wider">Modo Local (IndexedDB)</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Firebase Configuration Form */}
-            <div className="bg-white border border-gray-200 p-6 rounded-2xl shadow-sm space-y-4">
-              <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
-                <span className="material-symbols-outlined text-emerald-600">settings_remote</span>
-                <h5 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Parâmetros do Servidor Firebase</h5>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    URL do Servidor Firebase (Project URL)
-                  </label>
-                  <input
-                    type="text"
-                    value={firebaseUrlInput}
-                    onChange={(e) => setFirebaseUrlInput(e.target.value)}
-                    placeholder="https://xyzcompany.firebase.co"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  />
-                  <p className="text-[10px] text-gray-500 mt-0.5">Encontrado em Settings -&gt; API no seu dashboard do Firebase.</p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    Chave de API Anon / Public (anon key)
-                  </label>
-                  <input
-                    type="password"
-                    value={firebaseKeyInput}
-                    onChange={(e) => setFirebaseKeyInput(e.target.value)}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  />
-                  <p className="text-[10px] text-gray-500 mt-0.5">Chave pública de acesso com regras de segurança de linha (RLS).</p>
-                </div>
-
-                {/* Connection Test Diagnostic Message */}
-                {firebaseTestResult && (
-                  <div className={`p-3 rounded-lg border text-xs font-medium ${
-                    firebaseTestResult.success ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
-                  }`}>
-                    <div className="flex items-center gap-1.5 font-bold mb-1">
-                      <span className="material-symbols-outlined text-[16px]">
-                        {firebaseTestResult.success ? 'check_circle' : 'error'}
-                      </span>
-                      <span>{firebaseTestResult.success ? 'Diagnóstico Positivo' : 'Erro de Conexão'}</span>
-                      {firebaseTestResult.latencyMs !== undefined && (
-                        <span className="ml-auto text-[10px] bg-white/80 px-1.5 py-0.5 rounded font-mono">
-                          {firebaseTestResult.latencyMs}ms
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] leading-relaxed">{firebaseTestResult.message}</p>
-                  </div>
-                )}
-
-                {/* Action Buttons */}
-                <div className="pt-2 flex flex-wrap gap-2">
-                  <button
-                    onClick={handleTestFirebaseConnection}
-                    disabled={testingFirebase}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold uppercase transition-all shadow-sm active:scale-95 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">network_ping</span>
-                    {testingFirebase ? 'A Testar...' : 'Testar Conexão'}
-                  </button>
-
-                  <button
-                    onClick={handleSaveFirebaseConfig}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold uppercase transition-all shadow-sm active:scale-95 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">save</span>
-                    Guardar & Ativar
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Sync Command & Summary */}
-            <div className="bg-white border border-gray-200 p-6 rounded-2xl shadow-sm space-y-4 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
-                  <span className="material-symbols-outlined text-indigo-600">sync_alt</span>
-                  <h5 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Sincronização em Massa (11 Tabelas)</h5>
-                </div>
-
-                <p className="text-xs text-gray-600 my-3 leading-relaxed">
-                  Garante que todos os registos guardados no navegador (IndexedDB) sejam enviados para o Firebase PostgreSQL e vice-versa.
-                </p>
-
-                {firebaseSyncSummary && (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 my-3 max-h-48 overflow-y-auto pr-1">
-                    {Object.entries(firebaseSyncSummary).map(([tbl, stats]: [string, any]) => (
-                      <div key={tbl} className="bg-slate-50 border border-slate-200 p-2 rounded-lg text-[11px]">
-                        <p className="font-bold text-slate-800 capitalize truncate">{tbl}</p>
-                        <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                          <span>Local: {stats?.local ?? 0}</span>
-                          <span>Nuvem: {stats?.cloud ?? 0}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <button
-                  onClick={handleSyncAllWithFirebase}
-                  disabled={syncingFirebase || !dbService.isConfigured()}
-                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold uppercase transition-all shadow-md active:scale-98 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <span className={`material-symbols-outlined text-[18px] ${syncingFirebase ? 'animate-spin' : ''}`}>
-                    {syncingFirebase ? 'sync' : 'published_with_changes'}
-                  </span>
-                  {syncingFirebase ? 'A Sincronizar Tabelas...' : 'Sincronizar Todas as Tabelas Agora'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Sync Operations Live Log Box */}
-          {firebaseSyncLogs.length > 0 && (
-            <div className="bg-slate-900 text-slate-100 p-4 rounded-2xl border border-slate-800 font-mono text-xs shadow-inner space-y-2">
-              <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                <span className="font-bold text-emerald-400 flex items-center gap-1 text-[11px]">
-                  <span className="material-symbols-outlined text-[14px]">terminal</span>
-                  Log de Operações de Sincronização
-                </span>
-                <button
-                  onClick={() => setFirebaseSyncLogs([])}
-                  className="text-[10px] text-slate-400 hover:text-slate-200 underline cursor-pointer"
-                >
-                  Limpar Log
-                </button>
-              </div>
-              <div className="max-h-60 overflow-y-auto space-y-1 text-[11px] pr-2">
-                {firebaseSyncLogs.map((log, idx) => (
-                  <div key={idx} className="leading-tight text-slate-300">
-                    {log}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Confirmation Modal for User Deletion */}
       {userToDelete && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
@@ -2783,37 +2065,6 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
           </div>
         </div>
       )}
-      {showNumberingModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-5 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-black text-slate-800">Controlo de Numeração Fiscal</h3>
-              <button onClick={() => setShowNumberingModal(false)} className="text-slate-400 hover:text-slate-700">
-                <span className="material-symbols-outlined">close</span>
-              </button>
-            </div>
-            {loadingNumbering ? (
-              <p className="text-sm text-slate-500">A verificar…</p>
-            ) : numberingReport.length === 0 ? (
-              <p className="text-sm text-slate-500">Sem dados.</p>
-            ) : (
-              <ul className="space-y-2">
-                {numberingReport.map(item => (
-                  <li key={item.label} className={`rounded-lg border p-2.5 ${item.buraco ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
-                    <p className="text-xs font-black text-slate-800">{item.label}</p>
-                    <p className={`text-[11px] ${item.buraco ? 'text-amber-800' : 'text-emerald-800'}`}>{item.descricao}</p>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <p className="text-[10px] text-slate-500 leading-relaxed">
-              Uma lacuna não é necessariamente um erro: pode ser um documento anulado ou uma emissão falhada.
-              O importante é conseguir justificar cada número em falta.
-            </p>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }
