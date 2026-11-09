@@ -1,0 +1,549 @@
+================================================================================
+PR-01 — FECHAR O FIRESTORE (pacote pronto a aplicar)
+================================================================================
+Projecto .....: AGRO — XICOMO & SERVICOS, LDA
+Objectivo ....: impedir que uma sessao anonima (qualquer pessoa com a chave
+                publica) apague o historico de vendas, a numeracao fiscal ou
+                reescreva o arquivo de auditoria.
+Data ..........: 09 de Novembro de 2026
+Estado ........: PROPOSTA — nada foi aplicado. O ficheiro do sistema continua
+                como estava.
+Tempo estimado : 2 a 3 horas (incluindo verificacao e publicacao)
+Risco .........: MEDIO — duas regras novas dependem de um mecanismo que tem de
+                ser testado antes de publicar (explicado na seccao 6).
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. O QUE ESTE PR FAZ, EM LINGUAGEM DE BALCAO
+--------------------------------------------------------------------------------
+
+Hoje, qualquer pessoa que abra o site e saiba o endereco do projecto consegue
+pedir ao Firebase: "apaga esta venda". O Firebase responde que sim, porque as
+regras so perguntam "esta autenticado?" — e a aplicacao cria uma sessao anonima
+para qualquer visitante.
+
+Este PR muda isso em 8 colecções (mais a auditoria, que passa a ter delete
+condicionado). Em linguagem de balcao:
+
+  - O LIVRO DE VENDAS deixa de poder ser arrancado. Pode escrever-se uma venda
+    nova, pode anular-se (que e uma escrita normal, com estorno), mas nao ha
+    forma de apagar a pagina.
+  - O LIVRO DE NUMERACAO (counters) fica trancado. Se alguem apagasse um
+    contador, o sistema voltaria a emitir numeros ja usados — duas facturas com
+    o mesmo numero.
+  - As DEFINICOES (nome da empresa, NUIT, codigo de gestor) deixam de poder ser
+    apagadas por um clique anonimo.
+  - O ARQUIVO DE AUDITORIA so pode ser "movido" — nunca apagado directamente.
+    (E aqui esta o unico ponto delicado: ver seccao 6.)
+
+O QUE ESTE PR NAO FAZ (e importante nao vender ilusoes):
+  - Nao impede LER. Uma sessao anonima continua a poder ler vendas, salarios e
+    a colecção de credenciais. Isso so fecha na Onda 3 (PR-11/PR-12), porque
+    exige mudar o login.
+  - Nao impede ALTERAR o total de uma venda ja emitida. Isso e um PR seguinte
+    (PR-01c), com regras por campo.
+  - Nao resolve as palavras-passe no codigo (isso e o PR-03).
+
+Mesmo assim, e o PR com melhor relacao risco/beneficio de todo o plano: em
+duas horas, o pior cenario ("apagaram-me o historico") deixa de estar a um
+clique de distancia.
+
+
+--------------------------------------------------------------------------------
+2. PROVA: QUEM APAGA O QUE, HOJE (verificado no codigo)
+--------------------------------------------------------------------------------
+Antes de proibir um delete, verifiquei se a aplicacao o usa. Resultado:
+
+  COLECCAO          A APP APAGA?   ONDE / EVIDENCIA                    DECISAO
+  sales             NAO             nenhuma chamada de delete           PROIBIR
+  counters          NAO             nenhuma                             PROIBIR
+  settings          NAO             nenhuma                             PROIBIR
+  transformations   metodo existe   firebaseDB.ts:2639, sem chamadores PROIBIR
+  customers         metodo existe   firebaseDB.ts:3417, sem chamadores PROIBIR
+  attendance        NAO             nenhuma                             PROIBIR
+  losses            NAO             nenhuma                             PROIBIR
+  payroll_payments  NAO             nenhuma                             PROIBIR
+  audit_logs        SIM (arquivo)   firebaseDB.ts:3130-3160 (batch)     CONDICIONAR
+  products          SIM             StockModule.tsx:246                 MANTER
+  employees         SIM             HRModule.tsx:428                    MANTER
+  credentials       SIM             TechnicalModule.tsx:545             MANTER
+  paused_sales      SIM             PDVModule.tsx:959 e :991            MANTER
+  active_sessions   SIM             firebaseDB.ts:3273                  MANTER
+  active_cart       SIM             clearActiveCart                     MANTER
+
+Como obtive isto:
+  grep -rn "deleteRow(\|deleteProduct(\|deleteCredential(\|deleteCustomer(\|
+           deleteEmployee(\|deleteTransformation(\|deletePausedSale(\|\.delete()" src/
+
+  Resultado: as unicas colecções com delete vivo sao produtos, funcionarios,
+  credenciais, vendas suspensas, sessoes e carrinho. Todo o resto era delete
+  "por conveniencia", aberto a qualquer sessao anonima.
+
+NOTA IMPORTANTE — correcao ao PLANO-MELHORIA-COMPLETO:
+  O plano (PB-01) dizia "credentials: leitura restrita" e "products: delete
+  negado" na fase 1. Ao verificar, isso PARTIRIA o login (o cliente le os
+  hashes para autenticar) e a eliminacao de produtos (StockModule.tsx:246).
+  Este pacote corrige o plano: essas duas mudancas passam para PR-01b
+  (soft-delete de produtos) e Onda 3 (login por servidor). Melhor um PR pequeno
+  e seguro do que um grande que quebra a loja na segunda-feira.
+
+
+--------------------------------------------------------------------------------
+3. O FICHEIRO COMPLETO PROPOSTO — firestore.rules
+--------------------------------------------------------------------------------
+Substituir TODO o conteudo de firestore.rules por isto. As linhas com "<== MUDOU"
+sao as que diferem do ficheiro actual. Tamanho: 92 -> 158 linhas, mas apenas 85
+sao codigo efectivo (73 sao comentario/branco); a maior parte do acrescimo e
+explicacao no proprio ficheiro.
+
+--------------------------------------------------------------------------- 8< ---
+rules_version = '2';
+// ---------------------------------------------------------------------------
+// Regras do Firestore — AGRO-XICOMO
+//
+// ATENCAO: exigem autenticacao (Firebase Anonymous Auth ligado no projeto).
+// A versao anterior era `allow read, write: if true`, o que expunha TODA a
+// base — vendas, credenciais (mesmo em hash), salarios — a qualquer pessoa que
+// tivesse o projectId (que esta no bundle do frontend).
+//
+// Ultima alteracao: 2026-11-09 — PR-01.
+//   * sales, counters, settings, transformations, customers, attendance,
+//     losses e payroll_payments deixam de aceitar delete do cliente.
+//   * audit_logs so aceita delete quando o documento ja foi copiado para
+//     audit_logs_archive na MESMA operacao (getAfter).
+//   * credentials e products mantem-se: o login le os hashes e a eliminacao
+//     de produto e uma funcao da aplicacao. Fecham em PR-01b e na Onda 3.
+//
+// Antes de publicar (`firebase deploy --only firestore:rules`):
+//   1. Console Firebase -> Authentication -> Sign-in method -> ativar "Anonimo".
+//   2. Abrir a aplicacao e confirmar que os dados aparecem.
+//   3. Testar no simulador da consola (Rules Playground) os 6 casos da seccao 5.
+//   4. So entao publicar. Ver docs/seguranca.md.
+//
+// O ficheiro com as regras antigas esta em firestore.rules.legacy-open, apenas
+// para consulta/historico. NAO o publique.
+// ---------------------------------------------------------------------------
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Negado por omissao a tudo o que nao esteja listado abaixo.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Operacao normal ----------------------------------------------------
+
+    match /products/{docId} {
+      allow read, create, update: if request.auth != null;
+      // MANTER por agora: StockModule.tsx:246 apaga produtos.
+      // PR-01b troca por soft-delete (deletedAt) e este delete passa a false.
+      allow delete: if request.auth != null;
+    }
+
+    match /sales/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /losses/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /transformations/{docId} {
+      allow read, create, update: if request.auth != null;
+      // dbService.deleteTransformation existe (firebaseDB.ts:2639) mas nao e
+      // chamado por nenhum ecra. Cancelar e um update (status), nao um delete.
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /employees/{docId} {
+      allow read, create, update: if request.auth != null;
+      // MANTER por agora: HRModule.tsx:428 elimina funcionarios.
+      // PR-01b troca por desactivacao (deletedAt) para preservar historico
+      // salarial e disciplinar.
+      allow delete: if request.auth != null;
+    }
+
+    match /attendance/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /customers/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /paused_sales/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /active_cart/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /settings/{docId} {
+      allow read, create, update: if request.auth != null;
+      // Contem nome da empresa, NUIT e o codigo de gestor de stock.
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /counters/{docId} {
+      allow read, create, update: if request.auth != null;
+      // Numeracao fiscal. Se um contador for apagado, o sistema reemite
+      // numeros ja usados — duas facturas com o mesmo numero.
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /deletions/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /payroll_payments/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;                                   // <== MUDOU
+    }
+
+    match /active_sessions/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // --- Credenciais da aplicacao -------------------------------------------
+    // O login e feito na aplicacao (nao no Firebase Auth): o cliente le o hash
+    // para o comparar. Enquanto isso for verdade, NAO se pode negar a leitura
+    // aqui — partiria o login de toda a equipa.
+    // Fecho definitivo: PR-11/PR-12 (login por Cloud Function + custom claims).
+    match /credentials/{docId} {
+      allow read, create, update, delete: if request.auth != null;
+    }
+
+    // --- Auditoria -----------------------------------------------------------
+    // Os registos nao podem ser EDITADOS. Podem ser ARQUIVADOS: o arquivo copia
+    // o documento para `audit_logs_archive` e apaga o original, na mesma
+    // operacao (firebaseDB.ts:3115-3160).
+    // Para impedir que se apague um log "a mao", o delete passa a exigir prova
+    // de que a copia existe DEPOIS da operacao (getAfter).
+    match /audit_logs/{docId} {
+      allow read, create: if request.auth != null;
+      allow update: if false;
+      allow delete: if request.auth != null
+        && getAfter(/databases/$(database)/documents/audit_logs_archive/$(docId)).data.archivedFrom == 'audit_logs';  // <== MUDOU
+    }
+
+    match /audit_logs_archive/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Livro de movimentos de stock ---------------------------------------
+    match /stock_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+
+    // --- Dividas de clientes ------------------------------------------------
+    match /debts/{docId} {
+      allow read, create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // --- Livro de caixa -----------------------------------------------------
+    match /cash_movements/{docId} {
+      allow read, create: if request.auth != null;
+      allow update, delete: if false;
+    }
+  }
+}
+--------------------------------------------------------------------------- 8< ---
+
+
+--------------------------------------------------------------------------------
+4. RESUMO DAS 11 MUDANCAS (para revisao rapida)
+--------------------------------------------------------------------------------
+   #   COLECCAO            ANTES                              DEPOIS
+   1   sales               read+write                          delete: false
+   2   losses              read+write                          delete: false
+   3   transformations     read+write                          delete: false
+   4   attendance          read+write                          delete: false
+   5   customers           read+write                          delete: false
+   6   settings            read+write                          delete: false
+   7   counters            read+write                          delete: false
+   8   payroll_payments    read+write                          delete: false
+   9   audit_logs          read+create+delete                  delete so com copia
+  10   *                   "write" implicito (cria/edita/apaga)  separado em
+                                                                 create/update/delete
+  11   products, employees, credentials, paused_sales, active_sessions,
+       active_cart, deletions — INALTERADOS (a app usa-os)
+
+  Tamanho da mudanca: 92 -> 158 linhas totais; 85 de codigo efectivo
+  (o ficheiro actual tem 56). O acrescimo e comentario que explica cada tranca —
+  deliberado: quem voltar a mexer nestas regras tem de perceber porque estao
+  assim.
+
+
+--------------------------------------------------------------------------------
+5. VERIFICACAO ANTES DE PUBLICAR — 6 simulacoes no Rules Playground
+--------------------------------------------------------------------------------
+Onde: Console Firebase -> Firestore Database -> separador "Regras" -> botao
+"Simulador de regras" (Rules Playground). Escolher "Autenticado" (e nao
+"Anonimo") no tipo de autenticacao, porque o app usa sessao anonima JA
+autenticada no Firebase.
+
+  #   OPERACAO                            CAMINHO                          ESPERADO
+  1   delete   (autenticado)             /sales/qualquer_id               NEGADO
+  2   update   (autenticado)             /sales/qualquer_id  {status:...}  PERMITIDO
+  3   create   (autenticado)             /sales/venda_teste               PERMITIDO
+  4   delete   (autenticado)             /counters/document_numbers       NEGADO
+  5   delete   (autenticado)             /audit_logs/log_teste            NEGADO
+      (no simulador, sem o documento de arquivo na mesma operacao, tem de ser
+      negado; se der PERMITIDO, a regra getAfter esta mal escrita)
+  6   delete   (NAO autenticado)         /sales/qualquer_id               NEGADO
+
+  Se as 6 derem o esperado, a sintaxe das regras esta correcta e o
+  comportamento e o pretendido. Isto demora 10 minutos e nao toca em producao.
+
+  O teste automatizado (seccao 7) verifica a FORMA do ficheiro; o simulador
+  verifica o COMPORTAMENTO. Os dois juntos sao o minimo aceitavel.
+
+
+--------------------------------------------------------------------------------
+6. O PONTO DELICADO: o arquivo de logs (getAfter)
+--------------------------------------------------------------------------------
+Porque e delicado
+  O arquivo de auditoria, escrito ha meses, faz uma unica operacao em lote:
+  copia o log para audit_logs_archive e apaga o original. Se eu negar o delete
+  puro e simples, o arquivo deixa de funcionar — e o botao "Arquivar registos"
+  do modulo tecnico passa a dar erro.
+
+Como resolvo
+  `getAfter(...)` pergunta ao Firebase: "depois desta operacao, o documento de
+  arquivo vai existir e ter archivedFrom = 'audit_logs'?" Se sim, o delete e
+  autorizado. Se alguem tentar apagar um log sozinho, nao ha copia prevista e a
+  regra nega.
+
+Riscos reais (nao escondo nenhum)
+  R1. Se a versao do Firestore nao suportar getAfter neste contexto, a regra
+      da erro -> delete negado -> o arquivo parte.
+      Probabilidade: baixa (getAfter existe nas regras v2). O teste 5 do
+      simulador detecta isto ANTES de publicar.
+  R2. Se o arquivo mudar de forma (por exemplo, passar a apagar sem copiar),
+      volta a falhar. Por isso o teste automatizado (seccao 7) passa a vigiar a
+      presenca de `getAfter` e de `archivedFrom`.
+  R3. Um erro aqui afecta apenas o arquivo de logs, nao vendas nem stock.
+
+PLANO B (se o simulador falhar ou se algo correr mal)
+  Trocar as 3 linhas do audit_logs por:
+      allow delete: if request.auth != null;
+  e manter as outras 8 mudancas (que nao dependem de nada disto). Registar como
+  risco aceite ate o arquivo passar para uma funcao de servidor (Onda 3).
+
+
+--------------------------------------------------------------------------------
+7. TESTE AUTOMATIZADO — acrescentar a test/rules_coverage_test.ts
+--------------------------------------------------------------------------------
+O teste actual (71 linhas) verifica que todas as colecções usadas estao listadas
+e que nao voltaram as regras abertas. Vai passar a verificar tambem as novas
+trancas. Inserir o bloco ANTES da linha final `console.log(...)`:
+
+--------------------------------------------------------------------------- 8< ---
+// --- PR-01: parser de blocos por chaves balanceadas (nao por regex guloso) ---
+// NOTA: a primeira versao deste teste usava um regex que, com as regras escritas
+// numa so linha por colecção, engolia as colecções vizinhas e podia dar "verde"
+// falso. Este parser foi validado contra as regras antigas e as novas.
+function blocosDeRegras(texto: string): Map<string, string> {
+  const mapa = new Map<string, string>();
+  const re = /match\s+\/([a-z_]+)\/\{([a-zA-Z]+)\}\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(texto)) !== null) {
+    let i = re.lastIndex;
+    let nivel = 1;
+    const inicio = i;
+    while (i < texto.length && nivel > 0) {
+      if (texto[i] === '{') nivel++;
+      else if (texto[i] === '}') nivel--;
+      i++;
+    }
+    mapa.set(m[1], texto.slice(inicio, i - 1));
+  }
+  return mapa;
+}
+
+const blocos = blocosDeRegras(regras);
+const bloco = (n: string) => blocos.get(n) ?? '';
+
+ok('o parser encontrou as colecções (>= 15)', blocos.size >= 15);
+
+// Sanidade: se um bloco engolir o vizinho, todas as asserções abaixo mentem.
+for (const n of ['sales', 'counters', 'settings', 'audit_logs', 'credentials']) {
+  const b = bloco(n);
+  ok(`${n}: bloco isolado e nao vazio`, b.length > 10 && !/match\s+\//.test(b));
+}
+
+const semDelete = ['sales', 'losses', 'transformations', 'attendance',
+                   'customers', 'settings', 'counters', 'payroll_payments'];
+for (const n of semDelete) {
+  ok(`${n}: delete negado ao cliente`, /allow\s+delete\s*:\s*if\s+false/.test(bloco(n)));
+}
+
+for (const n of ['sales', 'counters', 'settings', 'products']) {
+  ok(`${n}: escrita continua permitida`, /allow\s+(read\s*,\s*)?(create|update)/.test(bloco(n)));
+}
+
+const audit = bloco('audit_logs');
+ok('audit_logs: delete exige copia para o arquivo (getAfter)',
+   audit.length > 10 && /getAfter\(/.test(audit) && /audit_logs_archive/.test(audit));
+ok('audit_logs: delete nao e livre',
+   audit.length > 10 && !/allow\s+delete\s*:\s*if\s+request\.auth\s*!=\s*null\s*;/.test(audit));
+ok('audit_logs: continua sem permitir edicao', /allow\s+update\s*:\s*if\s+false/.test(audit));
+
+ok('credentials: leitura mantida (login depende dela)', /allow\s+read/.test(bloco('credentials')));
+
+ok('nenhum acesso "read, write" em colecções de dinheiro',
+   !/match\s+\/(sales|cash_movements|debts|stock_movements)\/\{[a-zA-Z]+\}\s*\{\s*allow\s+read\s*,\s*write/.test(regras));
+--------------------------------------------------------------------------- 8< ---
+
+Como correr:  npx tsx test/rules_coverage_test.ts
+Esperado:     "RESULTADO: N testes passaram, 0 falharam"
+Se falhar:    a mensagem diz exactamente qual colecção perdeu a tranca.
+
+Nota: este teste le o ficheiro de regras como texto. Nao substitui o simulador
+(seccao 5): um texto correcto com semantica errada passaria aqui. Por isso os
+dois sao necessarios.
+
+
+--------------------------------------------------------------------------------
+8. PUBLICACAO — passo a passo, do mais seguro para o definitivo
+--------------------------------------------------------------------------------
+
+8.0 PASSO 0 — COMPARAR AS REGRAS PUBLICADAS COM AS DO REPOSITORIO
+  Isto nao estava na primeira versao deste documento e e obrigatorio: se a
+  producao ainda tiver as regras legacy (abertas) ou uma versao intermédia, o
+  deploy do PR-01 muda mais do que o previsto.
+  Consola Firebase -> Firestore -> Regras -> selecionar tudo -> copiar para
+  docs/regras-publicadas-2026-11-09.txt e comparar com firestore.rules.
+  Se forem diferentes: PARAR, registar as diferenças e rever este PR antes de
+  publicar.
+
+8.1 ANTES DE TUDO (2 minutos)
+  cd <pasta do projecto>
+  cp firestore.rules firestore.rules.bak-2026-11-09        # rede de seguranca
+  git add firestore.rules && git commit -m "PR-01: fecha delete em vendas,
+      numeracao, definicoes e auditoria"                    # (quando autorizar)
+  # Guardar tambem uma copia das regras ACTUAIS publicadas:
+  # Consola Firebase -> Firestore -> Regras -> selecionar tudo -> Ctrl+C ->
+  # colar em docs/regras-publicadas-2026-11-09.txt
+
+8.2 APLICAR O FICHEIRO
+  Substituir firestore.rules pelo conteudo da seccao 3.
+  Correr o teste: npx tsx test/rules_coverage_test.ts   -> 0 falhas
+
+8.3 SIMULADOR (obrigatorio)
+  Fazer as 6 simulacoes da seccao 5 na consola, com as regras novas AINDA NAO
+  publicadas (o simulador permite testar o texto antes de publicar).
+
+8.4 PUBLICAR (1 minuto, e atomico)
+  npx firebase-tools deploy --only firestore:rules
+  # Se houver alias/projecto: --project <id-de-producao>. Confirmar no output
+  # que o projecto e o certo (gen-lang-client-0896153566).
+
+8.5 VERIFICAR NA APP, NA HORA (10 minutos, nesta ordem)
+  [ ] Abrir o sistema e fazer login (se falhar aqui: rollback imediato).
+  [ ] Vender 1 artigo a dinheiro e imprimir recibo.
+  [ ] Anular essa venda em Faturas (com senha de gestor) e confirmar stock
+      reposto.
+  [ ] Adicionar um produto e elimina-lo (deve continuar a funcionar — e uma das
+      colecções que ficou aberta de proposito).
+  [ ] Abrir Painel Tecnico -> Auditoria -> "Arquivar registos antigos"
+      (se existirem registos antigos). ESTE E O TESTE CRITICO do getAfter.
+  [ ] Registar uma quebra de stock e uma entrada de caixa.
+  [ ] Marcar presenca de um funcionario.
+
+8.6 NAS 24 HORAS SEGUINTES
+  [ ] Ver se aparece "permission-denied" na consola do browser em alguma accao.
+  [ ] Confirmar que o arquivo de logs continua a funcionar.
+  [ ] Nenhuma venda perdida (comparar contagem de vendas do dia).
+
+
+--------------------------------------------------------------------------------
+9. O QUE FAZER SE ALGO FALHAR (sintomas -> causa -> accao)
+--------------------------------------------------------------------------------
+  SINTOMA                                  CAUSA PROVAVEL          ACCAO
+  Login deixa de funcionar                 nao devia acontecer     rollback
+                                           (credentials intacta)   imediato
+  "Arquivar registos" da permission-denied getAfter rejeitado       plano B (6)
+  Anular venda da permission-denied        regra de sales mal      comparar com
+                                           escrita                 a seccao 3
+  Eliminar produto da permission-denied    (nao devia)             rollback
+  Nao consigo gravar vendas                sales perdeu create     corrigir a
+                                                                   clausula
+  Tudo funciona mas os logs nao arquivam   getAfter devolve null   plano B (6)
+
+ROLLBACK (2 minutos, sem perda de dados)
+  1. git checkout -- firestore.rules
+     (ou: cp firestore.rules.bak-2026-11-09 firestore.rules)
+  2. npx firebase-tools deploy --only firestore:rules
+  As regras sao substituidas por inteiro: voltar atras e imediato e nao toca
+  em dados. Um delete que tenha passado antes do rollback nao se recupera —
+  mas o objectivo do PR e precisamente impedir isso.
+
+
+--------------------------------------------------------------------------------
+10. RISCOS DO PR-01 (tabela honesta)
+--------------------------------------------------------------------------------
+  #   RISCO                                  PROB.  IMPACTO   MITIGACAO
+  R1  getAfter nao suportado / mal escrito  baixa  medio     simulacao 5 + plano B
+  R2  Alguma funcao usa delete nao mapeado  baixa  alto      grep feito (seccao 2);
+                                                             verificacao 8.5
+  R3  Cache antigo no browser esconde erro  media  baixo     testar em janela
+                                                             nova / F5 forte
+  R4  Regras publicadas no projecto errado  baixa  alto      confirmar --project
+                                                             no output
+  R5  Equipa continua com sessoes abertas   certa  nenhum     nao afecta: as
+                                                             regras aplicam-se
+                                                             a todas as sessoes
+
+  O que este PR NAO protege (repetido de proposito):
+  leitura de qualquer colecção, alteracao de valores de vendas ja emitidas,
+  credenciais legiveis, e as palavras-passe que estao no codigo.
+
+
+--------------------------------------------------------------------------------
+11. CHECKLIST DE CONCLUSAO (para marcar e arquivar)
+--------------------------------------------------------------------------------
+  [ ] firestore.rules substituido e revisto por uma segunda pessoa
+  [ ] npx tsx test/rules_coverage_test.ts -> 0 falhas
+  [ ] 6 simulacoes no Rules Playground -> resultado esperado
+  [ ] Copia das regras antigas guardada (ficheiro + data)
+  [ ] Deploy feito no projecto CERTO (nome confirmado no output)
+  [ ] 7 verificacoes da app feitas (8.5), incluindo o arquivo de logs
+  [ ] 24 h sem permission-denied inesperado
+  [ ] Registado em docs/08-changelog.md: data, o que mudou, quem publicou
+  [ ] Se o plano B foi usado: registado como risco aceite em docs/seguranca.md
+
+
+--------------------------------------------------------------------------------
+12. E DEPOIS DESTE PR
+--------------------------------------------------------------------------------
+  PR-01b (1 dia)   Produtos e funcionarios passam a "desactivar" em vez de
+                   apagar; com isso, `delete` fecha tambem nessas duas
+                   colecções e o historico de vendas deixa de poder ficar orfao.
+                   Ficheiros: StockModule.tsx:246, HRModule.tsx:428,
+                   firebaseDB.ts:799 e :3052, firestore.rules.
+                   Nao e "2-3 h": o filtro deletedAt tem de entrar em 9 pontos
+                   (getProducts, getLowStockProducts, getProductsPage, PDV e
+                   leitor, relatorios, exportacoes, etiquetas, transformacoes,
+                   contagem fisica). Um sitio esquecido = produto arquivado
+                   reaparece ou entra numa venda. Ver plano, secao 15 (M-03).
+  PR-02 (1 dia)    getAllOrFail + fim das escritas em catch (BD-01/02/03).
+                   E o PR que impede uma falha de rede de reescrever o stock.
+  PR-03 (2-3 h)    Sai o 05082 e as palavras-passe do codigo (SEG-03).
+
+  Se quiser, o proximo pacote que preparo e o PR-02 — e o de maior impacto
+  diario, porque protege o catalogo e as definicoes sem depender de nenhuma
+  configuracao do Firebase.
+
+================================================================================
+FIM — PR-01 (proposta, nao aplicada)
+================================================================================

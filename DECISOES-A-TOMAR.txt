@@ -1,0 +1,419 @@
+================================================================================
+AS 5 DECISOES QUE PRECISAM DE SI
+(o que decidir, porque, quanto custa cada opcao, e como responder)
+================================================================================
+Data .....: 09 de Novembro de 2026
+Para .....: dono / gerencia da AGRO — XICOMO & SERVICOS, LDA
+Regra ....: nenhuma destas decisoes e tecnica. Sao todas de negocio. Eu
+            recomendo, mas quem responde e o dono.
+Como usar : leia a seccao 1 (5 minutos), depois responda ao formulario do fim.
+            Cada resposta e uma linha. Com isso, a Onda 1 do plano pode comecar.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. RESUMO — as cinco, numa tabela
+--------------------------------------------------------------------------------
+
+  #   A PERGUNTA, EM UMA LINHA                        ESTADO     BLOQUEIA
+  D1  Que produtos pagam IVA e a que taxa?            DECIDIDA   PR-06 (semana 2)
+  D2  Uma factura A4 paga a dinheiro fica "Paga"?     DECIDIDA   PR-04 (semana 2)
+  D3  Quem vende a credito, ate quanto e por quanto   DECIDIDA   PR-07 (semana 2)
+      tempo?
+  D4  Ha armazem separado da loja?                    ADIADA     — (nada a fazer)
+  D5  Quem conta o dinheiro no fim do dia e o que     DECIDIDA   PR-14 (semana 8)
+      se faz com a diferenca?
+
+  D1, D2, D3 e D5 foram respondidas em 09/11/2026. D4 foi ADIADA pelo dono
+  (nao se mexe no armazem por agora). O registo oficial, com a interpretacao e
+  as consequencias, esta em REGISTO-DECISOES.txt.
+  Este documento fica como historico; o que ainda falta sao as quatro
+  perguntas de detalhe do fecho de caixa (Q1-Q3 antes de programar, Q4 depois).
+
+  As duas primeiras (D1 e D2) bloqueiam a semana 2. Se nao estiverem respondidas
+  antes, a equipa implementa "a interpretacao do programador" — e e assim que
+  nascem facturas erradas.
+
+  As tres ultimas podem esperar um pouco, mas D4 fica MAIS CARA quanto mais
+  tarde for decidida (explico na seccao 4).
+
+
+--------------------------------------------------------------------------------
+D1. IVA — QUE PRODUTOS PAGAM E A QUE TAXA
+--------------------------------------------------------------------------------
+
+A PERGUNTA
+  Hoje o sistema cobra 16% em tudo. Isso esta certo? Ha produtos isentos (por
+  exemplo, sementes, adubos ou outro material agricola), ou produtos com outra
+  taxa?
+
+O QUE O SISTEMA FAZ HOJE [verificado no codigo]
+  - O PDV calcula sempre 16% sobre o valor com desconto (saleTotals.ts:44-52).
+  - Existe uma funcao que sabe calcular por produto (taxHelper.ts:55-68), mas
+    so e usada nos relatorios de facturas — nunca no PDV.
+  - Cada produto tem um campo "taxa" no formulario (StockModule.tsx:759 e
+    :1816) que o PDV ignora.
+  - Pior: ao criar um produto, se o campo ficar vazio, grava-se 0%
+    (`Number(newProdTaxRate) || 0`), embora o PDV cobre 16% na mesma. Ou seja:
+    a ficha do produto pode dizer uma coisa e a factura outra.
+
+PORQUE PRECISA DE DECIDIR
+  Sem a lista, quem corrigir o IVA tem de escolher por si. Se escolher mal:
+  cobra IVA a mais a um cliente (que reclama) ou a menos (que a empresa paga do
+  seu bolso). E o mapa de IVA deixa de bater com as facturas.
+
+OPCOES
+
+  A) TUDO A 16% (o que acontece hoje)
+     Custo: zero. Risco: se houver produtos isentos, esta a cobrar imposto a
+     mais — e a factura fica errada.
+     Quando escolher: se o contabilista confirmar que toda a actividade e
+     tributada a taxa normal.
+
+  B) TUDO A 16%, MENOS UMA LISTA DE ISENTOS
+     Custo: medio (PR-06 tem de passar a taxa por linha e corrigir a ficha do
+     produto). Risco: baixo, se a lista for do contabilista e nao de cor.
+     Quando escolher: se existe material agricola isento. E o cenario mais
+     comum neste tipo de loja.
+
+  C) TAXAS DIFERENTES POR PRODUTO (16%, 5%, 0%)
+     Custo: o mesmo da B, mais formacao da equipa. Risco: alto se a tabela
+     mudar e ninguem atualizar.
+     Quando escolher: so se o contabilista disser que ha mais do que duas
+     taxas.
+
+A MINHA RECOMENDACAO
+  B — e com a lista assinada pelo contabilista, guardada em papel. Se ele
+  disser "e tudo 16%", entao A. Mas isso tem de estar escrito, com data, em
+  docs/DECISOES.md — nao na memoria de ninguem.
+
+ENQUANTO NAO DECIDIR
+  O sistema continua a cobrar 16% em tudo. Nao se estraga nada, mas o PR-06 nao
+  avanca.
+
+O QUE PRECISO QUE ESCREVA
+  "D1: (A / B / C). Se B: isentos = [lista]. Confirmado por: (nome do
+   contabilista), em (data)."
+
+
+--------------------------------------------------------------------------------
+D2. FACTURA A4 PAGA A DINHEIRO — "PAGA" OU "PENDENTE"?
+--------------------------------------------------------------------------------
+
+A PERGUNTA
+  Um cliente compra 10.000 MT, paga tudo em dinheiro, e pede a factura em A4
+  (folha normal). No sistema, essa factura deve ficar marcada como paga, ou
+  como pendente?
+
+O QUE O SISTEMA FAZ HOJE [verificado — PDVModule.tsx:1374-1395]
+  Se o formato for A4, o estado passa a "Pendente" — mesmo que o cliente tenha
+  pago a dinheiro na hora. E como consequencia:
+  - a factura entra na lista de dividas;
+  - nao sai recibo (o recibo so e emitido quando o estado e "Paga");
+  - o mapa de dividas mostra clientes que ja pagaram.
+
+  Isto estava escrito como se fosse intencional ("A4 = pendente"). Mas nao ha
+  nenhuma razao de negocio registada para isso — e o efeito e cobrar duas vezes
+  ou perder a prova do pagamento.
+
+PORQUE PRECISA DE DECIDIR
+  E a diferenca entre "o dinheiro entrou" e "o cliente deve". Se ficar como
+  esta, o dono liga a cobrar dividas que nao existem e desconfia do sistema.
+
+OPCOES
+
+  A) A4 PAGA = "PAGA", COM RECIBO (recomendado)
+     O estado passa a depender do PAGAMENTO, nao do papel. A4 paga fica Paga e
+     emite recibo. So fica Pendente quando o operador escolher "emitir sem
+     receber".
+     Custo: baixo (PR-04). Risco: as facturas antigas com A4 continuam
+     "Pendente" — e preciso decidir o que fazer com elas (ver nota abaixo).
+
+  B) MANTER COMO ESTA (A4 = Pendente sempre)
+     Custo: zero agora, caro depois: dividas falsas, recibos em falta,
+     contabilidade a perguntar. So aceitavel se houver uma razao fiscal forte,
+     que eu nao conheco.
+
+  C) A4 = Paga, mas SEM recibo automatico
+     Compromisso: corrige o estado e mantem o recibo apenas quando pedido.
+     Menos papel, menos prova.
+
+A MINHA RECOMENDACAO
+  A. E sem excepcao: pagamento em dinheiro, transferencia, M-Pesa ou E-Mola
+  deixa a factura Paga.
+
+ENQUANTO NAO DECIDIR
+  Tudo o que for A4 continua a entrar em divida. E o valor das "dividas" que o
+  sistema mostra hoje esta inflacionado exactamente por isto.
+
+O QUE PRECISO QUE ESCREVA
+  "D2: (A / B / C). Facturas A4 ja emitidas: (corrigir para Paga as que foram
+   pagas / deixar como estao)."
+
+
+--------------------------------------------------------------------------------
+D3. CREDITO — QUEM VENDE, ATE QUANTO, POR QUANTO TEMPO
+--------------------------------------------------------------------------------
+
+A PERGUNTA
+  Quem pode vender a credito? Ate que valor, por cliente? Com que prazo? Quem
+  aprova quando o valor passa do limite?
+
+O QUE O SISTEMA FAZ HOJE [verificado]
+  - "Crédito" e um metodo de pagamento como os outros (PDVModule.tsx:46 e
+    :2379): qualquer pessoa que esteja no balcao pode usar.
+  - Exige um cliente identificado (recusa "Cliente Geral" — :1323-1325). Isto
+    esta bem feito.
+  - NAO ha limite por cliente, nem prazo definido na venda, nem aprovacao.
+  - O registo de divida so nasce quando ha o primeiro pagamento
+    (createDebtFromSale existe mas nunca e chamado) — por isso a lista de
+    dividas esta incompleta.
+
+PORQUE PRECISA DE DECIDIR
+  Sem limite, o credito depende do bom senso de quem esta no balcao — e num mes
+  mau isso e o caminho para nao receber. Num negocio que vende a agricultores,
+  o credito e necessario; o que nao pode e ser invisivel.
+
+OPCOES
+
+  A) CREDITO LIVRE (o que acontece hoje)
+     Custo: zero. Risco: alto e invisivel. Nao recomendo.
+
+  B) LIMITE POR CLIENTE, COM PRAZO PADRAO
+     Ex.: cada cliente tem um limite (por omissao 20.000 MT, ajustavel), prazo
+     de 30 dias, e acima do limite exige autorizacao da gerencia.
+     Custo: medio (campo no cliente, verificacao na venda, registo de divida
+     imediato). Risco: baixo.
+
+  C) CREDITO SO COM AUTORIZACAO, CASO A CASO
+     Cada venda a credito pede a senha da gerencia. Custo: baixo. Risco: a
+     equipa contorna (vende como "pendente"). So faz sentido se o credito for
+     raro.
+
+A MINHA RECOMENDACAO
+  B, comecando com um limite baixo (ex.: 20.000 MT) e revisto ao fim de um mes
+  com os numeros reais. Regra adicional que sugiro: cliente com factura
+  atrasada ha mais de 30 dias nao leva credito novo ate regularizar.
+
+ENQUANTO NAO DECIDIR
+  O credito continua livre e as dividas continuam a aparecer so quando alguem
+  paga. Ou seja: o sistema nao sabe quem lhe deve.
+
+O QUE PRECISO QUE ESCREVA
+  "D3: limite por cliente = ___ MT; prazo = ___ dias; acima do limite exige
+   (gerencia / nao se vende). Cliente atrasado: (bloqueia / avisa)."
+
+
+--------------------------------------------------------------------------------
+D4. ARMAZEM — EXISTE UM SITIO SEPARADO DA LOJA?
+--------------------------------------------------------------------------------
+
+A PERGUNTA
+  A mercadoria que nao esta na loja esta onde? Numa loja ao lado? Numa casa?
+  Num contentor? Quem a move para o balcao, e quando?
+
+O QUE O SISTEMA FAZ HOJE [verificado]
+  - O menu "Armazem" existe e abre um ecra que diz "Modulo em Estruturacao"
+    (App.tsx:889-908). Nao faz nada.
+  - Nao ha "locais" de stock: cada produto tem UMA quantidade.
+  - A unica coisa parecida e a "requisicao de sacos" (firebaseDB.ts:2209), que
+    apenas converte saco em retalho do MESMO produto — nao e uma transferencia
+    entre sitios.
+
+PORQUE PRECISA DE DECIDIR
+  Ha duas verdades possiveis:
+   (a) Nao ha armazem separado — a mercadoria esta toda na loja. Entao o menu
+       e publicidade enganosa e deve sair. Custa 1 hora.
+   (b) Ha um armazem separado. Entao, sem registo de transferencias, o stock da
+       loja e do armazem andam sempre errados: o sistema mostra 100 sacos e a
+       loja tem 20 porque 80 estao atras.
+  O problema nao e o software: e que hoje o sistema nao sabe a resposta. E
+  ninguem consegue decidir compras com um numero que mistura dois sitios.
+
+OPCOES
+
+  A) NAO HA ARMAZEM: REMOVER O MENU (1 hora)
+     Honesto e barato. O stock e unico e vive na loja.
+     Quando escolher: se a mercadoria esta fisicamente num so sitio.
+
+  B) HA ARMAZEM, MAS CONTROLO EM PAPEL (2-3 horas)
+     Remover o menu e criar uma folha simples de transferencias assinadas, com
+     contagem semanal. O sistema continua com stock unico.
+     Quando escolher: se o volume e pequeno e a equipa e pequena.
+
+  C) HA ARMAZEM A SERIO: LOCAIS E TRANSFERENCIAS NO SISTEMA (3-4 semanas)
+     Cada produto passa a ter saldo por local (loja/deposito), com
+     transferencias assinadas por quem move, e relatorios por local.
+     Quando escolher: se ha mais do que um sitio e o valor em stock justifica.
+
+A MINHA RECOMENDACAO
+  Responder primeiro a pergunta, sem falar de software: "quando o cliente pede
+  20 sacos e a loja so tem 5, de onde vem?" Se a resposta for "do armazem ao
+  lado", e a opcao C — mas comecando por A agora (remover o menu) e C na Onda 4.
+  Se a resposta for "temos sempre tudo na loja", entao A e acabou o assunto.
+
+  Insisto num ponto: manter o menu a dizer "em estruturacao" e a pior das tres.
+  Custa credibilidade e nao protege ninguem.
+
+ENQUANTO NAO DECIDIR
+  O menu continua a existir e a prometer o que nao ha. E o stock continua a ser
+  um numero unico que pode nao corresponder a nenhum sitio em concreto.
+
+O QUE PRECISO QUE ESCREVA
+  "D4: (A / B / C). Se C: locais = ___; quem transfere = ___; com que
+   frequencia contamos = ___."
+
+
+--------------------------------------------------------------------------------
+D5. FECHO DE CAIXA — QUEM CONTA, QUANDO, E O QUE SE FAZ COM A DIFERENCA
+--------------------------------------------------------------------------------
+
+A PERGUNTA
+  No fim do dia, quem conta o dinheiro? Compara com o que o sistema diz? Se
+  faltar dinheiro, o que acontece — e quem assina?
+
+O QUE O SISTEMA FAZ HOJE [verificado]
+  - Ha sangrias e entradas de caixa (FinanceModule.tsx:127-189), com motivo
+    obrigatorio e senha de gestor (:138). Isto esta bem feito.
+  - NAO existe abertura de caixa com fundo inicial, nem fecho com contagem,
+    nem registo da diferenca, nem assinatura. Nao se sabe quem abriu nem quem
+    fechou.
+  - O saldo (cashBox.ts) conta apenas pagamentos marcados "Dinheiro" — se
+    alguem pagar uma parte em dinheiro dentro de um pagamento Múltiplo, essa
+    parte nao entra no saldo.
+
+PORQUE PRECISA DE DECIDIR
+  E o controlo mais basico de um negocio com dinheiro fisico. Sem fecho, uma
+  falta de 2.000 MT nao tem resposta: foi troco errado? furto? reembolso nao
+  registado? E o operador fica sem defesa — a suspeita cai sempre em quem
+  fechou.
+
+OPCOES
+
+  A) FECHO SIMPLES (recomendado): um turno por dia
+     Abre-se com um fundo (ex.: 5.000 MT), vende-se, conta-se ao fim do dia,
+     regista-se a diferenca e assina o operador e o gerente.
+     Custo: 2-3 dias de trabalho no sistema + 10 minutos por dia na loja.
+
+  B) FECHO POR TURNO (manha/tarde), com dois operadores
+     Mais rigoroso, mais trabalho. Justifica-se se ha turnos e varias pessoas
+     no balcao.
+
+  C) SEM FECHO FORMAL, SO CONFERENCIA SEMANAL
+     Barato agora, mas nao detecta o problema a tempo de o resolver. So
+     aceitavel se houver uma unica pessoa a mexer no dinheiro.
+
+DECISOES DENTRO DA DECISAO (as tais que ninguem pensa)
+  1. O fundo inicial e fixo ou varia com o dia?
+  2. Uma diferenca ate quanto e tolerada (ex.: 50 MT) antes de ser registada
+     como "quebra de caixa"?
+  3. As sangrias e os reembolsos saem da MESMA gaveta que as vendas? (Hoje
+     sim.)
+  4. Pagamentos de salarios em dinheiro saem da caixa do dia? Se sim, tem de
+     estar no fecho.
+  5. Quem tem autoridade para autorizar uma sangria sem o gerente presente?
+
+A MINHA RECOMENDACAO
+  A, com tolerancia de 50 MT, um unico fundo diario de 5.000 MT, e o fecho
+  assinado por quem contou e por quem conferiu. Se houver dois turnos, B.
+
+ENQUANTO NAO DECIDIR
+  O saldo continua a existir no ecra, mas ninguem o confirma com o dinheiro
+  real. A contabilidade do dia e uma estimativa, nao um facto.
+
+O QUE PRECISO QUE ESCREVA
+  "D5: (A / B / C). Fundo = ___ MT. Tolerancia = ___ MT. Assina quem conta:
+   (nome/cargo). Diferenca acima da tolerancia: (desconta a quem / investiga
+   caso a caso)."
+
+
+--------------------------------------------------------------------------------
+2. AS TRES PERGUNTAS QUE NAO SAO MINHAS (nem suas) — sao do contabilista
+--------------------------------------------------------------------------------
+
+  Nao respondo a estas porque nao sou contabilista e nao vou inventar:
+
+  C1. A tabela de IRPS aplicavel hoje em Mocambique (escaloes, taxas,
+      abatimento por dependentes). O codigo atual usa uma tabela fixa, com um
+      erro na formula do 1.º escalao e uma isencao por dependentes inventada
+      (hrCalculations.ts:11-52), e o recibo afirma "conformidade total".
+  C2. Se o material agricola beneficia de isencao de IVA (liga a D1).
+  C3. Prazo legal de conservacao de documentos e de dados de pessoal.
+
+  Pedido concreto: uma folha assinada com a tabela de IRPS em vigor e a lista
+  de isencoes. Sem isso, a Onda 4 nao pode tocar nos salarios com honestidade.
+
+
+--------------------------------------------------------------------------------
+3. O QUE ACONTECE SE NAO DECIDIR NADA (o custo de adiar)
+--------------------------------------------------------------------------------
+
+  D1 e D2 adiadas .... Semana 2 para. O sistema continua a cobrar 16% em tudo e
+                       a marcar facturas pagas como divida. Custo: dividas
+                       falsas acumuladas, que depois e preciso limpar com o
+                       contabilista.
+  D3 adiada ......... As dividas continuam invisiveis. Nao ha forma de saber
+                       quem deve — e cada mes que passa e credito dado sem
+                       controlo.
+  D4 adiada ......... O menu continua a prometer um armazem. Se um dia
+                       decidir que existe, o custo passa a incluir corrigir
+                       meses de stock sem localizacao.
+  D5 adiada ......... Cada dia sem fecho e um dia sem prova. Se houver um
+                       problema de dinheiro, nao ha como demonstrar nada.
+
+  As decisoes nao custam dinheiro. Adia-las custa.
+
+
+
+================================================================================
+4. FORMULARIO — copie, preencha e devolva (5 linhas bastam)
+================================================================================
+
+D1 (IVA) ......: (A) tudo 16%  /  (B) 16% + isentos  /  (C) varias taxas
+                 Se B ou C, isentos/taxas: ________________________________
+                 Confirmado por (contabilista): ______________ em __/__/____
+
+D2 (A4) .......: (A) paga = Paga + recibo  /  (B) manter Pendente  /  (C) Paga
+                 sem recibo automatico
+                 Facturas A4 antigas ja pagas: (corrigir / deixar)
+
+D3 (credito) ..: limite por cliente = ______ MT
+                 prazo = ______ dias
+                 acima do limite: (exige gerencia / nao se vende)
+                 cliente atrasado > 30 dias: (bloqueia / avisa)
+
+D4 (armazem) ..: (A) nao ha, remover menu  /  (B) ha, controlo em papel  /
+                 (C) ha e quer no sistema
+                 Se C: locais = ______ ; transfere = ______
+
+D5 (caixa) ....: (A) um turno  /  (B) por turno  /  (C) so semanal
+                 fundo inicial = ______ MT
+                 tolerancia = ______ MT
+                 assina quem conta = ______
+                 diferenca acima da tolerancia: (desconta / investiga)
+
+Depois de responder, eu atualizo o plano com as suas respostas, escrevo
+docs/DECISOES.md (o registo datado das decisoes) e os PRs da Onda 1 passam a
+ter especificacao fechada. Nada disso acontece antes de o senhor responder.
+
+
+================================================================================
+5. UMA NOTA HONESTA SOBRE O QUE EU RECOMENDO
+================================================================================
+As recomendacoes acima (B, A, B, A-ou-C, A) sao as que protegem melhor o
+dinheiro e os dados com o menor esforco. Mas ha duas em que a minha opiniao vale
+menos do que a realidade da loja:
+
+  D3 — o limite de credito depende de como os clientes pagam na pratica. Um
+  limite de 20.000 MT pode ser absurdo se um cliente grande compra 200.000 por
+  mes e paga a 60 dias, ou generoso se o cliente medio leva 3.000.
+
+  D4 — depende de fisica, nao de software: onde esta a mercadoria. Se me
+  disser em duas frases como funciona hoje, eu ajusto a recomendacao.
+
+E uma que nao e para si: C1 (IRPS). O sistema nao pode continuar a imprimir
+"conformidade total" com uma tabela que ninguem validou.
+
+================================================================================
+FIM — DECISOES A TOMAR
+================================================================================

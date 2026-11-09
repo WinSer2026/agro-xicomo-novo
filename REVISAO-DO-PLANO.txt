@@ -1,0 +1,608 @@
+================================================================================
+REVISAO CRITICA DO PROPRIO PLANO — onde ele falha
+================================================================================
+Objecto ....: PLANO-MELHORIA-COMPLETO.txt e PR-01-PACOTE-REGRAS.txt
+Data .......: 09 de Novembro de 2026
+Metodo .....: revisao adversarial — procurei activamente onde o plano parte o
+              sistema, bloqueia, mente ou se engana. Nao procurei confirma-lo.
+Verificacoes: 14 (9 com codigo executado, 5 por leitura dirigida)
+Resultado ...: 4 falhas que bloqueiam ou induzem erro grave, 6 de conteudo,
+              5 de sequencia, 6 de cobertura, 4 de numeros. 12 correccoes
+              concretas (seccao 9). Nada foi alterado no sistema.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+0. SUMARIO EM UMA PAGINA
+--------------------------------------------------------------------------------
+
+  O plano NAO esta errado no diagnostico. Esta errado em quatro sitios:
+
+  1. Uma accao central e tecnicamente impossivel como escrita (PB-03, migracao
+     para Firebase Auth). Se for executada como esta, a Onda 3 bloqueia.
+  2. Um teste que eu propus pode dar "verde" falso (o parser de blocos de
+     regras). Demonstrei-o com as regras ACTUAIS: o bloco "sales" e lido como
+     1.180 caracteres em vez de 45, engolindo colecções vizinhas.
+  3. O plano manda MANTER uma funcao que mente ao utilizador (Fechar Exercicio
+     Fiscal: diz "arquivado com sucesso" e nao arquiva nada). Nao a vi na
+     primeira auditoria.
+  4. As contagens estao erradas: sao 50 achados, nao 44; e 8 criticos, nao 7.
+
+  E ha uma falha de desenho que nao e de codigo: o plano deixa a LEITURA de
+  salarios e credenciais aberta durante 2 a 3 semanas (ate a Onda 3), sem
+  qualquer mitigacao interina. Essa e a maior exposicao real e a mais lenta a
+  fechar. Corrige-se com uma "Onda 0.5" de 2 horas (seccao 9, C-01).
+
+
+================================================================================
+1. FALHAS QUE BLOQUEIAM OU INDUZEM ERRO GRAVE
+================================================================================
+
+--------------------------------------------------------------------------------
+F-01  BLOQUEANTE — A migracao para Firebase Auth, como esta escrita, nao funciona
+--------------------------------------------------------------------------------
+Onde no plano: PB-03 (Fase 2), secao 3 do Bloco B; Onda 3 / PR-11.
+
+O que o plano diz
+  "Login pela aplicacao continua, mas apos validar a palavra-passe faz
+  signInWithEmailAndPassword para obter token."
+
+Porque falha [CONFIRMADO no codigo]
+  As palavras-passe da equipa estao em PBKDF2-SHA256 calculado pelo proprio
+  sistema (securityHelper.ts:90-109), com salt e 120.000 iteracoes proprios.
+  O Firebase Authentication NAO aceita este formato nem permite importar hashes
+  arbitrarios no plano gratuito (so o Identity Platform pago tem importacao, com
+  formatos suportados e nunca PBKDF2 caseiro).
+  E nao se pode "fazer signInWithEmailAndPassword" porque o Firebase nao conhece
+  a palavra-passe — so conhece o nosso hash.
+  Consequencia: a Fase 2 do PB-03 e impossivel. Quem tentar executa-la perde um
+  dia e volta ao ponto de partida.
+
+Correccao obrigatoria (escrever assim no plano)
+  A Onda 3 passa a ter tres pecas, nesta ordem:
+   1. Cloud Function `login` (Admin SDK): recebe username + palavra-passe,
+      valida o hash PBKDF2 no servidor (mesmo algoritmo, mesmo salt) e devolve
+      um customToken. O cliente faz signInWithCustomToken.
+   2. Claims: a funcao grava role/username como custom claims no utilizador
+      Firebase correspondente (criado no primeiro login).
+   3. So depois: firestore.rules passa a exigir request.auth.token.role, e
+      credentials deixa de ser legivel pelo cliente.
+  Custo real: precisa de plano Firebase com Cloud Functions (Blaze) e de um
+  deploy de functions — nao e so frontend. Isso muda o esforco de "M" para "G"
+  e acrescenta um pre-requisito que nao estava no plano (seccao 4, J-06).
+
+Licao para o plano: qualquer accao que diga "manter a autenticacao actual e
+acrescentar Firebase Auth" tem de ser reescrita. Nao ha caminho paralelo barato.
+
+--------------------------------------------------------------------------------
+F-02  GRAVE — O PR do IVA mexe em dados historicos que nao tem o campo
+--------------------------------------------------------------------------------
+Onde no plano: PR-06; PD-02, PD-03, PD-04, PC-30.
+
+O que o plano diz
+  "Gravar taxRate em cada linha da venda."
+
+O que encontrei [CONFIRMADO]
+  - O campo JA existe no tipo: types.ts:52-53, com o comentario "omissao: 16%".
+  - O PDV NUNCA o preenche: grep de "taxRate" em PDVModule.tsx e em
+    firebaseDB.ts devolve 0 ocorrencias.
+  - Portanto: 100% das vendas ja emitidas nao tem taxa por linha. Se os
+    relatorios passarem a confiar no campo, as vendas antigas contam como
+    "desconhecido" — ou, pior, como 0% se alguem escrever `?? 0`.
+
+Porque o plano falha
+  Nao tem um passo de migracao nem diz o que fazer com as vendas existentes.
+  Um PR destes, sozinho, muda os totais historicos dos relatorios — e o dono
+  compara o mes passado com o mes actual e perde a confianca no sistema.
+
+Correccao
+  - Regra explicita: `taxRate ?? 16` para vendas anteriores a 2026-11-XX (a
+    taxa que foi realmente cobrada), documentada no codigo e em DECISOES.md.
+  - Script de backfill opcional (marcar as vendas antigas com taxRate=16) com
+    contagem antes/depois e dry-run.
+  - Teste: relatorio de um periodo ANTIGO tem de dar exactamente o mesmo
+    resultado antes e depois do PR. Se mudar um centimo, o PR esta errado.
+
+--------------------------------------------------------------------------------
+F-03  GRAVE — Tirar o fallback de hash pode trancar utilizadores fora
+--------------------------------------------------------------------------------
+Onde no plano: PB-06 ("remover o fallback sha256 de 32 bits").
+
+O que encontrei [CONFIRMADO]
+  securityHelper.ts:101-109: sem WebCrypto, o hash e "iterated sha256 ate 1000
+  vezes" com uma funcao sha256 propria (:111-133) cujo ultimo recurso e um hash
+  de 32 bits em JavaScript (:126-131), preenchido a 64 caracteres.
+  Isto tem DUAS consequencias, e o plano so viu uma:
+   (a) o hash de 32 bits nao e SHA-256 — e fraco e colide;
+   (b) o resultado do fallback NUNCA e igual ao do caminho WebCrypto (iteracoes
+       limitadas a 1000 vs 120.000). Ou seja: um utilizador que defina a
+       palavra-passe num ambiente sem WebCrypto cria um hash que so verifica
+       nesse mesmo tipo de ambiente. Ja hoje isto e um defeito de login
+       cross-browser, e nao estava na auditoria.
+
+Porque o plano falha
+  "Remover o fallback" sem detectar hashes criados por ele tranca esses
+  utilizadores fora. E o plano nao tem forma de os identificar.
+
+Correccao
+  - Antes de remover: script de diagnostico que corre os dois algoritmos contra
+    cada hash guardado e lista os que so verificam no fallback.
+  - Para esses: marcar mustChangePassword = true (o fluxo ja existe:
+    LoginPanel.tsx:232) e obrigar a reposicao no proximo login COM WebCrypto.
+  - So depois remover o fallback, e passar a recusar login com mensagem
+    "este dispositivo nao suporta login seguro" em vez de aceitar hash fraco.
+
+--------------------------------------------------------------------------------
+F-04  GRAVE (no meu proprio teste) — O parser de regras dava "verde" falso
+--------------------------------------------------------------------------------
+Onde no plano: PR-01-PACOTE-REGRAS.txt, seccao 7 (teste proposto).
+
+O que eu propus
+  Um regex `match\s+/sales/\{...\}\s*\{([\s\S]*?)\n\s*\}` para isolar o bloco.
+
+O que acontece [TESTADO, nao teorico]
+  Nas regras ACTUAIS (tudo numa linha por colecção) o regex nao encontra um
+  fecho na linha seguinte e continua a capturar:
+
+    sales  -> len=1180  (devia ser 45)   — engoliu products, losses, etc.
+    counters -> len=424  (devia ser 45)
+
+  Consequencia: se alguem voltar ao estilo de uma linha, `allow delete: if
+  false` de OUTRA colecção (por exemplo debts) aparece dentro do bloco "sales" e
+  o teste PASSA sem a tranca existir. Um teste que da verde por engano e pior do
+  que nao ter teste: fecha a discussao.
+
+Correccao (ja escrita e validada)
+  Substituir o regex por um parser de chaves balanceadas. Testei-o contra os
+  dois ficheiros:
+    regras actuais  -> 20 colecções, sales=45 caracteres, sem "match" dentro
+    regras propostas-> 20 colecções, sales=129, delete:false=true
+  E acrescentar uma assercao de sanidade: cada bloco tem de ser nao vazio e nao
+  pode conter "match /" (sinal de que engoliu o vizinho).
+  O bloco de teste corrigido esta na seccao 8 deste documento e ja foi aplicado
+  ao ficheiro PR-01-PACOTE-REGRAS.txt.
+
+
+================================================================================
+2. FALHAS DE CONTEUDO DO PLANO (accao errada ou perigosa)
+================================================================================
+
+--------------------------------------------------------------------------------
+H-01  O plano manda MANTER uma funcao que mente ao utilizador
+--------------------------------------------------------------------------------
+Onde: PE-06, "(:647-666) fechar ano. MANTER; documentar o que faz exactamente".
+
+O que a funcao faz [CONFIRMADO — TechnicalModule.tsx:647-666]
+  - Pergunta "Pretende fechar o Exercicio Fiscal?".
+  - Grava um registo de auditoria com o texto "Fecho de exercicio executado
+    regulamentarmente" e ipAddress: '127.0.0.1'.
+  - Mostra o toast "Ano Fiscal fechado e arquivado com sucesso!".
+  - NAO arquiva nada, NAO congela nada, NAO fecha nada.
+
+Porque e grave
+  E a definicao de prova falsa: o dono carrega, o sistema diz que arquivou, e no
+  ano seguinte os dados continuam todos la (ou pior, alguem assume que o
+  exercicio esta fechado e apaga coisas). Ficou fora da minha primeira auditoria.
+
+Correccao
+  REMOVER o botao e a funcao (nao "manter"), ou implementar a serio (exportar o
+  exercicio, marcar os registos como arquivados, bloquear edicoes anteriores a
+  data de fecho, com backup previo). Enquanto nao houver implementacao, dizer a
+  verdade: "nao disponivel".
+
+--------------------------------------------------------------------------------
+H-02  O plano nunca menciona clearSystemData — codigo morto que apaga vendas
+--------------------------------------------------------------------------------
+Onde: firebaseDB.ts:3616-3653 (clearSystemData), ausente do plano.
+
+O que e
+  Metodo publico que apaga documentos de sales, losses, attendance,
+  payroll_payments, paused_sales, transformations e stock_movements.
+
+O que descobri
+  - Nao tem um unico chamador: os botoes que o usavam foram removidos
+    (TechnicalModule.tsx:640-646 documenta a remocao).
+  - Mesmo que fosse chamado, JA FALHA hoje: as regras proibem delete em
+    stock_movements, portanto a operacao rebenta a meio — depois de ja ter
+    apagado vendas e perdas. Ou seja: apaga parte, falha, e deixa o sistema
+    inconsistente.
+
+Porque importa para o plano
+  E exactamente o tipo de funcao que uma sessao futura de IA "reutiliza" porque
+  esta la e parece util. Tem de sair no PR-01 (ou no PR-09), com teste que
+  garante que nao volta.
+
+Correccao
+  Apagar clearSystemData; registar em AGENTS.md a regra "nenhuma funcao de
+  limpeza de dados existe na aplicacao; e operacao de manutencao externa".
+
+--------------------------------------------------------------------------------
+H-03  PC-11 (soft-delete em tudo) esta sobre-generalizado
+--------------------------------------------------------------------------------
+Onde: PC-11, "deleteRow: nunca apagar fisicamente registos de negocio".
+
+Porque falha
+  deleteRow serve TAMBEM coleccções onde apagar e o comportamento correcto:
+  paused_sales (carrinho suspenso removido pelo operador, PDVModule:959/991) e
+  active_sessions (logout/terminar sessao, firebaseDB:3273). Aplicar soft-delete
+  a tudo criaria lixo permanente em sessoes e carrinhos e caches a crescer.
+
+Correccao
+  PC-11 passa a: manter deleteRow como primitivo; proibir o seu uso em
+  colecções de negocio por lista explicita (products, employees, customers,
+  transformations) e trocar esses tres/quatro chamadores por deactivate().
+
+--------------------------------------------------------------------------------
+H-04  DES-01 (remover sincronizacao em tempo real) quebra a actualizacao entre postos
+--------------------------------------------------------------------------------
+Onde: DES-01 e PC-04.
+
+O que o plano propoe
+  "Nao ouvir a colection sales inteira; ouvir vendas do dia e produtos; avaliar
+  remover o listener de produtos."
+
+O que falta dizer
+  Ha 8 componentes que reagem ao evento local 'db-update' (PDV, Stock, Finance,
+  HR, Faturas, Technical, TransformationView, Dashboard). Esse evento e
+  disparado pelo PROPRIO cliente depois de escrever — serve para actualizar a
+  mesma maquina. A actualizacao entre postos (loja A ve a venda da loja B) vem
+  apenas dos listeners do Firestore. Se os removermos sem substituto, a loja
+  passa a vender com stock desactualizado — exactamente o problema que o codigo
+  actual resolve.
+
+Correccao
+  O PR do desempenho tem de incluir um substituto explicito, por exemplo:
+  - listener apenas em `counters` e num doc `sync/pulse` actualizado a cada
+    escrita (detecta "houve mudanca" sem descarregar vendas);
+  - ou refresh periodico (30 s) do stock dos produtos visiveis;
+  - ou listener filtrado por dia (dateKey == hoje), que ja limita o volume.
+  Sem uma destas linhas escritas no PR, o DES-01 nao deve ser aprovado.
+
+--------------------------------------------------------------------------------
+H-05  PB-07 manda comparar hashes de um valor que esta em texto simples
+--------------------------------------------------------------------------------
+Onde: PB-07, "comparacao em texto simples -> passar a comparar hashes".
+
+O que encontrei
+  O codigo de gestor de stock vive em settings.stockPasswordHash com valor
+  '05082' (firebaseDB:3288) e e comparado directamente
+  (authorization.ts:16 e :38). O nome diz "hash", o conteudo e texto simples.
+
+Porque o plano falha
+  Se eu passar a comparar hashes sem migrar o valor guardado, TODAS as
+  autorizacoes de stock deixam de funcionar (o sistema compara hash de input com
+  '05082').
+
+Correccao
+  Migracao em tres passos, num PR proprio: (1) ler o valor; se nao comecar por
+  'pbkdf2:' tratar como legado e comparar em texto, mas re-gravar como hash no
+  primeiro sucesso; (2) passados N dias, recusar legado e pedir redefinicao;
+  (3) remover o ramo legado. Com aviso no modulo tecnico.
+
+--------------------------------------------------------------------------------
+H-06  O PR-01b (soft-delete de produtos) esta subestimado
+--------------------------------------------------------------------------------
+Onde: PR-01-PACOTE, seccao 12 ("2-3 h").
+
+Porque falha
+  Passar produtos a soft-delete obriga a filtrar em: getProducts (catalogo),
+  getLowStockProducts, getProductsPage, PDV (pesquisa e leitor de codigo),
+  relatorios e exportacoes, etiquetas de codigo de barras, transformacoes,
+  contagem fisica e conciliacao. Se um unico sitio esquecer o filtro, o produto
+  "eliminado" reaparece — ou pior, entra numa venda.
+
+Correccao
+  Estimar M (1 dia), nao 2-3 h, e incluir uma lista de verificacao com os 9
+  pontos acima + teste "produto arquivado nao aparece em nenhuma lista nem pode
+  ser vendido".
+
+
+================================================================================
+3. FALHAS DE SEQUENCIA E DE DESENHO
+================================================================================
+
+I-01  A Onda 1 nao pode comecar sem uma decisao do dono
+      PR-04 (estado A4) e PR-06 (IVA) dependem de D1/D2. Se a decisao nao
+      existir, a equipa implementa "a interpretacao do programador" — que e
+      como se chega a facturas erradas. Correccao: incluir na Onda 0 uma reuniao
+      de 20 minutos (ou um questionario) para fechar D1 e D2, com a resposta
+      escrita em DECISOES.md ANTES de abrir o PR.
+
+I-02  A documentacao falsa fica para o fim
+      O plano poe a correccao de docs na Onda 5. Mas os documentos actuais
+      afirmam que D-03/D-05/D-18/D-20 estao resolvidos. Quem executar as Ondas
+      0-4 (pessoa ou agente de IA) vai ler isso e assumir trabalho feito.
+      Correccao: 1 hora na Onda 0 — carimbar 6 documentos com "HISTORICO: nao
+      reflecte o estado actual" e apontar ao relatorio novo. Nao e reescrever,
+      e impedir que mintam.
+
+I-03  A maior exposicao fica aberta 2-3 semanas sem mitigacao
+      Ate a Onda 3, qualquer pessoa com o endereco do site le salarios,
+      credenciais e vendas. O plano trata isto como "vai ser resolvido" e nao
+      faz nada no intervalo. Ver C-01 (Onda 0.5), que custa 2 horas e reduz
+      drasticamente a janela.
+
+I-04  Dependencia externa sem prazo
+      NEG-12 (IRPS) precisa do contabilista. Esta na Onda 4, sem pedido
+      antecipado. Correccao: pedir as tabelas oficiais na semana 1; se nao
+      chegarem, adiar o item e nao inventar escaloes (que e o que o codigo faz
+      hoje).
+
+I-05  O plano publica regras sem primeiro comparar com as publicadas
+      PR-01 guarda copia das regras actuais, mas nao as COMPARA com as do
+      repositorio. Se a producao ainda tiver as regras legacy-open (ou uma
+      versao intermédia), o deploy do PR-01 muda mais do que o previsto — por
+      exemplo, passa a exigir autenticacao onde hoje nao exige.
+      Correccao: passo 0 obrigatorio — abrir a consola, copiar as regras
+      publicadas, guardar em docs/regras-publicadas-<data>.txt e fazer diff
+      antes de qualquer deploy. Se forem diferentes, o PR-01 cresce e precisa de
+      nova revisao.
+
+
+================================================================================
+4. FALHAS DE COBERTURA (o que o plano simplesmente nao tem)
+================================================================================
+
+J-01  Nenhuma accao de MIGRACAO/BACKFILL. O plano acrescenta campos
+      (amountReceived, changeGiven, taxRate, deletedAt, cashSessionId) sem
+      nenhum passo que trate os registos antigos. Sem isto, todos os relatorios
+      que usem os campos novos passam a ter duas verdades.
+      Correccao: modelo unico de migracao (ver 9, C-05).
+
+J-02  Rollback so existe no PR-01. Os outros 17 PRs nao dizem como se
+      desfazem. Um PR de dados (caixa, dividas) nao se desfaz com git revert.
+      Correccao: cada PR declara "como reverter" em duas linhas, e os de dados
+      declaram "que registos ficam alterados".
+
+J-03  Nao ha monitorizacao. Nada diz como se sabe, no dia seguinte, que algo
+      partiu (por exemplo: vendas de um dia a zero, permission-denied repetido,
+      stock negativo a crescer). Correccao: 3 verificacoes diarias de 2 minutos
+      (ver C-07).
+
+J-04  Nao ha comunicacao com a equipa. Mudar a politica de palavras-passe e o
+      estado das facturas A4 mexe com o trabalho de pessoas que nao leram este
+      plano. Sem aviso e formacao, a resposta natural e voltar ao caderno e ao
+      Excel — e o sistema perde credibilidade.
+      Correccao: uma nota de uma pagina por mudanca visivel + 15 min de
+      demonstracao no balcao.
+
+J-05  Nao trata dados pessoais. Salarios, NUIT, INSS e IBAN estao em
+      employees/payroll. Nao ha regra de quem pode ver, nem retencao, nem
+      registo de acessos. E um risco legal e disciplinar, nao so tecnico.
+
+J-06  Nao ha inventario de acessos nem plano de custos. Quem tem acesso ao
+      GitHub, ao Firebase, a Vercel? Se a pessoa que fez o sistema desaparecer,
+      quem publica? E a Cloud Function do F-01 tem custo (plano Blaze).
+      Correccao: lista de acessos com responsavel e forma de recuperacao.
+
+
+================================================================================
+5. FALHAS DE NUMEROS (verificadas)
+================================================================================
+
+K-01  "Cobertura: 44 achados -> 44 linhas" (PLANO, seccao 12).
+      Contagem real: 50 achados (SEG 7, BD 4, NEG 15, DES 1, FIA 4, COD 5,
+      UX 3, B 11). A tabela TEM 50 linhas — o numero no texto e que esta errado.
+      Consequencia: alguem que audite o plano conclui que faltam 6 achados.
+
+K-02  Contagens por gravidade que dei na conversa: 7 criticos, 13 altos,
+      16 medios, 11 baixos (=47). Correcto: 8 criticos, 14 altos, 17 medios,
+      11 baixos (=50). Os 8 criticos sao SEG-01/02/03, BD-01/02/03/04, FIA-01.
+
+K-03  Estimativas optimistas em tres sitios:
+      - Onda 1 "3-4 dias" para 4 PRs, um deles o pdfGenerator (1.629 linhas,
+        3 implementacoes da mesma tabela de itens). Realista: 5-7 dias.
+      - Onda 4-5 "2-3 meses" para compras + armazem + vendas offline. Compras
+        com custo medio sozinho e 2-3 semanas; offline no Firestore (transaccoes
+        exigem rede) e um redesenho, nao um acrescento. Realista: 4-6 meses.
+      - PR-01 "2-3 h": com teste, simulador, deploy e 7 verificacoes -> 3-4 h.
+
+K-04  "158 linhas, 85 de codigo efectivo" (PR-01) — confirmado por contagem.
+      Esta certo.
+
+
+================================================================================
+6. O QUE ESTA VALIDADO E NAO DEVE MUDAR
+================================================================================
+  Para nao se deitar fora o que esta bom:
+
+  - O mapeamento "quem apaga o que" (PR-01, seccao 2) esta correcto: verifiquei
+    por grep todas as chamadas de eliminação. sales, counters, settings,
+    losses, attendance, payroll_payments e transformations/customers nao tem
+    eliminação viva.
+  - A decisao de NAO fechar credentials nem products no PR-01 esta certa: o
+    login le os hashes e o StockModule apaga produtos.
+  - O mecanismo getAfter para o arquivo e o plano B estao bem pensados; o risco
+    esta identificado e tem saida.
+  - O inventario de 146 ficheiros e as 17 remocoes conferem (contadas).
+  - A ordem geral (estancar -> verdade -> patrimonio -> acesso -> operacao) e
+    defensavel. As falhas estao em detalhes que a quebram, nao na estrategia.
+  - O diagnostico da auditoria nao foi abalado por esta revisao: os criticos
+    continuam a ser os mesmos. Apareceu um achado novo (H-01) e um esquecido
+    (H-02), ambos corrigiveis em horas.
+
+
+================================================================================
+7. RISCOS DE EXECUCAO (nao tecnicos) — o que costuma matar planos destes
+================================================================================
+
+  R1  O plano tem 1.914 linhas. Ninguem executa 1.914 linhas.
+      Mitigacao: quadro de uma pagina com as 6 ondas e as datas (C-12).
+  R2  Comecar pelo mais interessante (arquitectura, dashboard) em vez do mais
+      urgente (regras, fallbacks). E o erro classico do "vibe coding".
+      Mitigacao: a Onda 0 nao tem nada de criativo — e de proposito.
+  R3  Fazer tudo numa branch e publicar de uma vez. Nao se consegue isolar o que
+      partiu. Mitigacao: 18 PRs, ja previsto.
+  R4  Ninguem sabe quem decide. Sem dono por decisao, o plano para na primeira
+      duvida (D1-D5). Mitigacao: uma linha "quem decide" por decisao.
+  R5  O sistema e usado todos os dias: qualquer paragem custa vendas.
+      Mitigacao: publicar fora de horas, sempre com backup exportado e
+      rollback escrito (J-02).
+
+
+================================================================================
+8. TESTE DE REGRAS CORRIGIDO (substitui a seccao 7 do PR-01)
+================================================================================
+Validado nos dois ficheiros: 20 colecções detectadas, blocos isolados.
+
+--------------------------------------------------------------------------- 8< ---
+// --- PR-01: parser de blocos por chaves balanceadas (nao por regex guloso) ---
+function blocosDeRegras(texto: string): Map<string, string> {
+  const mapa = new Map<string, string>();
+  const re = /match\s+\/([a-z_]+)\/\{([a-zA-Z]+)\}\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(texto)) !== null) {
+    let i = re.lastIndex;
+    let nivel = 1;
+    const inicio = i;
+    while (i < texto.length && nivel > 0) {
+      if (texto[i] === '{') nivel++;
+      else if (texto[i] === '}') nivel--;
+      i++;
+    }
+    mapa.set(m[1], texto.slice(inicio, i - 1));
+  }
+  return mapa;
+}
+
+const blocos = blocosDeRegras(regras);
+const bloco = (n: string) => blocos.get(n) ?? '';
+
+ok('o parser encontrou as colecções (>= 15)', blocos.size >= 15);
+
+// Sanidade: se um bloco engolir o vizinho, todas as asserções abaixo mentem.
+for (const n of ['sales', 'counters', 'settings', 'audit_logs', 'credentials']) {
+  const b = bloco(n);
+  ok(`${n}: bloco isolado e nao vazio`, b.length > 10 && !/match\s+\//.test(b));
+}
+
+const semDelete = ['sales', 'losses', 'transformations', 'attendance',
+                   'customers', 'settings', 'counters', 'payroll_payments'];
+for (const n of semDelete) {
+  ok(`${n}: delete negado ao cliente`, /allow\s+delete\s*:\s*if\s+false/.test(bloco(n)));
+}
+
+for (const n of ['sales', 'counters', 'settings', 'products']) {
+  ok(`${n}: escrita continua permitida`, /allow\s+(read\s*,\s*)?(create|update)/.test(bloco(n)));
+}
+
+const audit = bloco('audit_logs');
+ok('audit_logs: delete exige copia para o arquivo (getAfter)',
+   audit.length > 10 && /getAfter\(/.test(audit) && /audit_logs_archive/.test(audit));
+ok('audit_logs: delete nao e livre',
+   audit.length > 10 && !/allow\s+delete\s*:\s*if\s+request\.auth\s*!=\s*null\s*;/.test(audit));
+ok('audit_logs: continua sem permitir edicao', /allow\s+update\s*:\s*if\s+false/.test(audit));
+
+ok('credentials: leitura mantida (login depende dela)', /allow\s+read/.test(bloco('credentials')));
+
+ok('nenhum acesso "read, write" em colecções de dinheiro',
+   !/match\s+\/(sales|cash_movements|debts|stock_movements)\/\{[a-zA-Z]+\}\s*\{\s*allow\s+read\s*,\s*write/.test(regras));
+--------------------------------------------------------------------------- 8< ---
+
+Nota: retirei a asserção que lia comentarios ("Onda 3" escrito nas regras). Um
+teste nao deve depender de texto explicativo: se alguem limpar os comentarios, o
+teste falharia sem haver defeito — e vice-versa.
+
+
+================================================================================
+9. CORRECCOES AO PLANO (v2) — 12 accoes
+================================================================================
+
+  C-01  NOVA ONDA 0.5 — mitigar a leitura em 2 horas (antes de tudo o resto)
+        a) Mudar TODAS as palavras-passe hoje (as actuais estao no repositorio).
+        b) Rodar a chave/segredo? Nao resolve (a config e publica); o que
+           resolve e reduzir o valor: ninguem guarda dados de cartao, e os
+           salarios passam a ser precisos apenas para o calculo.
+        c) Retirar do repositorio publico qualquer colaborador que ja nao
+           trabalhe; revisao de acessos GitHub/Firebase/Vercel (J-06).
+        d) Abrir a consola do Firebase uma vez por dia, 2 minutos, e ver se ha
+           picos de leitura anormais (sinal de extracção).
+        e) Escrever em docs/seguranca.md: "ate ao PR-12, a base e legivel por
+           qualquer pessoa com o endereco; nao introduzir dados novos de
+           terceiros (IBAN de fornecedores, dados de cartao)".
+        Custo: 2 h. Valor: reduz uma janela de 3 semanas de exposicao total.
+
+  C-02  Passo 0 do PR-01: comparar regras publicadas com as do repositorio
+        antes de qualquer deploy (I-05). Se diferentes, rever o PR.
+
+  C-03  Fechar D1 e D2 (IVA e A4) na Onda 0, por escrito, em DECISOES.md.
+
+  C-04  Carimbar os 6 documentos historicos na Onda 0 (1 h), em vez da Onda 5.
+
+  C-05  Modelo de migracao, obrigatorio em qualquer PR que acrescente campo:
+        1) qual o valor por omissao para registos antigos e porquê;
+        2) script de backfill com --dry-run e contagem antes/depois;
+        3) teste que prova que relatorios antigos dao o mesmo resultado;
+        4) como se reverte (campo fica, codigo volta atras).
+
+  C-06  Cada PR declara rollback em duas linhas (codigo? dados? ambos?).
+
+  C-07  Monitorizacao diaria de 2 minutos, tres numeros:
+        vendas de ontem (diferenca zero com o caixa), produtos com stock
+        negativo, erros permission-denied no log do modulo tecnico.
+
+  C-08  Comunicacao: uma nota de uma pagina + 15 min de demonstracao para cada
+        mudanca visivel (palavras-passe, A4, fecho de caixa).
+
+  C-09  Reescrever PB-03 com Cloud Function + custom token desde o inicio
+        (F-01), e acrescentar o pre-requisito "plano Blaze + deploy de
+        functions" ao inventario de acessos e custos.
+
+  C-10  Remover handleFecharAno (H-01) e clearSystemData (H-02); corrigir
+        PC-11 (H-03) e acrescentar o substituto de sincronizacao em DES-01
+        (H-04).
+
+  C-11  Substituir o teste de regras pelo parser balanceado (seccao 8, ja
+        aplicado ao ficheiro do PR-01).
+
+  C-12  Criar um quadro de execucao de UMA pagina (o plano de 1.914 linhas
+        passa a ser referencia, nao lista de tarefas).
+
+  Estimativas revistas (substituem a seccao 11 do plano):
+        Onda 0 ........ 2-3 dias (inclui C-02, C-03, C-04)
+        Onda 0.5 ...... 2 horas (C-01)
+        Onda 1 ........ 5-7 dias
+        Onda 2 ........ 6-8 dias
+        Onda 3 ........ 3-4 semanas (Cloud Function + claims + reset de
+                        palavras-passe) — nao 2-3
+        Onda 4 ........ 3-4 semanas
+        Onda 5 ........ continuo
+        Total ate "seguro para dados" (fim da Onda 2): ~3 semanas
+        Total ate acesso a serio (fim da Onda 3): ~7 semanas
+        Sistema completo: 4-6 meses
+
+
+================================================================================
+10. O QUE EU FARIA SE FOSSE EU (5 dias uteis)
+================================================================================
+  Dia 1 (manha)  PR-01 (regras) + teste corrigido + simulador + deploy.
+  Dia 1 (tarde)  PR-03 (tirar 05082 e palavras-passe do codigo) + rodar as
+                 palavras-passe da equipa.
+  Dia 2          PR-02 (getAllOrFail: nenhuma leitura falhada reescreve dados).
+  Dia 3          PR-01b (produtos/funcionarios: desactivar em vez de apagar) +
+                 remover handleFecharAno e clearSystemData.
+  Dia 4          PR-04 + PR-05 (estado A4 e pagamento multiplo) — com D1/D2
+                 ja decididos.
+  Dia 5          PR-08 (backup completo + restauro testado) e monitorizacao.
+  Resultado ao fim de 5 dias: deixa de se perder historico, deixa de se
+  reescrever stock, os papeis dizem a verdade, e existe um backup que se
+  restaura. A leitura continua aberta — mas com a Onda 0.5, ha menos para ler.
+
+
+================================================================================
+11. NOTA FINAL
+================================================================================
+  Esta revisao encontrou falhas minhas, nao do sistema. Duas delas teriam custado
+  dias de trabalho (F-01 e F-04); uma teria deixado uma funcao que mente no
+  sistema (H-01). Preferi dizer isto agora do que depois de o dono pagar o
+  trabalho.
+
+  O ficheiro PLANO-MELHORIA-COMPLETO.txt foi corrigido nos pontos H-01, H-03,
+  K-01 e K-02, e tem agora um aviso a apontar para esta revisao.
+  O ficheiro PR-01-PACOTE-REGRAS.txt tem o teste corrigido (seccao 8) e o passo 0
+  de comparacao das regras publicadas.
+
+  Nada foi aplicado ao sistema.
+================================================================================
+FIM DA REVISAO
+================================================================================

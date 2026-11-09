@@ -1,0 +1,1763 @@
+================================================================================
+RELATORIO DE AUDITORIA DE SOFTWARE
+AGRO - XICOMO & SERVICOS, LDA  ·  Sistema de gestao comercial, stock, RH e
+facturacao (React + Firebase/Firestore)
+================================================================================
+Data da auditoria .....: 09 de Novembro de 2026
+Repositorio ...........: WinSer2026/agro-xicomo-novo (GitHub, privado)
+Branches analisadas ...: main (01fb230) e arena/edaebf20-agro-xicomo-novo (c67b8ce)
+Auditor ...............: Equipa de auditoria (arquitectura, seguranca, base de
+                         dados, regras de negocio, desempenho, UX, fiabilidade)
+Estado do sistema .....: em producao na Vercel, com dados reais (segundo a
+                         documentacao do proprio projecto)
+Idioma ................: portugues de Portugal, linguagem simples
+Metodo ................: leitura integral do codigo, execucao de compilacao e
+                         testes, analise de dependencias; NENHUMA alteracao ao
+                         repositorio
+================================================================================
+
+
+--------------------------------------------------------------------------------
+0. CONFIRMACAO INICIAL (o que identifiquei antes de comecar)
+--------------------------------------------------------------------------------
+
+STACK IDENTIFICADA [CONFIRMADO]
+  - Interface: React 19 + TypeScript 5.8 + Vite 6 + Tailwind CSS 4 (SPA)
+  - Dados: Firebase Firestore SDK 12, ligado DIRECTAMENTE a partir do browser
+    (nao existe servidor de negocio proprio em producao)
+  - Documentos: jsPDF + jspdf-autotable (PDF), SheetJS/xlsx (Excel)
+  - Graficos: recharts.  Codigo de barras: html5-qrcode.
+  - Servidor Express (server.ts): usado apenas em desenvolvimento; a producao
+    na Vercel e estatica (ver vercel.json) [PROVAVEL]
+  - Testes: Vitest + scripts tsx.  Gestor de pacotes: npm (existe bun.lock).
+  - Autenticacao: propria, sobre a coleccao "credentials" do Firestore, com
+    sessao anonima do Firebase como "porteiro" das regras.
+
+BRANCHES
+  - main ................ commit 01fb230
+  - arena/edaebf20-... .. commit c67b8ce
+  - "git diff main..HEAD" devolve ZERO diferencas: o conteudo e identico.
+  - O historico tem apenas 2 commits (foi esmagado). Nao e possivel auditar
+    segredos no historico.
+
+VERIFICACOES EXECUTADAS
+  - npx tsc --noEmit ................ PASSA (0 erros)
+  - npm test ........................ 13 testes Vitest passam, mas ficam
+                                      2 "unhandled rejections"
+  - npm run test:all ................ 54 assercoes passam
+  - npm audit --omit=dev ............ 22 vulnerabilidades (2 criticas,
+                                      12 altas, 5 moderadas, 3 baixas)
+
+VOLUME DE CODIGO
+  - ~40.500 linhas em src/ e server.ts; 146 ficheiros versionados.
+
+DUVIDAS QUE NAO IMPEDEM A AUDITORIA (ver seccao 12)
+  - As regras do Firestore publicadas no projecto sao as deste repositorio?
+  - A autenticacao anonima esta activa na consola Firebase?
+  - Desde quando existem dados reais, e com que volume?
+
+
+--------------------------------------------------------------------------------
+1. RESUMO EXECUTIVO
+--------------------------------------------------------------------------------
+
+O Agro-Xicomo e uma aplicacao web de facturacao e gestao para uma loja de
+insumos agricolas em Maputo: ponto de venda, facturas e recibos, stock com
+produtos hibridos (saco/quilo), quebras, transformacoes, recursos humanos com
+salarios e financas. Funciona: compila, os testes passam, uma venda grava-se de
+forma atomica, a numeracao de documentos e transaccional e o historico nao tem
+botao de eliminacao. Isto e trabalho a serio, nao e uma maqueta.
+
+O problema e outro, e e grave: o sistema nao tem controlo de acesso a serio.
+Qualquer pessoa com o endereco do sistema pode obter uma sessao anonima e ler ou
+escrever toda a base - vendas, salarios, clientes e a coleccao de credenciais -
+porque as regras do Firestore aceitam qualquer sessao anonima e o papel de cada
+utilizador so existe no browser. A isto junta-se palavras-passe reais de
+funcionarios escritas em texto simples dentro do repositorio. Em linguagem de
+balcao: a porta tem fechadura, mas a chave esta colada no vidro.
+
+AS 5 COISAS MAIS GRAVES
+  1. Firestore aberto a qualquer sessao anonima (firestore.rules:27-48).
+  2. Autenticacao e perfis decididos no browser (App.tsx:217-262).
+  3. Palavras-passe reais em texto simples no codigo (utils/indexedDB.ts:1334).
+  4. Uma falha de leitura da base e interpretada como "base vazia" e o sistema
+     REESCREVE catalogo, definicoes e utilizadores com valores de fabrica
+     (firebaseDB.ts:686, 3296, 3331).
+  5. Um botao "Restaurar inventario oficial" apaga o stock real sem pedir
+     palavra-passe (StockModule.tsx:1696).
+
+AS 3 COISAS MAIS BEM FEITAS
+  1. Venda + baixa de stock numa so transaccao, com validacao de saldo
+     (firebaseDB.ts:1235-1379).
+  2. Numeracao fiscal transaccional em "counters" (firebaseDB.ts:1075-1120).
+  3. Documentacao extensa (27 documentos em docs/) e testes reais de logica de
+     negocio (54 assercoes em test/).
+
+CLASSIFICACAO DE PRONTIDAO
+  "NAO PRONTO: RISCO ALTO DE PERDER DINHEIRO OU DADOS"
+  Nao por falhar a vender, mas porque o acesso, as copias de seguranca e tres
+  caminhos de reescrita destrutiva nao sao seguros.
+
+
+--------------------------------------------------------------------------------
+2. QUADRO DE NOTAS
+--------------------------------------------------------------------------------
+
+  AREA                                             NOTA   JUSTIFICACAO CURTA
+  1. Seguranca ..................................  2/10   Nao ha autorizacao
+     real: regras abertas, perfis no browser, segredos no codigo, politica de
+     4-6 caracteres.
+  2. Base de dados e integridade ................  5/10   Venda/stock atomicos e
+     bem pensados, mas tres caminhos de "fallback" reescrevem dados e nao ha
+     livro de compras.
+  3. Arquitectura e qualidade ...................  4/10   4.700 linhas num
+     ficheiro, ~4.000 linhas de codigo morto, duas camadas de dados.
+  4. Funcionalidades e regras ...................  6/10   PDV, facturas, stock,
+     RH e financas funcionam; faltam armazem, compras e fecho de caixa; regras
+     contraditorias (IVA, estado A4).
+  5. Desempenho e escalabilidade ................  5/10   Paginacao existe nas
+     facturas, mas PDV/stock/financas descarregam tudo em tempo real.
+  6. Interface e experiencia ....................  6/10   Consistente e em
+     portugues, mas lang="en", numeros inventados e fluxos com muitos cliques.
+  7. Fiabilidade, operacao e manutencao .........  3/10   "Backup" no
+     localStorage, restauro incompleto, IP de auditoria falso, sem CI, sem
+     README.
+  8. Organizacao das branches ...................  4/10   Uma unica linha de
+     codigo efectiva, historico esmagado, sem PRs nem tags.
+
+  NOTA GLOBAL ...................................  4,5/10
+  Sistema funcional, com fundacoes de dados boas e uma camada de seguranca
+  decorativa.
+
+
+--------------------------------------------------------------------------------
+3. MAPA DA ARQUITECTURA
+--------------------------------------------------------------------------------
+
+3.1 COMO ESTA ORGANIZADO (em linguagem simples)
+
+Nao ha servidor de negocio. O browser fala directamente com o Firestore, usando
+a chave publica do projecto que vai dentro do pacote JavaScript. Toda a logica
+de negocio (precos, descontos, stock, validacao) corre no computador do
+utilizador.
+
+  +-------------------------- BROWSER (balcao, armazem, gestao) ---------------+
+  |                                                                           |
+  |  App.tsx  -> login, perfis, bloqueio de modulos, navegacao, tema, alertas  |
+  |    |                                                                      |
+  |    +-- PDVModule.tsx (4.705 l.)      vendas, carrinho, pagamentos, recibos |
+  |    +-- FaturasModule.tsx (2.365 l.)  facturas, cobrancas, anulacoes        |
+  |    +-- StockModule.tsx (4.682 l.)    catalogo, ajustes, quebras, contagem  |
+  |    +-- FinanceModule.tsx (2.804 l.)  DRE, caixa, sangrias, relatorios      |
+  |    +-- HRModule.tsx (2.450 l.)       funcionarios, assiduidade, salarios   |
+  |    +-- TechnicalModule.tsx (2.070 l.) utilizadores, definicoes, backups    |
+  |    +-- armazem  -> ECRAN ESTATICO "Modulo em Estruturacao" (App.tsx:889)   |
+  |                                                                           |
+  |  src/utils/firebaseDB.ts (3.844 l.)  <- unica porta para os dados         |
+  |  src/utils/*.ts                      <- regras reutilizaveis              |
+  +----------------------------+----------------------------------------------+
+                               | SDK Firebase (HTTPS/WebSocket)
+                               | chave publica dentro do bundle
+                               v
+  +------------------- FIREBASE / FIRESTORE ------------------------------------+
+  | products, sales, customers, paused_sales, losses, transformations          |
+  | employees, attendance, payroll_payments, credentials, active_sessions      |
+  | settings/global, counters/document_numbers, audit_logs,                    |
+  | audit_logs_archive, stock_movements, cash_movements, debts, deletions      |
+  | Regras: firestore.rules -> qualquer sessao anonima le e escreve tudo       |
+  +---------------------------------------------------------------------------+
+                               |
+                               +-- Deploy: Vercel estatico (vite build) + PWA
+
+DEPENDENCIAS EXTERNAS
+  - Firebase/Firestore: tudo depende dela (nao ha alternativa local).
+  - Vercel: alojamento.
+  - Web Crypto do browser: hash das palavras-passe.
+  - Impressora termica via Web Serial (posHardware.ts).
+  - server.ts: endpoints de backup/sync, NAO servidos pela Vercel [PROVAVEL].
+
+3.2 INVENTARIO DE MODULOS E ESTADO REAL
+
+  MODULO                                  ESTADO              PROVA
+  Ponto de venda (carrinho, descontos,    Funcional com       venda atomica em
+  pagamentos, pausa, scanner)             falhas              firebaseDB.ts:1235
+  Facturas/recibos/cobrancas/anulacoes    Funcional com       anulacao com senha
+                                          falhas              FaturasModule:502
+  Stock, quebras, contagem,               Funcional com       ajustes atomicos
+  transformacoes                          falhas              firebaseDB.ts:1725
+  Armazem / deposito de apoio             INEXISTENTE         ecran de obra em
+                                          (so visual)         App.tsx:889-908
+  Compras e fornecedores                  INEXISTENTE         nenhuma coleccao
+  Caixa (sangrias/reembolsos)             PARCIAL             nao ha abertura
+                                                              nem fecho
+  RH: funcionarios, assiduidade,          Funcional com       IRPS inventado em
+  salarios, INSS/IRPS                     falhas              hrCalculations:11
+  Dashboard inicial                       INEXISTENTE        DashboardModule.tsx
+                                          na pratica          nunca importado
+  Painel tecnico (utilizadores, backups)  Funcional com       backup parcial em
+                                          falhas              TechnicalModule:667
+  Relatorios (dia/mes/produto/operador)   Funcional           reporting.ts separa
+                                                              canceladas
+  Master report / entrada por IA          CODIGO MORTO        763 e 504 linhas
+                                                              nunca importadas
+
+
+--------------------------------------------------------------------------------
+4. LISTA COMPLETA DE PROBLEMAS
+--------------------------------------------------------------------------------
+Cada problema tem: identificador, titulo, gravidade, confianca, onde, o que se
+passa, porque importa, como corrigir, como verificar e esforco.
+Confianca: [CONFIRMADO] visto no codigo; [PROVAVEL] deduzido; [A VERIFICAR]
+depende de configuracao externa.
+
+
+================================================================================
+4.1 CRITICO
+================================================================================
+
+--------------------------------------------------------------------------------
+SEG-01  Qualquer pessoa consegue ler e alterar toda a base de dados
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO (codigo); A VERIFICAR (regras efectivamente publicadas)
+Onde ......: firestore.rules:27-40 (todas as coleccoes), firestore.rules:47-48
+             (credentials), src/utils/firebaseDB.ts:183-200 (login anonimo),
+             firebase-applet-config.json (chave publica usada pelo bundle)
+
+O que se passa
+  As regras dizem "allow read, write: if request.auth != null". O sistema nao
+  usa contas Firebase: cria uma sessao ANONIMA no arranque (signInAnonymously).
+  Portanto "request.auth != null" e verdadeiro para qualquer pessoa que saiba o
+  projectId - que esta escrito no pacote JavaScript que qualquer visitante
+  descarrega. A coleccao de credenciais e legivel e apagavel por essa sessao.
+
+Porque importa
+  E o pior cenario possivel num sistema com dinheiro. Um ex-funcionario, um
+  curioso ou um concorrente com o endereco do site pode: listar todas as vendas
+  e margens, ler salarios de todos, apagar o historico de vendas (a regra
+  permite delete em sales), mudar precos, criar-se uma conta de Tecnico ou
+  apagar a base inteira. O "historico de vendas imutavel" anunciado no SRS nao
+  existe na base - existe apenas na interface.
+
+Como corrigir
+  Passar a autenticacao a serio. Curto prazo (1 dia): manter utilizadores na
+  aplicacao mas exigir Firebase Authentication e escrever regras por perfil:
+  sales -> create para autenticados, update de estado controlado, NUNCA delete;
+  credentials -> nenhuma leitura pelo cliente (login via funcao de servidor);
+  employees/payroll -> apenas perfis de RH; products -> escrita apenas perfis de
+  stock. Enquanto isso nao for feito: retirar imediatamente "delete" de sales,
+  products, credentials e audit_logs.
+
+Como verificar
+  Numa pagina de teste, fazer signInAnonymously com a chave publica e tentar
+  deleteDoc(doc(db,'sales','<id>')). Hoje: sucesso (gravíssimo). Depois da
+  correccao: permission-denied.
+
+Esforco
+  Grande (2-4 dias com Firebase Auth + funcoes). O bloqueio de "delete" e
+  Pequeno (1 hora) e deve ser feito ja.
+
+--------------------------------------------------------------------------------
+SEG-02  O perfil e a identidade do utilizador sao decididos no browser
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO
+Onde ......: App.tsx:217-262 (restauro de sessao), App.tsx:303-338
+             (desbloqueio de modulo), App.tsx:47-60 (isModuleAccessible),
+             LoginPanel.tsx:293-351
+
+O que se passa
+  Depois do login, o utilizador e o perfil ficam como JSON no sessionStorage
+  (agro_current_user). No recarregamento, o App CONFIA nesse JSON sem voltar a
+  verificar a base: "const userObj = JSON.parse(savedUserJson);
+  setCurrentUser(userObj);". O "desbloqueio de modulo" pede a palavra-passe do
+  PROPRIO utilizador, ou seja, nao separa funcoes (e o mesmo que pedir a
+  assinatura a quem ja assinou).
+
+Porque importa
+  Com as ferramentas do browser abertas (F12), qualquer pessoa muda
+  "role":"Operador" para "role":"Tecnico" e passa a ver utilizadores, backups,
+  logs e definicoes. Como as regras do Firestore tambem nao validam quem
+  escreve (SEG-01), o perfil e decoracao. Numa loja com funcionarios em
+  rotatividade, isto e dinheiro: o operador pode ver salarios, alterar precos e
+  apagar registos.
+
+Como corrigir
+  (1) Guardar apenas um sessionId opaco no browser; (2) em cada operacao
+  sensivel confirmar o perfil na base (ou, melhor, no token de Firebase Auth com
+  custom claims); (3) o "gate" de modulo deve exigir a palavra-passe de OUTRO
+  perfil (gestor), nunca a do proprio.
+
+Como verificar
+  Alterar sessionStorage.agro_current_user para Tecnico e recarregar. Hoje o
+  painel tecnico abre; depois da correccao a aplicacao deve recusar e voltar ao
+  login.
+
+Esforco
+  Medio.
+
+--------------------------------------------------------------------------------
+SEG-03  Palavras-passe reais de funcionarios em texto simples no repositorio
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO
+Onde ......: src/utils/indexedDB.ts:1334-1341 (texto simples),
+             src/data/credentialsReset.ts:30-40 (hashes fixos por utilizador),
+             src/utils/authorization.ts:16 (05082),
+             src/utils/firebaseDB.ts:3288 (stockPasswordHash '05082'),
+             StockModule.tsx:106, 1730, 3866, 4102 (comentarios e placeholders)
+
+O que se passa
+  Um ficheiro de 2.008 linhas, NUNCA importado por ninguem (grep confirma: so
+  aparece num comentario do App.tsx), contem:
+
+    { username: 'Vanda',    passwordHash: '2060',      role: 'Operador' }
+    { username: 'Salvador', passwordHash: '2000SC',    role: 'Gestor Geral' }
+    { username: 'Nelson',   passwordHash: '1987',      role: 'Operador' }
+    { username: 'Maria',    passwordHash: 'Mara',      role: 'Operador' }
+    { username: 'Ainara',   passwordHash: '131923',    role: 'Contabilista' }
+    { username: 'Mazive',   passwordHash: '0147',      role: 'Tecnico' }
+    { username: 'gestor1',  passwordHash: 'gestor123', role: 'Gestor Geral' }
+
+  Alem disso, o codigo de autorizacao de stock tem valor por omissao 05082 e a
+  documentacao afirma repetidamente que isso foi removido
+  (docs/05-plano-seguranca.md, linha "Sem chaves-mestras").
+
+Porque importa
+  Sao nomes reais da equipa. Se estas palavras-passe ainda forem as usadas (e
+  provavel: a politica oficial permite 4-6 caracteres e nao obriga a trocar),
+  qualquer pessoa com acesso ao repositorio entra como Tecnico. Mesmo que ja
+  tenham sido trocadas, as antigas continuam a ser informacao util para ataques
+  (as pessoas repetem). E 05082 continua a abrir as operacoes de stock.
+
+Como corrigir
+  (1) Apagar src/utils/indexedDB.ts (codigo morto); (2) remover os hashes de
+  src/data/credentialsReset.ts; (3) DEFAULT_AUTHORIZATION_PASSWORD = null e
+  bloquear operacoes sensiveis enquanto nao existir codigo configurado;
+  (4) pedir a todos os utilizadores que mudem de palavra-passe hoje, com minimo
+  de 10 caracteres; (5) redefinir no Firestore todos os hashes que correspondam
+  a estas palavras.
+
+Como verificar
+  "grep -rn '2000SC|gestor123|131923|0147|05082' src/" = 0 resultados. Numa
+  instalacao nova, deve ser impossivel autorizar stock sem definir o codigo.
+
+Esforco
+  Pequeno (1-2 horas) + comunicacao aos utilizadores.
+
+--------------------------------------------------------------------------------
+BD-01  Uma falha de leitura e tratada como "base vazia" e reescreve o catalogo
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO (codigo); PROVAVEL (acontecer com rede instavel)
+Onde ......: firebaseDB.ts:539-551 (getAll engole o erro e devolve []),
+             firebaseDB.ts:686-714 (getProducts semeia INITIAL_PRODUCTS),
+             src/data/initialProducts.ts (100 produtos com stocks e precos)
+
+O que se passa
+
+    private async getAll<T>(colName: string) {
+      try { ... return items; }
+      catch (e) { console.error(...); return []; }   // erro vira "vazio"
+    }
+
+    public async getProducts() {
+      const cached = localStorage.getItem('agro_products_cache'); // sem cache...
+      const rawProducts = await this.getAll('products');
+      if (rawProducts.length === 0) {                         // "vazio" = 0
+        await this.upsertBatch('products', INITIAL_PRODUCTS); // GRAVA 100 itens
+      }
+
+Porque importa
+  Num computador novo, ou num browser com a cache limpa, basta uma leitura
+  falhada (rede a cair, regra mal publicada, limite temporario do Firebase) para
+  o sistema SOBRESCREVER os 100 produtos reais por ids iguais (qim-01, sem-01...)
+  com stocks e precos de tabela de arranque. O stock fisico real desaparece, os
+  precos de venda voltam a valores antigos e as margens ficam erradas - sem
+  qualquer aviso. A documentacao diz que isto foi resolvido com getAllOrFail
+  (docs/09, linha D-05); essa funcao NAO EXISTE no codigo (grep = 0 resultados).
+
+Como corrigir
+  Separar "leitura falhou" de "coleccao vazia": criar getAllOrFail que LANCA o
+  erro e usa-lo em getProducts/getCredentials. Semear apenas quando a leitura
+  teve sucesso E veio vazia E existe marca explicita de instalacao nova
+  (settings/global inexistente). Nunca semear quando existe historico de vendas.
+
+Como verificar
+  Teste que simula getDocs a lancar "unavailable" e confirma que getProducts
+  rejeita e que nenhuma escrita ocorre. Manual: desligar a rede, abrir num
+  browser limpo, e confirmar que aparece erro e nao um catalogo reescrito.
+
+Esforco
+  Pequeno (2-3 horas, com teste).
+
+--------------------------------------------------------------------------------
+BD-02  Se a leitura das definicoes falhar, sao repostas as de fabrica (05082)
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO (o proprio npm test mostra o setDoc disparado)
+Onde ......: firebaseDB.ts:3296-3322 (getSettings + saveSettings(def)),
+             firebaseDB.ts:3286-3293 (valores por omissao com 05082)
+
+O que se passa
+
+    try { const snap = await getDoc(doc(db,'settings','global')); ... }
+    catch(e) { /* silencio */ }
+    const def = this.getDefaultSettings();
+    await this.saveSettings(def);   // escreve por cima das definicoes reais
+
+Porque importa
+  Numa falha momentanea, o sistema apaga o nome da empresa, NUIT, contactos,
+  bancos, impressoras, nivel critico de stock E o codigo de gestor configurado,
+  repondo 05082. E simultaneamente perda de configuracao e rebaixamento de
+  seguranca (volta a palavra-passe conhecida). Os documentos impressos passam a
+  sair com dados de fabrica.
+
+Como corrigir
+  Distinguir os tres estados (existe / nao existe / falhou). Se falhar: usar a
+  cache local e NAO escrever. So gravar omissoes numa instalacao nova
+  confirmada.
+
+Como verificar
+  O teste test/failuremodes.test.tsx ja apanha este caminho como "unhandled
+  rejection"; transforma-lo em teste que falha se houver escrita quando a
+  leitura falha.
+
+Esforco
+  Pequeno.
+
+--------------------------------------------------------------------------------
+BD-03  Se a leitura das credenciais falhar, recria uma conta admin com hash fixo
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO
+Onde ......: firebaseDB.ts:3331-3370; hash replicado em
+             src/data/credentialsReset.ts:32
+
+O que se passa
+  getCredentials usa a mesma logica getAll (erro -> []) e, quando a lista vem
+  vazia, grava:
+
+    { id: 'usr-admin-inicial', username: 'admin',
+      passwordHash: 'sha256:AXadmin2026:ffe6646a...', role: 'Tecnico' }
+
+  A conta e criada com mustChangePassword, mas o sistema volve a cria-la sempre
+  que a lista vier vazia - inclusive se o Tecnico a tiver apagado de proposito.
+
+Porque importa
+  Combina duas falhas: (a) uma conta com privilegio maximo reaparece sozinha;
+  (b) a sua palavra-passe e um hash fixo, publicado no repositorio, para sempre
+  sujeito a ataque offline. Tambem torna impossivel "fechar" o acesso de
+  administrador.
+
+Como corrigir
+  Remover o bloco de criacao de credenciais do getCredentials (a criacao inicial
+  ja e tratada - e bem - em utils/credentialsReset.ts:24-79); usar getAllOrFail
+  (BD-01); remover o hash fixo do repositorio.
+
+Como verificar
+  "grep -n usr-admin-inicial src/utils/firebaseDB.ts" desaparece; teste que
+  simula erro de leitura e confirma zero escritas.
+
+Esforco
+  Pequeno.
+
+--------------------------------------------------------------------------------
+BD-04  Um botao apaga stock e precos de 100 artigos, sem senha e sem desfazer
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO
+Confianca .: CONFIRMADO
+Onde ......: StockModule.tsx:1696-1726 (handleResetOfficialCatalog ->
+             dbService.resetProductsToInitial()), firebaseDB.ts:3835-3841
+
+O que se passa
+  Com uma simples confirmacao de clique ("Deseja continuar?"), o sistema
+  substitui os produtos pelos INITIAL_PRODUCTS do codigo, "com precos e
+  quantidades exactas". Nao pede a palavra-passe de gestor (ao contrario dos
+  ajustes de stock e da contagem fisica), nao regista movimento, nao faz copia
+  previa e nao da para anular.
+
+Porque importa
+  E o equivalente a deitar fora o inventario e voltar a fotografia de quando o
+  sistema foi instalado. Num dia de trabalho, um gestor de stock clica por
+  curiosidade e perde o stock real, os precos actualizados e a rastreabilidade;
+  as vendas seguintes debitam saldos que ja nao correspondem a realidade. Isto e
+  perda de dados no sentido mais literal.
+
+Como corrigir
+  Remover o botao da interface (nao e operacao de negocio; e ferramenta de
+  programador). Se for indispensavel para demonstracoes: palavra-passe de
+  gestor + backup completo automatico imediatamente antes + auditoria com
+  contagem de artigos afectados + confirmacao escrita ("ESTOU CIENTE").
+
+Como verificar
+  Sem senha, a operacao deve ser impossivel. Com senha, deve existir backup
+  datado imediatamente anterior e um registo em audit_logs com o resumo.
+
+Esforco
+  Pequeno.
+
+--------------------------------------------------------------------------------
+FIA-01  O "backup" nao e um backup (e o restauro e incompleto)
+--------------------------------------------------------------------------------
+
+Gravidade .: CRITICO (para o objectivo declarado "nenhuma venda pode ser perda")
+Confianca .: CONFIRMADO
+Onde ......: App.tsx:192-203 + firebaseDB.ts:3558-3602 (copia automatica no
+             localStorage), firebaseDB.ts:3438-3503 (exportAllData),
+             TechnicalModule.tsx:667-700 (handleBackupTotal),
+             TechnicalModule.tsx:1452-1470 (restauro)
+
+O que se passa
+  A cada 10 minutos o sistema serializa toda a base para o localStorage do
+  MESMO browser, guardando no maximo 3 copias, sujeitas a quota (~5-10 MB). O
+  botao "Backup Total" do painel tecnico exporta apenas 7 coleccoes (produtos,
+  vendas, quebras, funcionarios, assiduidade, logs activos, arquivo) - sem
+  credenciais, sem definicoes, sem clientes, sem transformacoes, sem salarios.
+  exportAllData inclui mais coisas, mas tambem NAO inclui cash_movements (livro
+  de caixa), debts (dividas de clientes) nem stock_movements (livro de stock).
+  O restauro (importAllData) grava por cima, sem validar o ficheiro nem avisar
+  do que vai faltar.
+
+Porque importa
+  O dono acredita que tem tres copias. Na realidade: se o computador avariar,
+  arder ou for roubado, as copias vao com ele; se o browser limpar dados ou a
+  quota estourar, perdem-se; e se precisar de restaurar, o caixa, as dividas e o
+  livro de stock ficam de fora - exactamente os dados que provam o dinheiro. E o
+  "sentimento de seguranca" que a propria documentacao diz ter removido (D-18).
+
+Como corrigir
+  (1) Backup diario automatico para fora do browser (Firebase Storage ou
+  ficheiro descarregado com aviso), com 30 dias de retencao; (2) um unico
+  exportador com TODAS as coleccoes; (3) restauro com pre-visualizacao
+  (contagens antes/depois), validacao de esquema e backup automatico do estado
+  actual antes de importar; (4) ensaio de restauro trimestral documentado.
+
+Como verificar
+  Exportar, apagar um registo de teste, restaurar noutra maquina e confirmar que
+  vendas, caixa, dividas, stock, utilizadores e definicoes ficam iguais. Medir o
+  tempo ate o sistema estar operacional.
+
+Esforco
+  Medio (1-2 dias).
+
+
+================================================================================
+4.2 ALTO
+================================================================================
+
+--------------------------------------------------------------------------------
+SEG-04  Uma conta eliminada continua a conseguir entrar no seu computador
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: firebaseDB.ts:3331-3350 (cache em localStorage), :3387-3393
+      (deleteCredential limpa so a cache da maquina que apaga),
+      LoginPanel.tsx:153-164
+O que se passa: getCredentials devolve a cache local SEM consultar a base,
+desde que tenha pelo menos um registo; a validacao da palavra-passe faz-se
+contra esse hash local.
+Porque importa: quando o dono despede um funcionario e elimina a conta, o
+computador do balcao onde ele trabalhou mantem o hash e continua a autentica-lo.
+A mudanca de palavra-passe numa maquina nao chega as outras. Acesso indevido
+permanente em cenarios de rotatividade.
+Correccao: cache com prazo curto (24 h) e revalidacao obrigatoria quando ha
+rede; guardar passwordChangedAt/tokenVersion por utilizador e recusar login se
+o valor local for mais antigo; botao "terminar sessoes deste utilizador".
+Verificar: eliminar um utilizador em A e tentar entrar em B (que ja tinha
+sessao). Deve falhar logo que haja rede.
+Esforco: Medio.
+
+--------------------------------------------------------------------------------
+SEG-05  Politica de palavras-passe de 4 a 6 caracteres; defesas so no browser
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: securityHelper.ts:154-179 (length < 4 || > 6), LoginPanel.tsx:33-62
+      (contagem de falhas e CAPTCHA em localStorage), SRS RF-U03
+O que se passa: a politica oficial e de 4 a 6 caracteres. Um PIN de 4 digitos
+tem 10.000 combinacoes. O bloqueio apos 5 falhas e o CAPTCHA ficam no
+localStorage: basta limpar o armazenamento (ou janela privada) para recomecar.
+Porque importa: combinado com SEG-01 (hashes legiveis), e viavel testar todas as
+combinacoes de 4-6 caracteres fora do sistema, sem limite, e recuperar as
+palavras-passe de todos os perfis, incluindo gestao.
+Correccao: minimo de 10 caracteres (ou PIN de 6 apenas para balcao, com bloqueio
+no servidor); bloqueio por CONTA no Firestore, nao por browser.
+Verificar: "1234" deve ser recusada; apos 5 falhas, limpar localStorage e
+confirmar que continua bloqueado.
+Esforco: Pequeno (politica) / Medio (bloqueio no servidor).
+
+--------------------------------------------------------------------------------
+SEG-06  Endpoints do server.ts sem autenticacao e CSP permissiva
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO no codigo; A VERIFICAR se publicado
+Onde: server.ts:89-100 (CSP com unsafe-eval, https: http:, frame-ancestors
+      https: http:), :107-180 (health/backup/download), :183-238
+      (sync/save/delete), :103-104 (corpo ate 50 MB)
+O que se passa: qualquer pessoa que fale com estes endpoints pode escrever
+backups no servidor, lista-los, DESCARREGA-LOS (dados de negocio) e alterar ou
+apagar registos de data/db.json, incluindo credentials. Nao ha autenticacao,
+token, verificacao de origem nem limite por rota.
+Porque importa: hoje a producao na Vercel e estatica e nao expoe isto
+[PROVAVEL]. Mas o package.json tem "start" que arranca este servidor, e e
+natural que alguem o ponha num VPS "para ter o backup". Nesse dia a base fica
+exposta na internet sem palavra-passe.
+Correccao: se nao e necessario, retirar da producao; se for, exigir segredo
+(SYNC_API_TOKEN ja previsto em utils/indexedDB.ts:12 mas sem implementacao no
+servidor), limitar a mesma origem e restringir a CSP.
+Verificar: "curl http://<servidor>/api/sync" deve devolver 401. Hoje devolve a
+base inteira.
+Esforco: Pequeno (retirar) / Medio (endurecer).
+
+--------------------------------------------------------------------------------
+NEG-01  Toda a factura A4 fica "Pendente", mesmo paga a dinheiro
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: PDVModule.tsx:1374-1395
+O que se passa:
+
+    let finalStatus = 'Paga';
+    if (effectiveDocType === 'FaturaProforma' || printFormat === 'A4') {
+      finalStatus = 'Pendente';        // qualquer A4, independentemente do pago
+    } else if (paymentMethod === 'Credito') { finalStatus = 'Credito'; }
+
+O recibo so e emitido quando o estado e Paga (:1389). Numa venda a dinheiro
+impressa em A4: o cliente paga, o sistema grava divida e nao sai recibo.
+Porque importa: o mapa de dividas mostra clientes que ja pagaram; o dono liga a
+cobrar dividas inexistentes; a receita do dia aparece dividida; e a factura
+fiscal sai sem recibo, enfraquecendo a prova do pagamento. O codigo diz que e
+intencional, mas o efeito no negocio nao e aceitavel sem regra explicita do dono.
+Correccao: estado dependente do PAGAMENTO, nao do papel: Paga quando o metodo nao
+e credito (e, no multiplo, quando a soma cobre o total); Pendente apenas quando o
+operador escolhe "emitir sem receber". Emitir recibo em qualquer venda paga.
+Verificar: venda de 1.000 MT em dinheiro, impressao A4 -> estado Paga com
+REC-A4-...; a lista de dividas nao deve conter a factura.
+Esforco: Pequeno.
+
+--------------------------------------------------------------------------------
+NEG-02  Pagamento multiplo nao e validado: aceita "pago" sem o dinheiro todo
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: PDVModule.tsx:1397-1399 (gravacao), :2435-2447 (so mostra Falta/Excesso),
+      :1401-1422 (venda sem amountReceived/changeGiven); types.ts:85-88 promete
+      os campos "para auditoria do troco"
+O que se passa: no pagamento Multiplo, o ecra calcula a diferenca e pinta-a de
+laranja, mas finalizar nao verifica nada: grava as linhas preenchidas (> 0) e a
+venda fica Paga pelo total. Tambem nao se guarda o valor entregue nem o troco.
+Porque importa: o operador regista 200 MT em dinheiro e 800 em M-Pesa numa venda
+de 1.000, mas o cliente so transferiu 300. O sistema diz Paga, o caixa fecha a
+bater e a diferenca desaparece. Nao ha forma de provar quanto entrou por cada
+meio - precisamente o que a contabilidade e uma inspeccao pedem.
+Correccao: bloquear finalizacao quando |soma(breakdown) - total| > 0,01 ou
+quando amountReceived < total em dinheiro; gravar amountReceived, changeGiven e
+breakdown na venda.
+Verificar: tentar finalizar com 500 MT em multiplo numa venda de 1.000 -> recusa;
+confirmar changeGiven no documento.
+Esforco: Pequeno.
+
+--------------------------------------------------------------------------------
+NEG-03  Ha duas contas diferentes para o IVA e o PDV ignora a taxa do produto
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: saleTotals.ts:44-52 (16% fixo), taxHelper.ts:55-68 (por linha), usado em
+      FaturasModule.tsx:918,1002; StockModule.tsx:759,1816 permite taxRate por
+      produto; pdfGenerator.ts:384,654,880 imprime "IVA (16%)"
+O que se passa: o total cobrado no PDV usa SEMPRE 16% sobre o subtotal com
+desconto. O taxHelper, escrito para respeitar a taxa de cada produto (e isentos),
+NAO e usado no PDV - so em relatorios de facturas. O utilizador pode configurar
+0% ou 5% num produto e o PDV cobra 16%. Os PDF imprimem literalmente "IVA (16%)".
+Porque importa: dois modulos, dois numeros. Se houver produtos isentos ou com
+taxa diferente, o valor no documento nao corresponde ao configurado, e o mapa de
+IVA (que usa a outra formula) nao bate com a soma das facturas. Num contexto
+fiscal, isto e um problema com a Autoridade Tributaria, nao um bug estetico.
+Correccao: uma unica funcao por linha (cartTaxAmount) usada pelo PDV, pelos PDF e
+pelos relatorios; gravar taxRate em cada linha; escrever a taxa real no documento.
+Verificar: produto a 0% e outro a 16%, venda com IVA, comparar total no ecra, no
+PDF, no Excel e no mapa de IVA. Tem de coincidir ao centavo.
+Esforco: Medio.
+
+--------------------------------------------------------------------------------
+NEG-04  O custo da venda fica a zero quando o produto desaparece (margem 100%)
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: PDVModule.tsx:1363, firebaseDB.ts:1207 e :1243, priceHelper.ts:30-40
+      (getUnitCost devolve 0 quando nao ha produto)
+O que se passa: a intencao era usar um custo de reserva; na pratica
+getUnitCost(undefined) devolve 0, que NAO e nulo, portanto o "??" nunca chega ao
+valor seguinte. O item fica com costPrice: 0 e buyingPrice: 0.
+Porque importa: esses valores alimentam o lucro no FinanceModule (:208-215) e os
+relatorios (:284-302). Um produto eliminado passa a dar 100% de margem e o lucro
+do mes fica inflacionado; o dono decide compras com base nisso. O FinanceModule
+ja tem o tratamento correcto ("sem custo conhecido, margem zero"); o PDV nao.
+Correccao: nunca usar 0 como "desconhecido". getUnitCost devolve null quando nao
+ha produto; o PDV grava costUnknown: true; relatorios tratam como margem zero e
+mostram "sem custo conhecido".
+Verificar: teste unitario com artigo inexistente e relatorio do periodo.
+Esforco: Pequeno.
+
+--------------------------------------------------------------------------------
+NEG-05  Nao existe abertura nem fecho de caixa
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: cashBox.ts:54-81 (saldo), FinanceModule.tsx:121-188 (sangria/entrada);
+      ausencia de qualquer funcao de abertura/fecho em src/
+O que se passa: ha sangrias, entradas e reembolsos, e ha saldo calculado. Mas nao
+ha fundo inicial por turno, contagem no fecho, comparacao "contado vs sistema",
+registo da diferenca nem fecho assinado. O turno nao tem identidade (nao se sabe
+quem abriu nem quem fechou).
+Porque importa: numa loja com varios operadores e dinheiro fisico, o fecho de
+caixa e o controlo mais basico que existe. Sem ele, a falta de 2.000 MT no fim do
+dia nao tem resposta: troco errado? furto? reembolso nao registado? venda nao
+lancada?
+Correccao: coleccoes cash_sessions (abertura: operador, fundo, hora) e
+cash_closures (contagem por metodo, esperado, diferenca, assinaturas). Bloquear
+vendas sem sessao aberta ou avisar. Relatorio diario com a diferenca.
+Verificar: abrir com 5.000, vender, sangrar, fechar com contagem e confirmar a
+diferenca; tentar fechar duas vezes (recusa).
+Esforco: Medio (2-3 dias).
+
+--------------------------------------------------------------------------------
+NEG-06  O registo de dividas so nasce quando ha o primeiro pagamento
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: firebaseDB.ts:2327-2359 (createDebtFromSale) - NUNCA e chamado;
+      divida criada implicitamente em settleDebt (:2437-2487)
+O que se passa: a coleccao debts so recebe documento quando alguem liquida
+parcialmente uma factura. Uma venda a credito de 30.000 MT, nunca paga, NAO
+existe na lista de dividas.
+Porque importa: o modulo de dividas (FaturasModule:173) mostra uma lista
+incompleta e o dono pensa que tem menos devedores do que tem. Num negocio que
+vende a credito a agricultores, isto e dinheiro que nao se cobra.
+Correccao: chamar createDebtFromSale no fim da gravacao da venda, quando o estado
+for Credito ou Pendente (idealmente na mesma transaccao); migrar vendas antigas
+em divida; mostrar prazo e dias de atraso.
+Verificar: venda a credito aparece imediatamente com total em aberto e data-limite.
+Esforco: Pequeno/Medio.
+
+--------------------------------------------------------------------------------
+NEG-07  O modulo de armazem nao existe (e um ecra de obra)
+--------------------------------------------------------------------------------
+Gravidade: ALTO (funcionalidade prometida e inexistente)
+Confianca: CONFIRMADO
+Onde: App.tsx:889-908; permissoes em App.tsx:55; docs/01-srs-requisitos.md
+O que se passa: o menu "Armazem" esta liberado por permissoes e abre uma pagina
+que diz "Modulo em Estruturacao - Fase Estatica", prometendo localizacoes
+fisicas, corredores, prateleiras e lotes de recepcao de fornecedores. Nao existe
+logica nenhuma.
+Porque importa: quem usa o sistema (e quem le o SRS) acredita que loja e deposito
+estao separados. Nao estao: existe uma unica quantidade por produto. Nao ha
+transferencia deposito-loja nem rasto de quem moveu. O unico rudimento e
+requisitionSacks (firebaseDB.ts:2209), que apenas converte sacos em retalho do
+MESMO produto - nao e armazem.
+Correccao: (a) remover o menu ate existir (honestidade) - recomendado ja; ou
+(b) implementar stock_locations com saldo por local e movimentos assinados.
+Verificar: o menu nao deve existir enquanto nao houver transferencias e saldo por
+local.
+Esforco: Pequeno (remover) / Grande (implementar).
+
+--------------------------------------------------------------------------------
+NEG-08  Nao e possivel vender sem internet, apesar de a app ser PWA "offline"
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO no codigo; A VERIFICAR em campo
+Onde: firebaseDB.ts:1262 (runTransaction na venda), :1078 e :1109 (numeracao
+      transaccional), vite.config.ts (PWA), docs/03-arquitectura.md §8.3
+O que se passa: a venda usa runTransaction, que EXIGE ligacao ao servidor para
+ler os saldos. Sem rede, a transaccao falha (ou fica pendente indefinidamente). O
+mesmo para o numero de factura. A cache persistente permite LER offline, mas nao
+vender.
+Porque importa: o contexto e Mocambique, com cortes de rede e energia - e a
+propria SRS preve "venda sem energia" (RF-V11). O sistema tem esse fluxo manual
+(lancamento retroactivo), mas o operador so descobre que nao consegue vender com
+o cliente a frente. Se a rede cair as 15h, tem de escrever a mao e lancar tudo
+depois - e e ai que nascem erros de stock e de numeracao.
+Correccao: (1) aviso visivel e permanente de "sem ligacao" (o estado isOnline ja
+existe mas nao explica nem bloqueia); (2) fila local de vendas pendentes em
+IndexedDB com numeracao provisoria; ou (3) modo "venda offline" que abre o
+formulario retroactivo ja preenchido. Antes de tudo, medir em campo.
+Verificar: desligar a rede, tentar vender e ver o que aparece em 10 segundos.
+Esforco: Grande (fila) / Pequeno (mensagem + atalho).
+
+--------------------------------------------------------------------------------
+SEG-07  A auditoria registra um IP falso e nao serve de prova
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: PDVModule.tsx:1459 (ipAddress '127.0.0.1'), App.tsx:166,333,409,
+      FaturasModule.tsx:466; docs/05 afirma usar 'N/D' honesto
+O que se passa: varios registos gravam 127.0.0.1 (o proprio computador) em vez do
+IP do cliente ou "desconhecido". Financeiro e Stock fazem bem (getClientIp()).
+Porque importa: o log existe para responder a "quem fez isto e de onde". Um IP
+fixo e falso torna o campo enganador: numa disputa com um funcionario ou numa
+inspeccao, o log parece indicar que a accao veio do servidor. Um campo vazio
+honesto vale mais do que um campo preenchido com mentira.
+Correccao: usar getClientIp() com fallback 'N/D' em todos os pontos.
+Verificar: "grep -rn 127.0.0.1 src/" = 0 em contexto de auditoria.
+Esforco: Pequeno.
+
+--------------------------------------------------------------------------------
+DES-01  O PDV, o stock e as financas descarregam TODAS as vendas e produtos
+--------------------------------------------------------------------------------
+Gravidade: ALTO (a partir de alguns milhares de vendas)
+Confianca: CONFIRMADO
+Onde: firebaseDB.ts:424-451 (enableLiveCatalogAndSalesSync), chamado em
+      PDVModule.tsx:784, StockModule.tsx:535, FinanceModule.tsx:97
+O que se passa: ao abrir o PDV, criam-se listeners em tempo real sobre as
+coleccoes INTEIRAS products e sales, mantendo tudo em memoria. O catalogo e
+copiado para o localStorage a cada alteracao (:436). As imagens dos produtos sao
+guardadas como base64 no proprio documento (StockModule.tsx:3492-3497).
+Porque importa: com 1.000 produtos com foto (100 KB cada) sao ~100 MB - inviavel
+em memoria e em localStorage, e cada abertura descarrega tudo. Com 20.000 vendas,
+cada terminal descarrega o historico completo ao abrir. Em computadores modestos
+e redes moveis, a facturacao fica lenta na hora de maior movimento; e o Firebase
+cobra por leitura (mesmo no plano gratuito ha limites diarios) - pode bater no
+tecto e parar as vendas.
+Correccao: manter em memoria apenas o necessario (catalogo leve sem imagens,
+vendas do dia); imagens em Storage com URL; usar as consultas paginadas que ja
+existem (getSalesPage, getProductsPage); cache com invalidacao por evento.
+Verificar: medir tempo ate o PDV ficar utilizavel e leituras por sessao com 5.000
+vendas. Meta: < 2 s e < 200 leituras.
+Esforco: Medio/Grande.
+
+--------------------------------------------------------------------------------
+FIA-02  O erro de leitura e silencioso em muitos pontos (catch vazio)
+--------------------------------------------------------------------------------
+Gravidade: ALTO  |  Confianca: CONFIRMADO
+Onde: firebaseDB.ts:701, :3318, :3806-3818, :2571-2579 (entre outros)
+O que se passa: existem catch que nao fazem nada nem avisam. O erro desaparece e
+o utilizador ve uma lista vazia ou um ecra sem dados.
+Porque importa: e a diferenca entre "nao ha vendas hoje" e "nao consegui ler as
+vendas". Confundir as duas leva a decisoes erradas: o dono pensa que o dia foi
+fraco, o operador re-lanca vendas que ja existiam, o stock e ajustado com
+informacao incompleta. O errorHelper.ts ja traduz bem os codigos do Firestore -
+so nao e usado nestes caminhos.
+Correccao: politica unica - falha de leitura critica lanca erro com describeError;
+falha de escrita secundaria vai para fila local com aviso. Nunca catch vazio em
+dados de negocio.
+Verificar: teste com o mock em "failReads" e conferir que a UI mostra o erro.
+Esforco: Medio.
+
+
+================================================================================
+4.3 MEDIO
+================================================================================
+
+COD-01  ~4.000 linhas de codigo morto, incluindo uma segunda camada de dados
+Gravidade: MEDIO (e o que alimenta SEG-03)  |  Confianca: CONFIRMADO
+Onde: utils/indexedDB.ts (2.008 l.), MasterReportModal.tsx (763 l.),
+      StockAIEntry.tsx (504 l.), DashboardModule.tsx (435 l.),
+      DatabaseSchemaViewer.tsx (321 l.), utils/numberingAudit.ts,
+      utils/saleDuplicates.ts; no PDV, handlePayInvoice (:1557),
+      handleCancelInvoice (:1597) e handleRestoreInvoice (:1662) nunca sao
+      renderizados.
+O que se passa: a documentacao afirma "removido codigo morto (~5.400 linhas)"
+(docs/09, D-20), mas os ficheiros continuam la. O indexedDB.ts exporta outra
+dbService completa, com outra logica e outras credenciais.
+Porque importa: para quem continuar a programar com IA, dois dbService com o
+mesmo nome e a receita para "corrigir no sitio errado". E os tres fluxos de
+anulacao do PDV estao escritos e nao ligados - quem os ligar herda a falta de
+palavra-passe de gestor.
+Correccao: apagar os ficheiros mortos e handlers nao usados; correr npx knip;
+inscrever no AGENTS.md a regra "nenhum ficheiro novo equivalente a firebaseDB.ts".
+Esforco: Pequeno (destrutivo - fazer em branch propria).
+
+COD-02  Ficheiros e funcoes gigantes
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: PDVModule.tsx 4.705 l. (handleFinalizeSale 258 l.,
+      handleFinalizeRetroactiveSale 222 l.), StockModule.tsx 4.682 l.,
+      firebaseDB.ts 3.844 l., FinanceModule.tsx 2.804 l., HRModule.tsx 2.450 l.,
+      FaturasModule.tsx 2.365 l.
+O que se passa: cada modulo mistura UI, validacao, calculo e acesso a dados.
+Porque importa: alterar uma coisa (o estado A4) exige mexer numa funcao onde
+tambem vive PDF, gaveta, som, numeracao e stock. Terreno ideal para "corrigir
+uma e partir outra".
+Correccao: extrair servicos (useCheckout, saleBuilder, printService). Regra:
+funcao < 40 linhas, ficheiro < 600.
+Esforco: Grande (faseado).
+
+COD-03  Regras de negocio calculadas de duas maneiras (alem do IVA)
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: custo/margem em FinanceModule.tsx:208-215 vs :284-302 vs :317-321;
+      quantidade vendida em PDV vs FinanceModule:2121 vs firebaseDB:3703;
+      informacao da empresa em data/companyInfo.ts E utils/companyInfo.ts;
+      categorias em utils/categories.ts E utils/categoryHelper.ts.
+Porque importa: relatorios que nao batem entre si. O dono perde a confianca nos
+numeros e volta ao Excel - o que o sistema devia evitar.
+Correccao: uma funcao por regra, num unico modulo; testes que comparam ecra, PDF
+e Excel.
+Esforco: Medio.
+
+COD-04  "Os testes passam" esconde caminhos que falham
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: package.json:14-21; npm test deixa 2 unhandled rejections (uma delas e o
+      saveSettings a escrever por cima das definicoes - BD-02).
+O que se passa: a cobertura concentra-se em utilitarios puros (bem testados).
+NAO ha testes para finalizacao de venda no PDV, regras do Firestore, autorizacao
+por perfil, IVA, pagamento multiplo nem caminho "leitura falhou". Os erros
+assinalados pelo Vitest nao fazem falhar o comando.
+Porque importa: falsa sensacao verde. Numa futura sessao com IA, "os testes
+passam" sera lido como "esta tudo bem" quando os piores caminhos estao fora.
+Correccao: Vitest falha em unhandledRejection; test:all inclui Vitest; criar os
+10 testes prioritarios (seccao 7 desta auditoria).
+Esforco: Pequeno (config) + Medio (testes).
+
+COD-05  Funcoes "de compatibilidade" que devolvem sucesso falso
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: firebaseDB.ts:3779-3833
+O que se passa: isSSEActive() devolve true; getPendingCount() devolve 0;
+getLastSyncTime() devolve a hora actual; testConnection() devolve
+{ success: true, latencyMs: 38 }; syncAllWithFirebase() devolve sucesso.
+Porque importa: neste momento nenhum e chamado pela interface (unica razao pela
+qual nao e grave). Mas sao exactamente o tipo de funcao que alguem volta a ligar
+a um ecra de diagnostico - e entao o sistema MENTE sobre a sincronizacao.
+Correccao: apagar; usar getFirebaseAuthDiagnostics() (que e real).
+Esforco: Pequeno.
+
+NEG-09  Grafico de vendas mensais inventado
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: FinanceModule.tsx:232-240, renderizado em :2592-2610
+O que se passa: "Monthly Sales Chart Data (Mocking current and last 5 months)" -
+o total do periodo multiplicado por percentagens arbitrarias (0,15; 0,18; 0,22;
+0,12; 0,25; 0,08 + 1000). Aparece como grafico de barras com valores em MT.
+Porque importa: e a definicao de dado fingido: parece real, tem centimos, e o dono
+pode concluir que Marco foi melhor que Abril. Nao aconteceu. Destroi a confianca
+em todos os outros numeros do ecra.
+Correccao: agregar as vendas reais por mes; sem dados, mostrar "sem historico".
+Esforco: Pequeno.
+
+NEG-10  "Comprado" e um numero inventado a partir do stock actual
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: FinanceModule.tsx:2129-2137
+O que se passa: o comentario e explicito ("Comprado can be simulated as catalog
+stockQty + soldQty historically") e a coluna mostra stockQty + soldQty.
+Porque importa: mistura stock actual (que pode estar errado por quebras) com
+vendas (que nao sao compras). Um produto comprado 100, vendido 90 e com 5
+quebrados aparece como "comprado 95". O dono usa isto para negociar com
+fornecedores.
+Correccao: remover a coluna ou usar entradas reais de stock_movements.
+Esforco: Pequeno.
+
+NEG-11  Nao existe modulo de compras nem de fornecedores
+Gravidade: MEDIO (lacuna funcional importante)  |  Confianca: CONFIRMADO
+Onde: ausencia em src/ (nenhuma referencia a fornecedores alem do texto do ecra
+      de armazem); stock_movements so tem entradas manuais/ajustes.
+O que se passa: as entradas de mercadoria fazem-se com um ajuste manual. Nao ha
+encomenda, recepcao, factura de compra, custo medio, divida a fornecedor nem
+historico de precos de compra.
+Porque importa: sem compras registadas, o custo do stock e o que alguem escreveu a
+mao; nao ha custo medio ponderado (o correcto para insumos comprados a precos
+variaveis) nem divida a fornecedores. A margem assenta num preco de compra que
+ninguem audita.
+Correccao: fornecedores, documento de compra, recepcao com actualizacao de stock
+e custo medio, conta corrente.
+Esforco: Grande.
+
+NEG-12  IRPS com abatimentos inventados e um erro de formula
+Gravidade: MEDIO (alto se usado para pagar salarios a serio)
+Confianca: CONFIRMADO no codigo; legalidade dos escaloes nao confirmada
+Onde: utils/hrCalculations.ts:11-52
+O que se passa: escaloes e taxas fixos no codigo; a isencao por dependentes e
+inventada ("simulated realistically"); no primeiro escalao a deducao e dividida
+por 10 ((deduction / 10)) e nos restantes nao - comportamento inconsistente que
+sugere erro.
+Porque importa: o recibo e a declaracao a AT saem deste calculo. O PDF afirma
+"total conformidade com... as tabelas oficiais" (HRModule.tsx:847), afirmacao que
+o codigo nao sustenta.
+Correccao: retirar a frase de conformidade; confirmar a tabela com o contabilista;
+parametrizar escaloes em settings/tax_tables com data de vigencia; testes com
+casos oficiais.
+Esforco: Medio.
+
+NEG-13  Funcionarios ficticios sao gravados na base real
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: HRModule.tsx:269-327
+O que se passa: se employees estiver vazia, grava tres funcionarios inventados
+(Joao Malembane, Maria Chongo, Andre Sitoe) com NUIT, INSS e IBAN falsos.
+Porque importa: aparecem na folha de salarios, nas declaracoes INSS/SISSMO e nos
+relatorios; se o dono apagar todos para recomecar, eles voltam.
+Correccao: remover a semente; dados de demonstracao so em ambiente explicito.
+Esforco: Pequeno.
+
+NEG-14  "Danos de colaboradores" ficam so no browser
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: HRModule.tsx:180-248 (localStorage agro_employee_damages)
+O que se passa: danos e descontos associados sao guardados no localStorage, nao no
+Firestore. Nao entram no backup, nao aparecem noutro computador, desaparecem ao
+limpar o browser.
+Porque importa: o desconto de danos entra no salario (:654-657). Se o registo se
+perder, o desconto desaparece no mes seguinte e ninguem sabe porquê.
+Correccao: mover para coleccao employee_damages.
+Esforco: Pequeno.
+
+NEG-15  "Regerar todos os codigos de barras/referencias" sem palavra-passe
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: StockModule.tsx:876-894 (codigos), :420-438 (referencias)
+O que se passa: todos os codigos sao substituidos por EAN-13 novos; nao pede
+senha nem guarda os antigos.
+Porque importa: todas as etiquetas impressas ficam invalidas e o leitor deixa de
+encontrar o produto. Nao ha reversao.
+Correccao: guardar previousCode/previousReference, exigir senha, limitar a
+artigos selecionados.
+Esforco: Pequeno.
+
+FIA-03  Auditoria: o arquivo de logs permite apagar
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: firestore.rules:55-60 (audit_logs: allow delete),
+      firebaseDB.ts:3115 (archiveAuditLogsBefore), TechnicalModule.tsx:283-326
+O que se passa: para permitir arquivar, a regra autoriza delete em audit_logs a
+QUALQUER sessao. O arquivo e imutavel (bom), mas o original pode ser apagado sem
+passar pelo arquivo.
+Porque importa: um registo que qualquer sessao pode apagar nao e prova de nada.
+Com SEG-01, um atacante apaga o rasto.
+Correccao: arquivo por funcao de servidor; negar delete no cliente.
+Esforco: Medio.
+
+FIA-04  Nao existe integracao continua
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: ausencia de .github/workflows/; package.json tem lint e test mas nada os
+      corre automaticamente
+O que se passa: o deploy na Vercel faz "vite build" sem correr tsc nem testes. E
+possivel publicar codigo que nao compila os testes.
+Porque importa: com desenvolvimento assistido por IA em sessoes separadas, "correu
+localmente" e fragil. Um pipeline de 2 minutos poupa horas de diagnostico em
+producao.
+Correccao: GitHub Action (npm ci, npx tsc --noEmit, npm test); bloquear merge sem
+verde.
+Esforco: Pequeno.
+
+UX-01  Idioma e formatacao inconsistentes, e lang="en"
+Gravidade: MEDIO/BAIXO  |  Confianca: CONFIRMADO
+Onde: index.html:2 (html lang="en"), mistura Factura/Fatura em docs, codigo e PDF
+Porque importa: acessibilidade basica e credibilidade. Uma factura com FACTURA no
+titulo e Fatura no rodape parece amadora.
+Correccao: lang="pt-MZ"; uma grafia em toda a interface e documentos.
+Esforco: Pequeno.
+
+UX-02  Mensagens de erro boas em parte do sistema e ausentes noutra
+Gravidade: MEDIO  |  Confianca: CONFIRMADO
+Onde: bom em errorHelper.ts e FaturasModule; fraco em StockModule
+      ("Erro ao gerar referencias.") e TechnicalModule:1465 ("Erro ao restaurar
+      o backup.") e varios catch genericos
+Porque importa: o utilizador nao tecnico repete a operacao (duplicando) ou desiste
+(deixando dados por gravar).
+Correccao: usar describeError em todos os catch de operacoes de negocio; padrao
+"o que falhou + o que fazer".
+Esforco: Medio.
+
+UX-03  Acessibilidade basica por cumprir
+Gravidade: BAIXO/MEDIO  |  Confianca: CONFIRMADO (inspeccao de codigo)
+Onde: index.html; botoes com icone sem aria-label (App.tsx:814-825); modais sem
+      role="dialog"; textos de 9-10 px em cinza claro
+Porque importa: loja com pessoas de varias idades, luz solar e computadores
+modestos. 9 px e bonito no portatil do programador e invisivel no balcao.
+Correccao: minimo 12 px em texto operacional; aria-label; foco visivel;
+role="dialog" e aria-modal.
+Esforco: Medio.
+
+
+================================================================================
+4.4 BAIXO
+================================================================================
+
+B-01  Scripts de "remendo" e patches na raiz: fix_pdv.cjs, fix_pdv.js,
+      fix_pdv_more.cjs, fix_stock_loss.cjs, replace_double_a5.cjs, pdv.patch,
+      update_stock.patch, initialProducts.txt. Sao ferramentas pessoais que
+      alteram ficheiros por regex; se alguem os correr hoje, corrompem o codigo.
+B-02  firestore.rules.legacy-open (regras abertas) no repositorio: risco de
+      publicacao por engano.
+B-03  AGENTS.md autoriza "aplicacao imediata de todas as alteracoes" sem revisao.
+      Num sistema com dinheiro, remove o travao humano.
+B-04  Sem README na raiz: 27 documentos em docs/, mas quem chega nao sabe por
+      onde comecar.
+B-05  Chave e projectId do Firebase no repositorio (normal em Firebase; so e
+      seguro com regras fortes - ver SEG-01).
+B-06  Nenhum linter/formatador (package.json so tem tsc).
+B-07  Comentarios desactualizados (StockModule.tsx:106, 1730, 3866, 4102 falam
+      de "codigo 05082"; docs/09 D-05/D-20). Comentarios que mentem sao pior do
+      que comentarios ausentes.
+B-08  RECIBO_POS_FAC-2026-0001.pdf com dados reais de venda no espaco de
+      trabalho (ignorado pelo Git); deve ser apagado.
+B-09  Dependencias com vulnerabilidades: 2 criticas (dompurify, proxy-addr),
+      12 altas (vite, xlsx, @grpc/grpc-js...). xlsx nao tem correccao; hoje so e
+      usado para escrever, o que reduz o risco.
+B-10  newSaleStatus declarado e nunca usado (PDVModule.tsx:127): o interruptor de
+      estado da venda nao faz nada.
+B-11  @tanstack/react-query instalada e nao usada na logica (src/main.tsx:5-6):
+      peso sem beneficio.
+
+
+--------------------------------------------------------------------------------
+5. PONTOS FORTES (com prova)
+--------------------------------------------------------------------------------
+
+1. Venda + baixa de stock numa so transaccao, com leitura de saldo.
+   firebaseDB.ts:1235-1379: agrupa por produto, le os documentos DENTRO da
+   transaccao, recusa com InsufficientStockError quando falta (:1321-1328),
+   escreve uma vez por produto e grava a venda sem merge (:1355). Resolve o
+   classico "dois caixas vendem o mesmo ultimo saco". E o melhor codigo do
+   projecto.
+
+2. Numeracao fiscal transaccional. firebaseDB.ts:1075-1120: contador num unico
+   documento, runTransaction, Math.max(atual, fallback)+1. Precisamente o que
+   faltava para nao haver duas facturas com o mesmo numero.
+
+3. Anulacao com estorno seguro e idempotente. firebaseDB.ts:1396-1491: valida o
+   estado dentro da transaccao, recusa anular duas vezes, nao cria produtos
+   "fantasma" e devolve os artigos que nao conseguiu repor. A UI mostra nota de
+   credito e reembolso (FaturasModule.tsx:520-633).
+
+4. Separacao de "gravado" e "impresso". utils/postCommit.ts e PDVModule.tsx:
+   1443-1536: a venda e confirmada antes de gerar PDF ou accionar a gaveta; uma
+   falha de impressao nunca faz o operador pensar que a venda falhou.
+
+5. Aritmetica de stock propria e testada. utils/stockMath.ts (hibridos saco/kg,
+   clampStockDelta, splitHybrid), utils/priceHelper.ts (custo derivado do quilo),
+   com cenarios reais nos testes ("500 kg - 130 kg vendidos = 370 kg").
+
+6. Relatorios que distinguem canceladas e proformas. utils/reporting.ts:39-68 e
+   FinanceModule.tsx:256-306, incluindo a decisao honesta de assumir margem zero
+   quando o custo e desconhecido em vez de inventar 40%.
+
+7. Gates de operacoes sensiveis no stock. Ajuste directo (StockModule.tsx:
+   1625-1633), contagem fisica (:292), eliminacao (:201), baixa de lote (:600)
+   exigem palavra-passe de gestor, e o backend grava movimento + auditoria na
+   mesma transaccao (firebaseDB.ts:1725-1832).
+
+8. Documentacao em quantidade e com honestidade invulgar: 27 documentos em docs/,
+   incluindo plano de seguranca com limitacoes declaradas e um runbook.
+
+9. Interface consistente e em portugues, com atalhos de teclado no PDV
+   (PDVModule.tsx:669-710), pesquisa global (InlineHeaderSearch), dialogos
+   proprios em vez de window.confirm e um Toast com portal e temporizador.
+
+
+--------------------------------------------------------------------------------
+6. COMPARACAO ENTRE BRANCHES
+--------------------------------------------------------------------------------
+
+NAO HA, NA PRATICA, DUAS VERSOES DE CODIGO.
+
+  main ....................... 01fb230 ("Merge pull request #8 ...")
+  arena/edaebf20-... ......... c67b8ce ("Fusao com main: resolver conflitos...")
+  git diff main..HEAD ........ VAZIO
+  git rev-list --left-right --count main...HEAD ... "1 1" (arvores identicas)
+  Nao existem outras branches (nem desenvolvimento, nem armazem).
+
+  Pergunta                                  Resposta
+  Funcionalidades numa e nao na outra        Nenhuma.
+  Conflitos provaveis num merge              Nenhum - nao ha alteracoes a juntar.
+  Codigo duplicado entre branches            Nao aplicavel (sao o mesmo ficheiro).
+  Correccoes so numa branch                  Nao aplicavel; mas ha correccoes
+                                             anunciadas na documentacao que nao
+                                             existem em lado nenhum (getAllOrFail).
+  Melhor base para producao                  Qualquer uma. Manter main como base
+                                             oficial e trabalhar em branches por
+                                             funcionalidade a partir dela.
+  Branches a eliminar                        arena/edaebf20-... pode ser eliminada
+                                             depois de confirmar o conteudo em
+                                             main. NAO apaguei nada.
+
+RISCO REAL DA ORGANIZACAO (e aqui que a nota 4/10 se justifica): o historico foi
+esmagado em dois commits. Nao ha forma de saber o que mudou quando, nem de
+reverter uma alteracao especifica. Para um sistema que ja corre com dados reais,
+isto e perigoso: se amanha um preco sair errado, nao ha como comparar com a versao
+de ontem. Recomendacao: a partir de agora, uma branch por correccao, commits
+pequenos com mensagem clara e uma tag v1.x por cada publicacao.
+
+
+--------------------------------------------------------------------------------
+7. FUNCIONALIDADES EM FALTA E SUGESTOES DE EVOLUCAO
+--------------------------------------------------------------------------------
+Ordenadas por valor para o negocio. Esforco: P = pequeno (<1 dia),
+M = medio (dias), G = grande (semanas).
+
+  1. Abertura/fecho de caixa com contagem e diferenca ...................... M
+     E o controlo diario do dinheiro; sem isto as faltas nao tem resposta.
+  2. Backup real fora do browser + ensaio de restauro ..................... M
+     O dono declarou "perder dados" como principal medo.
+  3. Autenticacao a serio (Firebase Auth) e regras por perfil ............. G
+     Fecha o buraco que permite ler salarios e apagar vendas.
+  4. Registo de compras e fornecedores com custo medio .................... G
+     Margens verdadeiras, dividas a fornecedores, negociacao.
+  5. Fecho de vendas offline (fila local) ................................. G
+     Cortes de rede sao a realidade; hoje o balcao para.
+  6. Mapa de dividas completo, com prazo e atrasos ........................ P
+     Cobrar o que e devido; hoje a lista mente por omissao.
+  7. Dashboard inicial real (ficheiro existe, nao esta ligado) ............ P
+     O dono quer ver o dia em 10 segundos; hoje cai no PDV.
+  8. Modulo de armazem a serio (localizacoes e transferencias) ............ G
+     Prometido e inexistente; evita ruturas na loja.
+  9. Etiquetas e leitura de codigos com historico ......................... P
+     Reimpressao segura e catalogo consistente.
+ 10. Relatorio de margem por produto com custo real ...................... M
+     Decide o que comprar e a que preco vender.
+ 11. Gestao de clientes dedicada (historico, contactos, credito) .......... M
+     Fidelizacao e cobranca.
+ 12. Devolucoes parciais (linha a linha) .................................. M
+     Hoje so se anula a factura inteira.
+ 13. Alertas de validade e de produtos parados ........................... P
+     Insumos agricolas vencem.
+ 14. Manual de utilizador com capturas ................................... P
+     Existe docs/02, mas sem imagens e desactualizado.
+ 15. Multi-loja .......................................................... G
+     So quando houver segunda loja; exige modelo por local.
+
+
+--------------------------------------------------------------------------------
+8. CENARIOS DE TESTE MANUAL
+--------------------------------------------------------------------------------
+Executar preferencialmente numa base de teste, nunca na de producao.
+"Resultado esperado" e o que deve acontecer; se acontecer outra coisa, e achado.
+
+8.1 VENDER (PDV)
+
+  V1  Ler codigo de barras de artigo com 3 unidades, quantidade 1, pagamento em
+      dinheiro, entregar 1.000 MT numa venda de 930 MT, finalizar (termica).
+      Esperado: venda gravada, stock 2, troco 70 MT, recibo REC-POS unico.
+
+  V2  Mesma venda com DUPLO clique rapido em Finalizar.
+      Esperado: UMA so venda e um so numero de factura. Se aparecerem duas: critico.
+
+  V3  Venda de 5 unidades de artigo com 3 em stock.
+      Esperado: bloqueio ANTES de gravar ("disponivel 3, solicitado 5"); stock
+      inalterado.
+
+  V4  Pagamento Multiplo: 500 MT dinheiro + 200 MT M-Pesa numa venda de 1.000.
+      Esperado: recusa ("falta 300 MT"). HOJE grava como Paga (NEG-02).
+
+  V5  Venda com IVA de um produto a 0% e outro a 16%.
+      Esperado: total com as duas taxas; PDF com as duas. HOJE aplica 16% a tudo
+      (NEG-03).
+
+  V6  Desligar a rede a meio da finalizacao.
+      Esperado: mensagem clara em <=10 s, carrinho preservado, nenhuma venda
+      "fantasma" com stock deduzido.
+
+  V7  Venda a dinheiro impressa em A4.
+      Esperado: estado Paga e recibo. HOJE fica Pendente (NEG-01).
+
+  V8  Desconto de 50% numa linha.
+      Esperado: bloqueio com mensagem de autorizacao da gerencia (limite 30%,
+      PDVModule.tsx:1329).
+
+8.2 ANULAR UMA FACTURA
+
+  A1  Anular em Faturas, com palavra-passe de gestor correcta e reembolso marcado.
+      Esperado: estado Cancelada, stock reposto, nota de credito NC-..., movimento
+      de caixa negativo, cancelledBy e cancelledAt gravados.
+
+  A2  Repetir a anulacao da mesma factura.
+      Esperado: recusa "ja esta anulada"; o stock NAO volta a subir
+      (firebaseDB.ts:1440).
+
+  A3  Anular com palavra-passe errada.
+      Esperado: nada muda na base; erro no modal.
+
+  A4  Anular uma proforma.
+      Esperado: cancela sem nota de credito e sem repor stock.
+
+  A5  Anular um artigo que entretanto foi eliminado do catalogo.
+      Esperado: anulacao conclui e diz QUAIS artigos nao puderam ser repostos.
+
+  A6  Tentar anular pelo PDV.
+      HOJE nao ha botao ligado (handlers mortos). Se forem ligados, nao pedem
+      palavra-passe - corrigir primeiro.
+
+8.3 ABATER/AJUSTAR STOCK E CONTAGEM FISICA
+
+  S1  Ajuste de 10 -> 7 sem palavra-passe.
+      Esperado: recusa. Com senha: stock 7, movimento "Ajuste -3", log.
+
+  S2  Ajuste para valor negativo (-1).
+      Esperado: recusa (clampStockDelta).
+
+  S3  Contagem fisica: sistema 10, contado 6, aplicar.
+      Esperado: stock 6, quebra de 4 com valor de custo, resumo com faltas/sobras.
+
+  S4  Duas contagens simultaneas (dois postos) no mesmo artigo.
+      Esperado: a segunda recusa ou recalcula sobre o valor real; nunca
+      sobrescreve as cegas.
+
+  S5  Clicar em "Restaurar inventario oficial".
+      HOJE: apaga o stock real com uma confirmacao.
+      ESPERADO: senha + backup + auditoria (BD-04).
+
+  S6  Transformar 1 saco de 50 kg em 50 pacotes de 1 kg.
+      Esperado: custo total igual antes e depois (RN-08); stock do original a 0.
+
+  S7  Anular a transformacao.
+      Esperado: stock do original reposto e resultantes retirados, sem duplicar.
+
+8.4 FECHAR O DIA (CAIXA)
+
+  C1  3 vendas em dinheiro (1.000) + 1 em M-Pesa (500) + 1 sangria de 200.
+      Esperado: caixa fisico 800; relatorio separa dinheiro de M-Pesa.
+
+  C2  Sangria superior ao saldo.
+      Esperado: recusa (FinanceModule.tsx:144).
+
+  C3  Anular venda paga com reembolso de 300.
+      Esperado: movimento de caixa -300 e saldo coerente; sem reembolso duplicado.
+
+  C4  Fechar o dia e comparar com a contagem fisica.
+      HOJE nao existe fecho; nao ha "esperado vs contado". Lacuna NEG-05.
+
+  C5  Duas pessoas a registar sangrias ao mesmo tempo.
+      Esperado: ambas registadas; saldo final = soma; nenhuma se perde.
+
+8.5 TRANSFERIR DO ARMAZEM PARA A LOJA
+
+  T1  Abrir o menu "Armazem".
+      HOJE: ecra de obra. ESPERADO: origem/destino, artigo, quantidade,
+      responsavel.
+
+  T2  (futuro) Transferir 5 sacos do deposito para a loja.
+      Esperado: deposito -5, loja +5, total inalterado, movimento com autor.
+
+  T3  Transferir mais do que existe no deposito.
+      Esperado: recusa; nada muda.
+
+  T4  Requisicao de sacos para retalho (Stock -> Requisicao).
+      Esperado: stockQtyBulk -1 e stockQtyRetail +50 kg; total coerente
+      (firebaseDB.ts:2209).
+
+  T5  Duas requisicoes simultaneas do mesmo saco com 1 em stock.
+      Esperado: a segunda recusa; nunca fica bulk = -1.
+
+
+--------------------------------------------------------------------------------
+9. PLANO DE ACCAO PRIORIZADO (15 PASSOS)
+--------------------------------------------------------------------------------
+
+ESTA SEMANA (fazer ja)
+
+  1. Publicar regras Firestore que removem delete de sales, products e
+     credentials, e restringir a leitura de credentials.
+     Resolve: SEG-01 (parcial). Esforco: P.
+     Ganho: deixa de ser possivel apagar o historico com a chave publica.
+
+  2. Apagar src/utils/indexedDB.ts e os hashes fixos; remover 05082 como valor
+     por omissao.
+     Resolve: SEG-03. Esforco: P. Ganho: fim das palavras-passe no repositorio.
+
+  3. Corrigir os tres "fallbacks destrutivos": getAllOrFail em produtos e
+     credenciais; nao escrever definicoes quando a leitura falha.
+     Resolve: BD-01, BD-02, BD-03. Esforco: P.
+     Ganho: fim do risco de reescrever stock, definicoes e administradores.
+
+  4. Remover ou proteger "Restaurar inventario oficial" e "Regerar codigos".
+     Resolve: BD-04, NEG-15. Esforco: P. Ganho: fim da perda de stock por clique.
+
+  5. Validar o pagamento multiplo e o valor entregue; gravar troco.
+     Resolve: NEG-02. Esforco: P. Ganho: fim do "pago sem dinheiro".
+
+  6. Corrigir o estado das facturas A4 (Paga quando paga).
+     Resolve: NEG-01. Esforco: P. Ganho: dividas deixam de ser falsas.
+
+  7. IP de auditoria honesto (getClientIp / "N/D").
+     Resolve: SEG-07. Esforco: P. Ganho: logs utilizaveis como prova.
+
+ESTE MES (consolidar)
+
+  8. Migrar login para Firebase Auth + regras por perfil; perfil deixa de vir do
+     sessionStorage.
+     Resolve: SEG-01, SEG-02, SEG-04. Esforco: G.
+     Ganho: controlo de acesso real; fim do "F12 como Tecnico".
+
+  9. Politica de palavras-passe >= 10 caracteres + bloqueio no servidor.
+     Resolve: SEG-05. Esforco: M. Ganho: passwords resistentes a forca bruta.
+
+ 10. Backup completo (todas as coleccoes) para fora do browser + restauro
+     testado.
+     Resolve: FIA-01. Esforco: M. Ganho: o medo principal do dono fica resolvido.
+
+ 11. Fecho de caixa com contagem e diferenca.
+     Resolve: NEG-05. Esforco: M. Ganho: controlo diario do dinheiro.
+
+ 12. Registo de dividas criado com a venda; mapa com prazos.
+     Resolve: NEG-06. Esforco: P/M. Ganho: cobranca efectiva.
+
+ 13. Uma so conta de IVA por linha + custo real (nunca 0 ou 60%).
+     Resolve: NEG-03, NEG-04. Esforco: M. Ganho: documentos e margens coerentes.
+
+ 14. CI (tsc + testes obrigatorios); Vitest falha em rejeicoes nao tratadas;
+     remover codigo morto.
+     Resolve: COD-01, COD-04, FIA-04. Esforco: P/M.
+     Ganho: deixa de se publicar as cegas; menos "corrigir e partir".
+
+PROXIMOS MESES (crescer)
+
+ 15. Compras/fornecedores com custo medio; armazem com localizacoes; fila de
+     vendas offline; dashboard ligado.
+     Resolve: NEG-07, NEG-08, NEG-11. Esforco: G.
+     Ganho: o sistema passa a gerir o negocio inteiro, nao so a frente de caixa.
+
+
+--------------------------------------------------------------------------------
+10. LISTA DE VERIFICACAO ANTES DE USAR COM DADOS REAIS
+--------------------------------------------------------------------------------
+(ou de continuar a usar)
+
+  [ ] As regras do Firestore publicadas NAO permitem delete em sales, products,
+      credentials e audit_logs.
+  [ ] A coleccao credentials nao e legivel por qualquer sessao.
+  [ ] Nenhuma palavra-passe real existe no repositorio (grep dos valores
+      conhecidos = 0).
+  [ ] Todos os utilizadores mudaram de palavra-passe (>= 10 caracteres, ou PIN
+      de 6 com bloqueio no servidor).
+  [ ] O codigo de gestor de stock NAO e 05082.
+  [ ] Uma falha de rede ao abrir o sistema NAO reescreve produtos, definicoes nem
+      credenciais (testado).
+  [ ] O botao "Restaurar inventario oficial" esta removido ou protegido.
+  [ ] Existe um backup completo, fora do browser, com menos de 24 h, e JA FOI
+      RESTAURADO com sucesso uma vez.
+  [ ] O pagamento multiplo nao aceita soma inferior ao total.
+  [ ] Uma factura paga a dinheiro em A4 fica Paga e tem recibo.
+  [ ] Nenhum ecra mostra numeros inventados (grafico mensal, coluna "Comprado").
+  [ ] O fecho de caixa diario existe (ou ha procedimento manual documentado e
+      assinado).
+  [ ] Os funcionarios ficticios nao aparecem na lista de RH.
+  [ ] npm run lint e npm test passam SEM rejeicoes nao tratadas.
+
+
+--------------------------------------------------------------------------------
+11. LIMITACOES DESTA AUDITORIA
+--------------------------------------------------------------------------------
+O que NAO consegui verificar, e porque:
+
+  1. Regras efectivamente publicadas no Firebase. Li firestore.rules no
+     repositorio. Nao tenho acesso a consola do projecto
+     gen-lang-client-0896153566 para confirmar se sao estas as regras activas,
+     nem se a autenticacao anonima esta ligada. Se estiverem publicadas as
+     antigas (firestore.rules.legacy-open), o risco e ainda maior.
+
+  2. Dados reais. Nao vi a base. Nao sei quantas vendas, produtos ou utilizadores
+     existem, nem se ha registos com data em falta, stock negativo ou numeros
+     duplicados. Todas as conclusoes sao sobre o codigo.
+
+  3. Comportamento em execucao no browser real. Nao abri a aplicacao publicada,
+     nao testei impressao termica (exige hardware), nem leitor de codigo de
+     barras, nem o comportamento em telemovel.
+
+  4. Configuracao da Vercel. Assumo (por vercel.json) que a producao e estatica e
+     nao inclui server.ts. Nao confirmei variaveis de ambiente, dominio,
+     cabecalhos de seguranca ou se existe npm start em algum servidor.
+
+  5. Historico Git. Tem 2 commits (esmagado): nao e possivel saber se segredos
+     ja foram publicados em versoes anteriores.
+
+  6. Legalidade fiscal. Nao sou contabilista nem advogado. Nao validei a tabela de
+     IRPS, os requisitos de facturacao da AT mocambicana, a retencao de registos
+     nem o formato do documento fiscal. A afirmacao "conformidade total" no PDF
+     (HRModule.tsx:847) merece confirmacao profissional.
+
+  7. Exportacoes. Nao testei Excel/PDF nem acentuacao em todos os leitores; o
+     xlsx tem vulnerabilidades conhecidas e nao corrigidas, mas aparentemente so
+     e usado para escrever.
+
+  8. Desempenho real. Nao medi tempos nem leituras do Firestore; as conclusoes
+     sobre escalabilidade sao de analise de codigo.
+
+
+--------------------------------------------------------------------------------
+12. PERGUNTAS EM ABERTO
+--------------------------------------------------------------------------------
+  1. As regras do Firestore publicadas sao as do repositorio? Se nao, tudo o que
+     disse sobre SEG-01 pode ser pior (ou, improvavel, melhor).
+  2. A autenticacao anonima esta activa? Se nao, o sistema so funciona com cache
+     local - o que explicaria "dados que desaparecem".
+  3. As palavras-passe de indexedDB.ts ainda sao as usadas? (Vanda 2060,
+     Salvador 2000SC, Nelson 1987, Maria Mara, Ainara 131923, Mazive 0147,
+     gestor1 gestor123). Se sim, mudar hoje.
+  4. O codigo de gestor de stock e 05082 em producao?
+  5. A regra "A4 = Pendente" e intencional do dono? Uma factura A4 paga a
+     dinheiro deve ficar "Paga"?
+  6. O IVA e realmente aplicavel a que produtos? Existem isencoes em insumos
+     agricolas? 16% em tudo e regra do negocio ou simplificacao?
+  7. Quem deve poder anular uma factura? Hoje so em Faturas e com senha de
+     gestor; no PDV o codigo existe mas nao esta ligado.
+  8. Existem dados reais desde quando, e ha vendas antigas com formatos legados
+     (estados em ingles "canceled", data em falta)?
+  9. A loja tem quantos postos em simultaneo? O SRS fala em >=12 operadores -
+     isso muda a urgencia de DES-01.
+ 10. Existe alguma copia de seguranca fora do sistema (pen, Drive, papel)? Ja foi
+     alguma vez testado um restauro?
+ 11. Quem tem hoje acesso ao repositorio GitHub? Se saiu alguem da equipa, as
+     palavras-passe do codigo devem ser consideradas comprometidas.
+ 12. O server.ts e usado em algum sitio (VPS, escritorio, teste)? Se sim, SEG-06
+     passa de risco latente a critico.
+ 13. Qual e o volume actual de produtos e vendas? Preciso para calibrar a
+     urgencia do desempenho (DES-01).
+ 14. O sistema ja foi usado para declarar IVA ou salarios? Se sim, os valores do
+     IRPS e do IVA precisam de reconciliacao retroactiva com o contabilista.
+
+
+--------------------------------------------------------------------------------
+13. PROMPTS DE CORRECCAO SUGERIDOS
+--------------------------------------------------------------------------------
+Cada prompt e independente e pequeno. Copiar um de cada vez.
+Regra comum a todos: nao alterar comportamento fora do ambito, manter
+compatibilidade, adicionar teste.
+
+PROMPT 1 - Fechar o Firestore (SEG-01, mitigacao imediata)
+-------------------------------------------------------------------------------
+Tarefa: endurecer firestore.rules sem quebrar a aplicacao actual.
+Ficheiro: firestore.rules.
+Contexto: a app usa sessao anonima do Firebase; todas as coleccoes estao com
+"allow read, write: if request.auth != null".
+Alteracoes pretendidas:
+1. Em sales, products, stock_movements, cash_movements, audit_logs,
+   audit_logs_archive e debts: remover QUALQUER "allow delete" do cliente.
+2. Em credentials: remover "allow read" do cliente. Manter create/update apenas
+   para o papel tecnico (por enquanto, manter como esta e documentar que e
+   temporario).
+3. Manter todas as restantes permissoes exactamente como estao.
+Restricoes: nao alterar codigo TypeScript; nao remover coleccoes; comentar cada
+bloco com a razao.
+Verificacao: (a) firestore rules sem erros de sintaxe; (b) a app continua a
+vender e a listar facturas; (c) tentar apagar uma venda pelo cliente ->
+permission-denied.
+
+PROMPT 2 - Eliminar palavras-passe e codigos do repositorio (SEG-03)
+-------------------------------------------------------------------------------
+Tarefa: remover credenciais reais do codigo, sem quebrar o arranque.
+Ficheiros: src/utils/indexedDB.ts (apagar), src/data/credentialsReset.ts
+(remover hashes), src/utils/authorization.ts, src/utils/firebaseDB.ts:3286-3293,
+src/components/StockModule.tsx (comentarios e placeholders "05082").
+1. Apagar src/utils/indexedDB.ts (nao e importado; confirmar com grep antes).
+2. Em utils/authorization.ts: DEFAULT_AUTHORIZATION_PASSWORD = null e
+   verifyAuthorizationPassword devolve false quando nao ha codigo configurado;
+   expor isAuthorizationConfigured(). Nas operacoes de stock, mostrar "Defina
+   primeiro o codigo de gestor no Painel Tecnico".
+3. Em getDefaultSettings: stockPasswordHash: '' (vazio, nao '05082').
+4. Remover de TODOS os comentarios e placeholders a referencia a 05082.
+5. Nao alterar as restantes regras de precos nem fluxos.
+Verificacao: grep de 05082/0147/gestor123/2000SC em src/ = 0 resultados; numa
+instalacao nova nao e possivel ajustar stock sem definir o codigo.
+
+PROMPT 3 - Falha de leitura nunca deve reescrever dados (BD-01/02/03)
+-------------------------------------------------------------------------------
+Tarefa: distinguir "coleccao vazia" de "leitura falhou" na camada de dados.
+Ficheiro: src/utils/firebaseDB.ts.
+1. Criar private async getAllOrFail<T>(col) que faz getDocs e RELANCA o erro.
+2. Usar getAllOrFail em getProducts e getCredentials.
+3. getProducts: so semear INITIAL_PRODUCTS quando a leitura TEVE SUCESSO,
+   devolveu 0 documentos E nao existe nenhuma venda registada.
+4. getSettings: separar "nao existe" de "falhou". Se falhar, devolver a cache
+   local se existir; se nao existir, devolver os defaults SEM GRAVAR.
+5. getCredentials: remover o bloco que cria 'usr-admin-inicial' com hash fixo.
+   A criacao inicial e responsabilidade de utils/credentialsReset.ts.
+Restricoes: nao alterar assinaturas publicas usadas pelos componentes.
+Verificacao: novo teste que simula getDocs a lancar "unavailable" e verifica
+(a) getProducts rejeita, (b) setDoc/writeBatch NUNCA e chamado,
+(c) getSettings devolve defaults mas nao escreve.
+
+PROMPT 4 - Remover o botao que apaga o inventario (BD-04, NEG-15)
+-------------------------------------------------------------------------------
+Tarefa: tornar impossivel destruir o catalogo com um clique.
+Ficheiros: StockModule.tsx (handleResetOfficialCatalog ~1696,
+handleRegenerateReferencesAll ~420, handleRegenerateBarcodesAll ~876),
+firebaseDB.ts (resetProductsToInitial ~3835).
+1. Remover da interface o botao "Restaurar inventario oficial"; manter a funcao
+   marcada @internal e acessivel so com confirmacao escrita + codigo de gestor +
+   backup automatico imediatamente antes.
+2. Em "Regerar codigos de barras" e "Regerar referencias": exigir codigo de
+   gestor e guardar o valor anterior em previousCode/previousReference.
+3. Registar auditoria com o numero de artigos afectados.
+Verificacao: sem codigo, as tres operacoes sao recusadas; com codigo, o log
+indica quantos artigos mudaram e e possivel reverter por previousCode.
+
+PROMPT 5 - Validar pagamentos no PDV (NEG-02)
+-------------------------------------------------------------------------------
+Tarefa: impedir vendas "pagas" sem o dinheiro todo.
+Ficheiro: src/components/PDVModule.tsx (handleFinalizeSale ~1296-1554).
+1. Se paymentMethod === 'Multiplo': calcular a soma das linhas com amount > 0; se
+   |soma - total| > 0.01, bloquear com "O total dos pagamentos (X MT) nao coincide
+   com o total da venda (Y MT)."
+2. Se paymentMethod === 'Dinheiro' e amountReceived !== '': exigir
+   amountReceived >= total, senao bloquear com "Valor entregue insuficiente".
+3. Gravar no documento da venda amountReceived e changeGiven
+   (changeGiven = max(0, amountReceived - total)).
+4. Nao alterar mais nada no fluxo de gravacao/impressao.
+Verificacao: 500 MT em multiplo numa venda de 1.000 (recusa); 1.200 em dinheiro
+(grava, troco 200 no documento).
+
+PROMPT 6 - Estado da venda conforme o pagamento (NEG-01)
+-------------------------------------------------------------------------------
+Tarefa: corrigir o estado final das facturas A4.
+Ficheiro: src/components/PDVModule.tsx:1374-1395.
+Regra pretendida:
+- Credito -> 'Credito'
+- Proforma/cotacao -> 'Pendente'
+- Restantes (incluindo A4) com pagamento recebido -> 'Paga'
+- 'Pendente' apenas se o operador escolher explicitamente "emitir sem receber"
+  (usar o estado ja existente newSaleStatus).
+Emitir recibo sempre que o estado for 'Paga'.
+Verificacao: venda em dinheiro em A4 -> Paga com REC-A4-...; venda a credito ->
+Credito e sem recibo; a lista de dividas nao inclui a venda em dinheiro.
+
+PROMPT 7 - Uma so conta de IVA e custo real (NEG-03, NEG-04)
+-------------------------------------------------------------------------------
+Tarefa: unificar o calculo de IVA e eliminar custos inventados.
+Ficheiros: src/utils/saleTotals.ts, src/utils/taxHelper.ts,
+PDVModule.tsx (~1361-1372, ~1420), firebaseDB.ts (~1204-1212, ~1241-1248),
+src/utils/priceHelper.ts.
+1. getSaleTotals passa a receber os produtos e a calcular o IVA com
+   cartTaxAmount (por linha, respeitando taxRate), em vez de base * 0.16.
+2. Em cada linha da venda, gravar taxRate aplicado.
+3. getUnitCost devolve null quando nao ha produto; o PDV grava costUnknown: true
+   e NUNCA 0 nem unitPrice*0.6.
+4. Relatorios tratam custo desconhecido como margem zero, como ja fazem no
+   relatorio periodico.
+Verificacao: teste com produtos a 0% e 16% -> total do ecra, do PDF e do mapa de
+IVA coincidem; venda com artigo inexistente -> margem 0 e linha "sem custo
+conhecido".
+
+PROMPT 8 - Backup completo e restauro seguro (FIA-01)
+-------------------------------------------------------------------------------
+Tarefa: um unico exportador e um restauro que nao perde coleccoes.
+Ficheiros: firebaseDB.ts (exportAllData, importAllData), TechnicalModule.tsx
+(handleBackupTotal, restauro).
+1. exportAllData deve incluir TODAS as coleccoes: products, sales, losses,
+   transformations, employees, attendance, payroll_payments, credentials,
+   settings/global, customers, paused_sales, stock_movements, cash_movements,
+   debts, counters/document_numbers.
+2. Remover handleBackupTotal e usar exportAllData (uma so implementacao).
+3. importAllData: validar o JSON (versao, coleccoes reconhecidas, contagens),
+   mostrar pre-visualizacao "vai substituir X, acrescentar Y", e exportar o
+   estado actual para ficheiro ANTES de importar.
+4. Nao alterar o formato dos registos individuais.
+Verificacao: exportar, apagar um registo de teste, importar; as contagens de
+todas as coleccoes coincidem com as do export.
+
+PROMPT 9 - Fecho de caixa (NEG-05)
+-------------------------------------------------------------------------------
+Tarefa: adicionar abertura e fecho de caixa por turno.
+Ficheiros novos: src/utils/cashSessions.ts; alteracoes em FinanceModule.tsx e
+firebaseDB.ts.
+Requisitos:
+1. Coleccao cash_sessions: id, openedAt, openedBy, openingFloat, closedAt,
+   closedBy, countedByMethod, expectedByMethod, difference, notes.
+2. Abrir caixa: operador + fundo inicial; impedir duas sessoes abertas no mesmo
+   posto (terminalId).
+3. Fechar caixa: mostrar esperado por metodo (vendas do periodo + movimentos de
+   cash_movements) e pedir contagem; calcular diferenca e guardar.
+4. Relatorio de fecho imprimivel com as duas assinaturas.
+5. Nao permitir alterar um fecho ja gravado (apenas movimento de correccao).
+Verificacao: cenarios C1-C5 da seccao 8.4 desta auditoria.
+
+PROMPT 10 - Dividas criadas com a venda (NEG-06)
+-------------------------------------------------------------------------------
+Tarefa: toda a venda a credito/pendente deve gerar registo de divida.
+Ficheiros: firebaseDB.ts (addSaleWithStockDeduction, addSale,
+createDebtFromSale), PDVModule.tsx.
+1. Depois de gravar a venda com status 'Credito' ou 'Pendente', chamar
+   createDebtFromSale (idempotente, id = sale.id).
+2. Preferencialmente dentro da mesma transaccao da venda.
+3. Nao alterar o estado da venda.
+Verificacao: venda a credito aparece imediatamente na lista com total em aberto e
+data-limite; cobranca parcial actualiza paidAmount.
+
+PROMPT 11 - Remover dados fingidos (NEG-09, NEG-10, NEG-13, COD-05)
+-------------------------------------------------------------------------------
+Tarefa: nenhum ecra pode mostrar numeros inventados.
+Ficheiros: FinanceModule.tsx (232-240, 2129-2137), HRModule.tsx (269-327),
+firebaseDB.ts (3779-3833).
+1. Substituir monthlySales por agregacao real das vendas por mes; sem dados,
+   mostrar "sem historico".
+2. Remover a coluna "Comprado" ou substitui-la por entradas reais de
+   stock_movements.
+3. Remover a semente de 3 funcionarios ficticios.
+4. Apagar isSSEActive/getPendingCount/getLastSyncTime/testConnection/
+   syncAllWithFirebase.
+Verificacao: com base vazia, nenhum ecra mostra nomes, valores ou barras;
+"grep Mocking" = 0.
+
+PROMPT 12 - Perfil verificado no servidor (SEG-02, SEG-04)
+-------------------------------------------------------------------------------
+Tarefa: o perfil do utilizador nunca deve ser confiado a partir do browser.
+Ficheiros: App.tsx (217-262, 303-338), LoginPanel.tsx (293-351), firebaseDB.ts
+(getCredentials, deleteCredential).
+1. Guardar no browser apenas agro_session_id e o username.
+2. No arranque, validar a sessao em active_sessions (existe? heartbeat recente?)
+   e obter o perfil dai - nunca do JSON local.
+3. Se a sessao nao existir na base, forcar login.
+4. Cache de credenciais: adicionar credentialsCachedAt e recusar login se tiver
+   mais de 24 h ou se a base estiver acessivel e o utilizador ja nao existir.
+5. O gate de modulo passa a exigir a palavra-passe de um perfil diferente
+   (gestor), nao a do proprio utilizador.
+Verificacao: alterar o JSON do sessionStorage nao da acesso; eliminar um
+utilizador impede o login na maquina onde ele ja tinha entrado.
+
+PROMPT 13 - Auditoria honesta (SEG-07, FIA-03)
+-------------------------------------------------------------------------------
+Tarefa: corrigir o IP de auditoria e impedir apagar logs.
+Ficheiros: PDVModule.tsx:1459, App.tsx:166/333/409, FaturasModule.tsx:466,
+firestore.rules (audit_logs).
+1. Substituir '127.0.0.1' por await getClientIp().catch(() => 'N/D').
+2. Remover "allow delete" em audit_logs do cliente; o arquivo passa a ser feito
+   por funcao de servidor (copiar + apagar) numa tarefa separada.
+Verificacao: "grep -rn 127.0.0.1 src/" so encontra uso legitimo de
+desenvolvimento; tentar apagar um log pelo cliente -> permission-denied.
+
+PROMPT 14 - Desempenho: deixar de descarregar tudo (DES-01)
+-------------------------------------------------------------------------------
+Tarefa: reduzir o volume de dados carregado no PDV/Stock/Financas.
+Ficheiro: firebaseDB.ts (enableLiveCatalogAndSalesSync, getSales) e componentes
+que a chamam.
+1. Nao iniciar listener da coleccao sales completa. No PDV, usar apenas vendas do
+   dia (query por date >= hoje) e as facturas paginadas.
+2. Nao guardar o catalogo inteiro em localStorage; guardar apenas um indice leve
+   (id, code, name, precos) e remover imagens desse cache.
+3. Corrigir getSales(): remover a condicao salesCache.length >= 0 e o refetch
+   completo em segundo plano.
+Verificacao: com 5.000 vendas e 1.000 produtos, o PDV fica utilizavel em < 2 s e
+a consola mostra < 200 leituras por sessao; cancelar uma venda reflecte-se sem
+recarregar.
+
+PROMPT 15 - Base para nao voltar a partir (COD-01, COD-04, FIA-04)
+-------------------------------------------------------------------------------
+Tarefa: limpeza e rede de seguranca.
+1. Correr npx knip e remover ficheiros/exportacoes nao usados, comecando por
+   utils/indexedDB.ts, DashboardModule.tsx (ou liga-lo ao App),
+   MasterReportModal.tsx, StockAIEntry.tsx, DatabaseSchemaViewer.tsx,
+   utils/numberingAudit.ts, utils/saleDuplicates.ts.
+2. Remover os handlers mortos do PDV (handlePayInvoice/handleCancelInvoice/
+   handleRestoreInvoice) ou liga-los com palavra-passe de gestor - escolher UMA
+   via.
+3. vitest.config.ts: onUnhandledRejection: 'error'; garantir que npm test inclui
+   os testes Vitest e os scripts tsx.
+4. Adicionar .github/workflows/ci.yml: npm ci, npx tsc --noEmit, npm test.
+5. Apagar da raiz fix_pdv*.cjs, *.patch, initialProducts.txt,
+   firestore.rules.legacy-open.
+Verificacao: CI verde num PR de teste; PR com erro de tipos fica vermelho;
+npx knip sem ficheiros nao usados.
+
+
+--------------------------------------------------------------------------------
+REVISAO FINAL FEITA ANTES DE ENTREGAR
+--------------------------------------------------------------------------------
+  - Todos os problemas CRITICOS tem prova no codigo com ficheiro e linha:
+    SEG-01 (firestore.rules:27-48 + firebaseDB.ts:183-200),
+    SEG-02 (App.tsx:217-262),
+    SEG-03 (indexedDB.ts:1334-1341),
+    BD-01/02/03 (firebaseDB.ts:539, 686, 3296, 3331),
+    BD-04 (StockModule.tsx:1696),
+    FIA-01 (TechnicalModule.tsx:667 + firebaseDB.ts:3558).
+  - Verifiquei duas vezes os mais graves:
+    (a) getAllOrFail NAO existe em src/;
+    (b) createDebtFromSale NAO e chamado;
+    (c) os tres handlers de anulacao do PDV NAO estao renderizados;
+    (d) as duas branches NAO tem diferencas.
+  - O que nao consegui verificar esta na seccao 11 e nao foi apresentado como
+    facto.
+  - NAO fiz alteracoes ao repositorio, nao criei ficheiros no projecto, nao fiz
+    commits nem abri pull requests. Este relatorio e um ficheiro de texto
+    separado do codigo.
+
+================================================================================
+FIM DO RELATORIO
+================================================================================

@@ -1,0 +1,356 @@
+================================================================================
+REGISTO DE DECISOES DE NEGOCIO — AGRO — XICOMO & SERVICOS, LDA
+================================================================================
+Data ..............: 09 de Novembro de 2026
+Decidido por .......: dono / gerencia (via conversa de trabalho desta data)
+Registado por ......: equipa de auditoria
+Estado .............: 5 decisões tomadas (D1-D5) · D5 com 4 perguntas de detalhe
+Efeito .............: estas decisões passam a ser a especificação dos PRs da
+                      Onda 1. O plano foi actualizado para a versão 2.1.
+Nota ...............: este ficheiro deve passar a viver em docs/DECISOES.md
+                      quando o repositório for alterado. Enquanto nada é
+                      aplicado, fica aqui, com os outros documentos de trabalho.
+Aplicacao ..........: APLICADA ao codigo em 09/11/2026, apos autorizacao do
+                      dono ("E agora ja podes aplicar as melhorias").
+                      D1, D2, D3 e D5 estao no programa; D4 continua adiada.
+                      O detalhe do que mudou esta em MELHORIAS-APLICADAS.txt.
+                      Pendentes so as 4 pendencias P-01..P-04 (decisoes de
+                      terceiros: contabilista, clientes actuais, tabela IRPS).
+================================================================================
+
+
+--------------------------------------------------------------------------------
+D1 — IVA: O PRECO DE REVENDA JA INCLUI O IVA
+--------------------------------------------------------------------------------
+
+DECISAO (palavras do dono)
+  "O IVA já foi cobrado na verdade; o valor determinado para revenda de
+   produtos já inclui o valor de IVA. Não ignorar o IVA por enquanto."
+
+INTERPRETACAO REGISTADA
+  - O preço que está na prateleira e na ficha do produto E O PREÇO FINAL. O
+    cliente paga esse valor; não se soma nada no balcão.
+  - O IVA de 16% está DENTRO desse preço. Não é um acréscimo: é uma parte do
+    valor que já foi cobrado.
+  - O sistema tem de o mostrar e registar — "não ignorar" significa exactamente
+    isto: calcular a parte que é imposto e discriminá-la nos documentos e nos
+    relatórios.
+  - Mantém-se a taxa de 16% e não se cria, por agora, lista de isentos.
+
+O QUE O SISTEMA FAZIA (e porque estava errado) [verificado]
+  saleTotals.ts:44-52:
+    base  = subtotal - descontos
+    iva   = base * 0,16        (só quando o operador ligava o botão)
+    total = base + iva
+  Ou seja, duas situações, ambas incorrectas para a sua regra:
+   (a) botão LIGADO  -> o cliente pagava preço + 16% (16% acima da prateleira);
+   (b) botão DESLIGADO (o normal) -> o IVA não ficava registado em lado nenhum
+       (ivaAmount = 0), e o mapa de IVA do mês aparecia a zero.
+
+COMO FICA (uma única fórmula)
+    total = subtotal - descontos                  (nada somado por cima)
+    iva   = total - total / 1,16                  (extraído)
+    base  = total - iva
+  Exemplo: produto marcado a 116,00 MT
+    base = 100,00 · IVA = 16,00 · total = 116,00   (o cliente paga 116,00)
+  Exemplo: produto marcado a 100,00 MT
+    base = 86,21 · IVA = 13,79 · total = 100,00    (o cliente paga 100,00)
+
+  O botão de IVA deixa de somar. Passa a significar apenas "discriminar o IVA
+  neste documento" (mostrar a linha), sem alterar o total em caso algum.
+
+O QUE MUDA NA PRÁTICA (o que o senhor vai ver)
+  [ ] Ligar ou desligar o IVA deixa de mudar o total da venda.
+  [ ] Todas as vendas passam a ter IVA calculado e registado — não só as que
+      tinham o botão ligado.
+  [ ] Os documentos passam a dizer "IVA incluído (16%)" com o valor extraído,
+      em vez de "IVA (16%)" somado no fim.
+  [ ] O mapa de IVA do mês deixa de estar a zero.
+
+ATENCAO — CONSEQUENCIA FISCAL (ler antes de publicar, não depois)
+  Se hoje o mapa de IVA mostra zero (porque o botão estava desligado), a partir
+  desta correcção ele passa a mostrar cerca de 13,79% do valor das vendas.
+  Exemplo: 100.000 MT vendidos -> ~13.793 MT de IVA identificado.
+  Isso é matematicamente correcto — o imposto já estava dentro do preço — mas
+  cria um número que antes não existia nos relatórios.
+  Se esse IVA não vinha a ser declarado, esta correcção torna o assunto visível
+  e pode exigir regularização. É uma conversa com o contabilista ANTES de
+  publicar, não uma decisão do programador. Fica registada como pendência
+  P-01 (abaixo).
+
+PENDENCIA P-01 (contabilista): o IVA contido nas vendas desde a abertura foi
+  declarado? Se não, qual o procedimento de regularização?
+
+O QUE FICA POR FAZER NO SISTEMA
+  PD-03  fórmula única de totais (extrair, não somar).
+  PD-04  a função de IVA passa a extrair por linha, usada no PDV, PDF e mapas.
+  PD-02  documentos: "IVA incluído (16%)", valor extraído; total sem acréscimo.
+  PC-30  gravar ivaAmount extraído em TODAS as vendas (antes ficava 0).
+  PG-26  teste: preço 116 -> 100 + 16 + 116; e igual em todos os documentos.
+  M-01   vendas antigas sem taxa: ler como 16% incluído.
+  M-09   vendas antigas com IVA somado por cima: listar, entregar ao dono e ao
+         contabilista, e corrigir só com documento (nunca em silêncio).
+
+
+--------------------------------------------------------------------------------
+D2 — FACTURA A4 PAGA A DINHEIRO: "PAGA", COM RECIBO
+--------------------------------------------------------------------------------
+
+DECISAO (palavras do dono)
+  "D2 — Factura A4 paga a dinheiro: fica 'Paga' com recibo. O estado depende do
+   pagamento."
+
+INTERPRETACAO REGISTADA
+  - O estado da venda depende do que aconteceu ao dinheiro, não do papel em que
+    foi impressa.
+  - Pagou (dinheiro, transferência, M-Pesa ou E-Mola): PAGA, e sai recibo.
+  - Não pagou / vai pagar depois: PENDENTE ou CRÉDITO, conforme o caso.
+  - A4 deixa de ser sinónimo de dívida.
+
+O QUE O SISTEMA FAZIA [PDVModule.tsx:1374-1395]
+  Se o formato fosse A4, o estado passava a "Pendente" mesmo com pagamento
+  imediato; como o recibo só sai quando o estado é "Paga", a venda ficava sem
+  recibo e entrava na lista de dívidas.
+
+COMO FICA
+    Crédito                     -> "Crédito" (com dívida registada)
+    Proforma / Cotação          -> "Pendente" (não é venda)
+    Restantes, com pagamento    -> "Paga" + recibo (A4, térmico, A5, talão)
+    "Emitir sem receber"        -> "Pendente" (escolha explícita do operador)
+
+O QUE MUDA NA PRÁTICA
+  [ ] A4 paga em dinheiro passa a "Paga" e o recibo é emitido automaticamente.
+  [ ] A lista de dívidas deixa de incluir essas facturas.
+  [ ] O mapa de dívidas passa a mostrar menos valores — e mais verdadeiros.
+
+PENDENCIA P-02 (limpeza de dados): as facturas A4 já emitidas e já pagas estão
+  hoje marcadas "Pendente". O sistema não sabe quais foram pagas. É preciso um
+  relatório (M-08) e uma folha marcada pelo senhor/contabilista. Sem isso, o
+  valor histórico de dívidas continua inflacionado.
+
+O QUE FICA POR FAZER NO SISTEMA
+  PE-01 (:1374-1395)  estado pela forma de pagamento, não pelo formato.
+  PD-29               estados únicos: Paga / Pendente / Crédito / Cancelada.
+  PG-12               teste: A4 em dinheiro -> Paga + recibo REC-A4-...;
+                      crédito -> Crédito e sem recibo.
+  M-08                revisão e correcção das A4 antigas, com auditoria.
+
+
+--------------------------------------------------------------------------------
+D3 — CREDITO CONTROLADO
+--------------------------------------------------------------------------------
+
+DECISAO (palavras do dono)
+  "Vamos pelo recomendado."
+
+PARAMETROS REGISTADOS
+  Limite por cliente ............ 20.000 MT (valor inicial; ajustável por cliente)
+  Prazo de pagamento ............ 30 dias
+  Acima do limite ............... exige senha da gerência (excepção registada)
+  Cliente com dívida vencida
+  há mais de 30 dias ........... não leva crédito novo até regularizar
+  Juros de mora ................ não (por agora)
+  Limite do cliente ............ "em aberto" = soma das dívidas não pagas
+
+COMO FUNCIONA NA VENDA
+  1. Se o pagamento é "Crédito" e o cliente é identificado (já é obrigatório,
+     PDVModule.tsx:1323-1325), o sistema calcula:
+        emAberto = dívidas do cliente com saldo > 0
+        novoSaldo = emAberto + total desta venda
+  2. novoSaldo <= limite  -> venda segue normalmente
+  3. novoSaldo >  limite  -> pede senha de gerência; se aceite, regista
+                             excepção (quem autorizou, quando, valor)
+  4. Cliente com dívida vencida há mais de 30 dias -> bloqueia, com mensagem
+     que diz quanto e desde quando
+  5. Toda a venda a crédito cria a dívida imediatamente (hoje só aparece quando
+     alguém paga — NEG-06)
+
+O QUE MUDA NA PRÁTICA
+  [ ] O balcão deixa de dar crédito sem limite.
+  [ ] Acima de 20.000 MT é preciso o gerente — e fica registado quem autorizou.
+  [ ] O mapa de dívidas passa a ter todos os devedores (não só os que já
+      pagaram alguma coisa).
+  [ ] Passa a existir relatório de atraso: 0-30, 31-60, 61-90, +90 dias.
+
+PENDENCIA P-03 (dono, quando houver dados): no dia 1 da política, listar os
+  clientes que JÁ excedem 20.000 MT em aberto. Não bloquear vendas sem o dono
+  ver a lista. O limite é o mesmo para todos; quem precisar de mais, tem limite
+  próprio registado.
+
+DÚVIDA REGISTADA (para o dono confirmar quando vir a lista)
+  O limite de 20.000 MT aplica-se a TODOS, incluindo clientes antigos que
+  compram 200.000/mês? Se sim, esses clientes terão limite próprio no dia 1.
+
+O QUE FICA POR FAZER NO SISTEMA
+  PD-35   política de crédito (limite, prazo, autorização, bloqueio).
+  PC-87   campos no cliente: creditLimit, creditTermDays, creditBlocked.
+  PC-88   consulta única de saldo em aberto e dias de atraso.
+  PC-41   dívida criada na mesma transacção da venda.
+  PG-27   testes de limite, autorização e bloqueio.
+  M-07    migração dos clientes (limite nulo = usa o global 20.000).
+  Relatório novo: mapa de antiguidade de dívidas (aging).
+
+
+--------------------------------------------------------------------------------
+D4 — ARMAZEM: NÃO SE MEXE POR AGORA
+--------------------------------------------------------------------------------
+
+DECISAO (palavras do dono)
+  "Por enquanto não mexemos nele." / "Não se mexe nada agora."
+
+INTERPRETACAO REGISTADA
+  - Nada é alterado: o menu "Armazém" e o ecrã "Módulo em Estruturação" ficam
+    exactamente como estão.
+  - Não se implementa armazém, não se removem locais, não se criam
+    transferências.
+  - A pergunta física ("de onde vêm os 20 sacos quando a loja só tem 5?") fica
+    sem resposta registada — e é isso que se aceita por agora.
+
+RISCO ACEITE (fica escrito para não se perder)
+  Existe um menu que promete um módulo que não existe. Quem usar o sistema pode
+  acreditar que há controlo de armazém quando há apenas um número de stock.
+  Este risco foi identificado (NEG-07) e o dono decidiu adiá-lo. Não é um
+  esquecimento: é uma decisão datada.
+  Consequência prática: quando o armazém for decidido, o trabalho será maior —
+  porque entretanto haverá meses de stock sem localização.
+
+EFEITO NO PLANO
+  PR-10 (remover o menu) passou a "ADIADO SEM DATA". O número fica reservado
+  para não renumerar os outros 17 PRs. Nenhuma outra acção depende disto.
+
+Pergunta que fica em aberto (sem prazo): quer que o menu passe a dizer, pelo
+menos, "não disponível" em vez de "em estruturação"? São 10 minutos e evita
+expectativa errada. Se preferir não tocar em nada, fica como está.
+
+
+--------------------------------------------------------------------------------
+D5 — CAIXA: FECHO POR TURNO, SEM FUNDO, SEM TOLERÂNCIA
+--------------------------------------------------------------------------------
+
+DECISAO (palavras do dono)
+  "Um fecho por dia, sem fundo de 5.000 MT, nem tolerância de 50 MT, assinado
+   por quem conta e por quem confere. Mas deve haver fecho de caixa por mudança
+   de turno."
+  "A questão de salários ainda não devemos mexer, mas saem da mesma do valor
+   guardado no banco." (citado tal como foi dito)
+
+INTERPRETACAO REGISTADA
+
+  1. FECHO POR TURNO (o que manda no desenho)
+     Cada mudança de turno obriga a fechar a caixa: contar, comparar e assinar.
+     Não é um fecho ao fim do dia com um resumo dos turnos — é um fecho em cada
+     passagem de turno. O dia passa a ser uma cadeia de turnos fechados.
+
+  2. SEM FUNDO FIXO DECLARADO
+     Não se declara um fundo de 5.000 MT à abertura. O turno seguinte abre com
+     o valor que o anterior contou e assinou (transporte do saldo). No primeiro
+     turno do dia, o valor de abertura é a contagem física feita nesse momento.
+
+  3. SEM TOLERÂNCIA
+     Não existe margem de 50 MT nem "quebra aceitável". Toda a diferença, mesmo
+     de 0,01 MT, é registada com justificação escrita. Se o dinheiro não bate
+     certo, isso fica dito — e não diluído.
+
+  4. DUAS ASSINATURAS
+     Quem conta e quem confere. Duas pessoas, dois nomes. Se for a mesma pessoa,
+     o sistema avisa e regista a excepção.
+
+  5. CONTAGEM POR MÉTODO
+     Dinheiro, M-Pesa, transferência, E-Mola — contados e comparados em
+     separado. Um total único esconde o erro de um método dentro do acerto de
+     outro.
+
+  6. SALÁRIOS FORA DO ÂMBITO
+     Não se mexe no cálculo de salários (decisão do dono) e os salários NÃO
+     passam pela gaveta: são pagos a partir do valor guardado no banco. Por
+     isso, não entram no fecho de caixa. Ficam de fora também do desenho do
+     PR-14.
+
+  7. O QUE ENTRA NO FECHO
+     Vendas em dinheiro (incluindo a parte em dinheiro de pagamentos
+     múltiplos), entradas de caixa, sangrias e reembolsos ao cliente.
+     O que NÃO entra: salários, pagamentos por banco, compras pagas por
+     transferência.
+
+O QUE MUDA NA PRÁTICA
+  [ ] O operador já não "fecha o dia": fecha o turno, e o seguinte abre com o
+      que ficou.
+  [ ] Não há fundo declarado — há transporte de saldo, assinado.
+  [ ] Qualquer diferença aparece com nome de quem contou e de quem conferiu.
+  [ ] Deixa de haver desculpa de "foi só 30 MT".
+  [ ] Os salários continuam a sair do banco, como hoje, e não sujam a caixa.
+
+PERGUNTAS DE DETALHE AINDA ABERTAS (4)
+  Q1. Quantos turnos há e a que horas mudam? (ex.: 08:00-15:00 / 15:00-20:00,
+      ou um turno único com fecho ao fim do dia?)
+  Q2. Quem conta e quem confere em cada turno? (nomes ou cargos)
+  Q3. O dinheiro fica na loja de um dia para o outro, ou há depósito no banco
+      ao fim do dia? (Se há, é um movimento de caixa "Depósito".)
+  Q4. Diferença acima de zero: o que acontece a quem contou? (desconto,
+      advertência, investigação) — a política é sua; o sistema só regista.
+
+  Q1, Q2 e Q3 são necessárias para programar o PR-14. A Q4 pode ser respondida
+  depois do primeiro mês de funcionamento, com números reais na mão.
+
+O QUE FICA POR FAZER NO SISTEMA
+  PD-14   sessões de caixa por turno (abertura, fecho, contagem, diferença).
+  PD-36   definição de turnos e transporte de saldo.
+  PC-89   colecções cash_sessions / cash_closures, imutáveis depois de fechadas.
+  PC-44   movimentos de caixa exigem turno aberto.
+  PD-09   o saldo passa a contar dinheiro dentro de pagamentos múltiplos e
+          a descontar reembolsos (hoje ignora ambos).
+  PG-28   testes: transporte de saldo, duas mudanças no mesmo dia, diferença de
+          0,01 registada, fecho duplo recusado.
+  M-10    primeiro turno: contar o dinheiro que já está na gaveta e registá-lo
+          como saldo inicial assinado.
+  Relatórios: fecho imprimível por turno, com as duas assinaturas; histórico de
+          turnos com diferenças acumuladas por operador.
+
+LEMBRETE: nada disto se aplica sem o senhor autorizar o PR-14, e o PR-14 vem
+depois do backup (PR-08) e do estado da venda (PR-04).
+
+
+--------------------------------------------------------------------------------
+PENDÊNCIAS REGISTADAS (para não se perderem)
+--------------------------------------------------------------------------------
+  P-01  CONTABILISTA — IVA contido nas vendas desde a abertura foi declarado?
+        Se não, qual o procedimento de regularização? (nasce de D1)
+  P-02  LIMPEZA DE DADOS — facturas A4 antigas marcadas "Pendente" que já foram
+        pagas: revisão e correcção com auditoria (M-08). (nasce de D2)
+  P-03  LIMITE DE CRÉDITO — listar clientes que já excedem 20.000 MT em aberto
+        no dia 1 da política, antes de bloquear vendas. (nasce de D3)
+  P-04  CONTABILISTA — tabela oficial de IRPS/INSS em vigor, assinada. Sem ela
+        não se toca no cálculo de salários (decisão do dono) e mantém-se a
+        remoção da frase "conformidade total" do recibo.
+
+--------------------------------------------------------------------------------
+EFEITO NO PLANO (v2.1)
+--------------------------------------------------------------------------------
+  Com D1-D3 e D5, a Onda 1 fica fechada e a Onda 4 (caixa) fica desenhada.
+  D4 fica adiada por decisão do dono (PR-10 sem data).
+
+  Onda 1 passa a ter especificação fechada para 3 dos 4 PRs:
+    PR-04  estado da venda (D2)
+    PR-06  IVA incluído (D1)
+    PR-07  crédito controlado + dívidas + auditoria (D3)
+  Novos itens criados por estas decisões:
+    PD-35, PC-87, PC-88, PG-26, PG-27, M-07, M-08, M-09.
+  Bloqueado: PR-14 (caixa) fica em espera das respostas Q1-Q3; PR-10 (armazém)
+  fica adiado por D4.
+
+  Nada disto está aplicado no sistema. A aplicação só muda quando o senhor
+  autorizar um PR concreto.
+
+
+--------------------------------------------------------------------------------
+ASSINATURA (para o processo)
+--------------------------------------------------------------------------------
+  Decisões D1, D2 e D3 tomadas por: ______________________________________
+  Cargo: ______________________________  Data: ____ / ____ / __________
+
+  Contabilista informado de D1 (IVA incluído e IVA contido nas vendas): [ ]
+  Nome: ______________________________  Data: ____ / ____ / __________
+
+================================================================================
+FIM DO REGISTO
+================================================================================

@@ -9,7 +9,7 @@
  * Este teste varre o código à procura dos nomes de colecção e compara com
  * `firestore.rules`. Também recusa o regresso das regras abertas.
  */
-import { readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
 let passou = 0, falhou = 0;
@@ -54,6 +54,21 @@ while ((m = regexRegras.exec(regras)) !== null) listadas.add(m[1]);
 const faltam = [...nomesUsados].filter(nome => !listadas.has(nome)).sort();
 
 ok('há colecções detetadas no código', nomesUsados.size > 5);
+
+// A cópia pronta a colar na consola é o que uma pessoa não técnica vai usar.
+// Se ficar desactualizada, publica-se meia fechadura — este teste evita isso.
+const ficheiroCola = 'REGRAS-FIRESTORE-PARA-COLAR.txt';
+if (existsSync(ficheiroCola)) {
+  // O ficheiro e uma copia PURA do firestore.rules: sem cabecalho, sem
+  // comentarios de bloco (as regras do Firestore so aceitam "//"). Um cabecalho
+  // aqui ja fez um utilizador colar texto invalido na consola.
+  const cola = readFileSync(ficheiroCola, 'utf-8');
+  const semCabecalho = cola.trim();
+  ok('a cópia para colar coincide com firestore.rules', semCabecalho === regrasCruas.trim());
+  ok('a cópia para colar começa em rules_version', semCabecalho.startsWith("rules_version = '2';"));
+  ok('a cópia para colar termina na chave final', semCabecalho.endsWith('}'));
+  ok('a cópia para colar inclui cash_sessions', semCabecalho.includes('match /cash_sessions/{docId}'));
+}
 ok(`todas as colecções usadas estão nas regras (faltam: ${faltam.join(', ') || 'nenhuma'})`, faltam.length === 0);
 ok('cash_movements está protegida', listadas.has('cash_movements'));
 ok('sales está protegida', listadas.has('sales'));

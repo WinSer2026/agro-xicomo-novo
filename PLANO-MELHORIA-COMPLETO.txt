@@ -1,0 +1,2453 @@
+================================================================================
+PLANO DE MELHORIA COMPLETO — AGRO-XICOMO
+Do ficheiro de configuração à última linha de cada modulo
+================================================================================
+Versao .......: 2.2 (v2.1 + decisoes D4 e D5 do dono, de 09/11/2026)
+                Nao existem dois planos: este substitui todos os anteriores.
+Data .........: 09 de Novembro de 2026
+Base .........: RELATORIO-AUDITORIA.txt + leitura de todo o codigo
+Universo .....: 146 ficheiros versionados · ~40.500 linhas em src/ e server.ts
+Metodo ......: cada ficheiro, cada bloco, cada funcao, com linha de inicio real
+Regra ........: este documento e o plano. O que ja foi aplicado ao codigo esta
+                marcado na seccao 0.1 e descrito em MELHORIAS-APLICADAS.txt.
+
+0.1 ESTADO DE EXECUCAO (actualizado 09/11/2026, apos autorizacao do dono)
+  APLICADO .....: D1 (IVA incluido), D2 (estado depende do pagamento),
+                  D3 (credito 20.000/30 dias/gerencia/bloqueio), D5 (turno de
+                  caixa com botao, sem fundo fixo, sem tolerancia, dupla
+                  assinatura), SEG-03 (codigo de gestor sem 05082),
+                  BD-01/02/03 (leituras que nao mentem "vazio"), PD-09 (saldo
+                  com pagamentos multiplos e reembolsos), M-10 (primeiro turno),
+                  PG-28 (testes do turno), frase de conformidade do recibo de
+                  salario, remocao de codigo morto.
+  ADIADO ......: PD-13 (salarios) e PR-10 (armazem) — decisao do dono.
+  POR FAZER ....: restantes itens das Ondas 1 e 2, Fase 3 (conferencias),
+                  Fase 4 (desempenho e impressao).
+  PROVA ........: tsc 0 erros; 409 verificacoes de regras + 13 testes de
+                  interface, 0 falhas; build de producao concluido.
+
+REGISTO DE ALTERACOES v2.1 -> v2.2 (D4 e D5)
+  D4 Armazem ... ADIADA pelo dono: nao mexer por agora. O menu fica como esta
+                 (mantem-se a promessa que nao se cumpre — risco aceite e
+                 registado). PR-10 passa a "adiado, sem data".
+  D5 Caixa ..... fecho POR TURNO e obrigatorio; sem fundo fixo declarado; SEM
+                 tolerancia (toda a diferenca e registada); assinado por quem
+                 conta e por quem confere. Salarios ficam FORA do ambito e sao
+                 pagos a partir do banco. Novos: PD-36, PC-89, M-10, PG-28.
+                 Quatro perguntas de detalhe continuam abertas (seccao 14.1).
+  Salarios ..... nao se mexe no calculo (decisao do dono). Mantem-se UMA accao
+                 minima: tirar a frase "conformidade total" do recibo de salario.
+
+REGISTO DE ALTERACOES v2 -> v2.1 (decisoes do dono aplicadas)
+  D1 IVA ....... o preco de revenda ja inclui IVA. PD-03/PD-04/PD-02/PC-30
+                 passam a EXTRAIR o IVA do preco (nunca somar). Novos: PG-26,
+                 M-01, M-09 (vendas antigas com IVA somado por cima).
+  D2 A4 ........ factura A4 paga = PAGA com recibo. Mantem-se PE-01/PD-29.
+                 Novo: M-08 (revisao das A4 antigas marcadas Pendente).
+  D3 Credito ... limite 20.000 MT, prazo 30 dias, acima exige gerencia,
+                 atrasado >30 dias bloqueia. Novos: PD-35, PC-87, PC-88,
+                 PG-27, M-07.
+  D4 e D5 ...... ficaram em aberto nessa versao; foram fechadas na v2.2.
+
+REGISTO DE ALTERACOES v1 -> v2 (o que saiu e o que entrou)
+  Saiu (estava errado ou era impossivel):
+   - "Firebase Auth em paralelo com signInWithEmailAndPassword" (PB-03):
+     impossivel — o Firebase nao aceita os nossos hashes PBKDF2.
+   - "MANTER o fecho de exercicio" (PE-06): a funcao mente ao utilizador.
+   - "soft-delete em todo o deleteRow" (PC-11): errado para carrinhos e sessoes.
+   - "remover o fallback de hash" sem diagnostico (PB-06).
+   - "comparar hashes do codigo de stock" sem migracao (PB-07).
+   - "remover listeners de sincronizacao" sem substituto (PC-04).
+   - "Fechar credentials e products ja" (PB-01 e PR-01): parte o login e a
+     eliminacao de produtos. Passaram a duas fases.
+   - Contagens erradas no texto (dizia 44 achados e 7 criticos; sao 50 e 8)
+     e estimativas optimistas em tres sitios.
+   - PR-01b estimado em 2-3 h (e 1 dia).
+  Entrou (faltava):
+   - Onda 0.5 de mitigacao da leitura (2 h) e passo 0 de comparacao de regras.
+   - Secao 15: migracoes/backfill (M-01..M-06) — nenhuma accao do genero existia.
+   - Secao 16: operacao, acessos, custos, privacidade, comunicacao a equipa.
+   - Secao 17: quadro de execucao de uma pagina.
+   - Remocao de clearSystemData e do fecho de exercicio ficticio.
+   - Estimativas revistas e contagem correcta: 50 achados (8 criticos).
+================================================================================
+
+
+--------------------------------------------------------------------------------
+0. COMO LER ESTE PLANO (e uma honestidade necessaria)
+--------------------------------------------------------------------------------
+
+0.1 O QUE ESTE DOCUMENTO COBRE
+
+  Esta dividido em BLOCOS, e dentro de cada bloco cada ficheiro aparece uma vez,
+  com os seus blocos e linhas reais. A cobertura e:
+
+    - 146 ficheiros: todos os que estao no Git, um a um (seccao 9 lista os que
+      saem e por que).
+    - 8 modulos grandes: todos os blocos de codigo (funcoes, handlers, estados,
+      seccoes de interface) com linha de inicio.
+    - firebaseDB.ts: os ~140 metodos, um a um.
+    - firestore.rules: linha a linha (1-92), porque sao 92 linhas que decidem
+      tudo.
+    - 39 utilitarios, 13 componentes pequenos, 5 ficheiros de dados,
+      26 documentos, 17 ficheiros de teste: todos com accao definida.
+
+0.2 O QUE "CADA LINHA" SIGNIFICA AQUI — e o que NAO prometo
+
+  Pediu "cada linha". Vou ser directo: revisao literal de 40.500 linhas, uma a
+  uma, nao cabe num documento util — e mesmo uma ferramenta profissional nao o
+  faz sem perder o que importa. O que este plano faz e o nivel imediatamente
+  abaixo: CADA BLOCO, ou seja, cada funcao e cada seccao, com a faixa de linhas
+  onde vive. Na pratica cobre 100% do codigo executavel, porque entre dois
+  blocos nao ha logica de negocio — ha estado, tipos e JSX repetitivo.
+
+  O que fica de fora e dito com nome e apelido: o interior do JSX de
+  apresentacao (className, espacamentos, cores) so e tratado por regras gerais
+  (seccao 1.4), nao linha a linha. Se quiser revisao literal linha a linha de um
+  ficheiro, e viavel — um ficheiro por vez, comecando por PDVModule.tsx ou
+  firebaseDB.ts. Diga qual.
+
+0.3 COMO AS ACCAOES ESTAO CODIFICADAS
+
+  Cada accao tem um identificador para poder ser marcada como feita:
+
+    PA-nn  ...  Bloco A — Configuracao, infraestrutura e ficheiros de raiz
+    PB-nn  ...  Bloco B — Seguranca, sessoes e autorizacao
+    PC-nn  ...  Bloco C — Camada de dados (firebaseDB.ts)
+    PD-nn  ...  Bloco D — Utilitarios e regras de negocio
+    PE-nn  ...  Bloco E — Modulos de interface
+    PF-nn  ...  Bloco F — Documentacao
+    PG-nn  ...  Bloco G — Testes
+    PH-nn  ...  Bloco H — Limpeza e remocoes
+
+  E cada accao tem:
+
+    Onde ........ ficheiro + linhas (reais, verificadas)
+    Fazer ....... a alteracao, o mais concreta possivel
+    Pronto quando criterio de aceitacao verificavel
+    Esforco ..... P (<2 h) / M (1-2 dias) / G (>2 dias)
+    Liga ........ achados do relatorio que resolve (SEG-01, BD-02, ...)
+
+0.4 ORDEM RECOMENDADA
+
+  Nao seguir a ordem do documento (esta organizado por assunto, nao por
+  execucao). A ordem de execucao esta na seccao 11, em 6 ondas com pull requests
+  separados. Regra de ouro: cada onda tem de deixar o sistema a funcionar e
+  melhor do que estava.
+
+
+--------------------------------------------------------------------------------
+1. REGRAS TRANSVERSAIS (aplicam-se a TODAS as accoes)
+--------------------------------------------------------------------------------
+
+1.1 UMA COISA DE CADA VEZ
+
+  - Criar uma branch por accao ou por pequeno grupo: fix/seg-regras, fix/bd-fallback,
+    feat/caixa-fecho, etc.
+  - Commits pequenos com mensagem no imperativo: "impede venda multipla sem soma
+    igual ao total". Nunca "alteracoes", nunca "fix".
+  - Pull request com: o que muda, porque, como se testa, e uma captura ou log.
+  - Nunca juntar correccao de seguranca com mudanca de interface no mesmo PR:
+    se for preciso reverter, reverte-se so uma.
+
+1.2 DEFINICAO DE "PRONTO" (para qualquer accao)
+
+  [ ] Compila: npx tsc --noEmit sem erros.
+  [ ] Testes: npm test e npm run test:all verdes, sem rejeicoes nao tratadas.
+  [ ] Teste novo que falharia antes da alteracao e passa depois.
+  [ ] Verificado manualmente na aplicacao, com os passos escritos no PR.
+  [ ] Nenhum ficheiro novo "equivalente" a firebaseDB.ts (ver PH-01).
+  [ ] Se mexe em dados: backup exportado antes de testar.
+  [ ] Se mexe em regras: testado com conta anonima E com sessao normal.
+
+1.3 PADROES DE CODIGO A APLICAR A TODOS OS BLOCOS
+
+  - Leitura de dados: getAllOrFail ou falha explicita. Proibido "catch vazio" em
+    dados de negocio.
+  - Escrita de dinheiro/stock: sempre em runTransaction, sempre com auditoria e
+    movimento na mesma operacao.
+  - Valores desconhecidos: null, nunca 0. O zero e um numero, nao uma ausencia.
+  - Datas: ISO 8601 (new Date().toISOString()), guardadas como string.
+  - Dinheiro: arredondar so na apresentacao; comparar com tolerancia de 0,01.
+  - Erros para o utilizador: describeError() com "o que falhou" + "o que fazer".
+  - Nada de texto inventado em ecras (mock, simulated, sample).
+  - Funcao com mais de 40 linhas: dividir. Ficheiro com mais de 600 linhas:
+    extrair servico (ver PE-01).
+
+1.4 REGRAS DE INTERFACE (valem para todo o JSX, sem revisao linha a linha)
+
+  - Texto operacional >= 12 px; cinzas com contraste >= 4,5:1.
+  - Todo o botao so com icone tem aria-label; todo o modal tem role="dialog",
+    aria-modal="true" e foco preso dentro.
+  - Nenhum window.confirm/window.alert: usar ConfirmDialog e Toast existentes.
+  - Dinheiro sempre com dois decimais e " MT" (helper unico fmtMT).
+  - Erro critico nunca desaparece sozinho: fica visivel ate ser lido.
+  - Idioma: lang="pt-MZ" e uma unica grafia (Factura vs Fatura - decidir uma).
+
+1.6 MIGRACAO OBRIGATORIA (qualquer accao que acrescente ou mude um campo)
+
+  Um campo novo nao e "uma linha em types.ts". E uma decisao sobre os registos
+  que ja existem. Antes de abrir o PR, responder por escrito:
+    1. Qual o valor por omissao para os registos antigos, e porquê?
+       (ex.: taxRate ausente = 16%, porque foi a taxa realmente cobrada.)
+    2. Existe script de backfill? Corre com --dry-run, mostra contagem
+       antes/depois e so grava com confirmacao.
+    3. Prova de inocencia: um teste que compara um relatorio de um periodo
+       ANTIGO antes e depois do PR. Se mudar um centimo, o PR esta errado.
+    4. Como se reverte: o campo fica (inofensivo), o codigo volta atras.
+  Ver secao 15 (M-01..M-06). Sem isto, cada PR de dados cria duas verdades.
+
+1.5 O QUE NAO SE FAZ NESTE PLANO
+
+  - Nao se muda o modelo de dados sem migracao escrita e testada.
+  - Nao se apaga historico de vendas. Nunca. Em nenhuma accao.
+  - Nao se publica regra do Firestore sem a testar no emulador ou numa base de
+    ensaio.
+  - Nao se instala biblioteca nova sem justificar por escrito (o projecto tem
+    peso a mais: ver PH-04).
+
+
+================================================================================
+2. BLOCO A — CONFIGURACAO, INFRAESTRUTURA E FICHEIROS DE RAIZ
+================================================================================
+Sao 20 ficheiros. Nenhum tem interface, mas tres deles decidem se o sistema
+esta seguro e um decide se o codigo parte.
+
+--------------------------------------------------------------------------------
+PA-01  package.json (54 linhas)
+--------------------------------------------------------------------------------
+Onde: package.json:1-54
+Fazer:
+  - :13-20 scripts. Acrescentar "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run", "test:ci": "npm run typecheck && npm run
+    test:unit && npm run test:all", "lint": "eslint ." (criar a configuracao nesta accao; CI em PG-24).
+  - O script test:all (:18-19) nao corre o Vitest. Incluir.
+  - :22-24 remover dependencia nao usada @tanstack/react-query (ver PH-04).
+  - :11 "start": "tsx server.ts" — decidir: se o server nao vai para producao,
+    renomear para "dev:api" para ninguem o arrancar por engano (liga SEG-06).
+  - Fixar versoes (remover "^") nas dependencias criticas: firebase, jspdf,
+    xlsx, vite.
+Pronto quando: npm run test:ci corre tipos + Vitest + scripts e falha se algum
+falhar; npm ls --depth=0 nao mostra react-query.
+Esforco: P.  Liga: COD-04, FIA-04, B-11.
+
+--------------------------------------------------------------------------------
+PA-02  vite.config.ts (41 linhas)
+--------------------------------------------------------------------------------
+Onde: vite.config.ts:1-41
+Fazer:
+  - Confirmar/activar VitePWA com estrategia adequada: precache do shell,
+    network-first para Firestore, e um aviso de "nova versao disponivel".
+  - Definir build.sourcemap: false em producao (nao expor codigo legivel sem
+    necessidade) e build.chunkSizeWarningLimit coerente.
+  - Dividir o bundle: manualChunks para firebase, jspdf, xlsx, recharts. Hoje o
+    bundle inicial inclui bibliotecas que so servem para exportar.
+  - Garantir base: '/' e que o service worker nao intercepta chamadas a
+    firestore.googleapis.com.
+Pronto quando: build produz >= 3 chunks, o primeiro < 500 KB gzip; a app abre
+offline mostrando o ultimo ecra, sem erro de Firestore no service worker.
+Esforco: M.  Liga: DES-01 (parcial), NEG-08 (parcial).
+
+--------------------------------------------------------------------------------
+PA-03  tsconfig.json (27 linhas) e vitest.config.ts (19 linhas)
+--------------------------------------------------------------------------------
+Onde: tsconfig.json:1-27; vitest.config.ts:1-19
+Fazer:
+  - tsconfig: activar "noUnusedLocals" e "noUnusedParameters" (apanha handlers
+    mortos como os do PDV e variaveis como newSaleStatus) e "noFallthroughCasesInSwitch".
+    Nao activar "strict" de uma vez: partir em duas fases (ver PE-01).
+  - vitest.config: onUnhandledRejection equivalente — configurar
+    test.pool e um setup que faca process.exitCode = 1 em rejeicoes nao tratadas
+    (test/setup.ts:1-72 e o sitio).
+Pronto quando: correr npm test sem mexer em nada falha por causa das 2
+rejeicoes actuais (e so depois as corrigimos). Isso prova que a rede funciona.
+Esforco: P.  Liga: COD-04, BD-02.
+
+--------------------------------------------------------------------------------
+PA-04  index.html (15 linhas)
+--------------------------------------------------------------------------------
+Onde: index.html:1-15
+Fazer:
+  - :2 lang="en" -> lang="pt-MZ".
+  - :3-6 titulo e meta description coerentes ("AGRO XICOMO — Gestao").
+  - :7-12 theme-color coerente com o tema escuro; adicionar meta
+    name="color-scheme" content="light dark".
+  - Verificar que nao ha chaves/segredos inline (hoje nao ha).
+  - Adicionar <noscript> com mensagem clara.
+Pronto quando: Lighthouse Accessibility >= 90 na pagina de login; lang correcto
+no inspector.
+Esforco: P.  Liga: UX-01, UX-03.
+
+--------------------------------------------------------------------------------
+PA-05  firebase.json (23 linhas) e .firebaserc (5 linhas)
+--------------------------------------------------------------------------------
+Onde: firebase.json:1-23; .firebaserc:1-5
+Fazer:
+  - Confirmar que "firestore.rules" aponta para o ficheiro certo e que
+    firestore.rules.legacy-open NAO esta referenciado (hoje nao esta - bom).
+  - Acrescentar "firestore": { "indexes": "firestore.indexes.json" } se ainda
+    nao estiver, para os indices serem publicados com as regras.
+  - .firebaserc: confirmar que o alias default e o projecto de producao; criar
+    alias "staging" separado. NUNCA testar num projecto e publicar no outro sem
+    ver o alias no comando.
+Pronto quando: firebase deploy --only firestore --project staging funciona e a
+producao continua intacta.
+Esforco: P.  Liga: FIA-04.
+
+--------------------------------------------------------------------------------
+PA-06  firestore.indexes.json (21 linhas)
+--------------------------------------------------------------------------------
+Onde: firestore.indexes.json:1-21
+Fazer:
+  - Levantar todas as queries com where+orderBy no codigo: firebaseDB.ts:561-601
+    (getDateRangeConstraints), :975-993 (getSalesPage), :1009, :3078, :3094.
+  - Para cada combinacao usada, garantir indice composto declarado. Sem isto a
+    consulta falha em producao com "The query requires an index" - e o
+    utilizador ve lista vazia.
+  - Documentar no ficheiro a query que justifica cada indice.
+Pronto quando: nenhuma query do codigo provoca erro de indice numa base de
+ensaio com 100 vendas.
+Esforco: M.  Liga: FIA-02 (lista vazia por erro de indice), DES-01.
+
+--------------------------------------------------------------------------------
+PA-07  firebase-applet-config.json (11 linhas) + metadata.json (9 linhas)
+--------------------------------------------------------------------------------
+Onde: firebase-applet-config.json:1-11; metadata.json:1-9
+Fazer:
+  - Manter (a chave do Firebase e publica por desenho), mas:
+  - Acrescentar comentario/documento a explicar que a seguranca NAO vem daqui.
+  - metadata.json: actualizar nome/versao; hoje e um resto de ferramenta.
+  - Verificar no codigo que projectId e authDomain vem daqui e nao duplicados
+    (firebaseDB.ts:279-300 init).
+Pronto quando: existe uma unica fonte de configuracao e docs explicam o modelo.
+Esforco: P.  Liga: B-05, SEG-01.
+
+--------------------------------------------------------------------------------
+PA-08  vercel.json (8 linhas)
+--------------------------------------------------------------------------------
+Onde: vercel.json:1-8
+Fazer:
+  - Confirmar rewrite SPA para index.html.
+  - Acrescentar cabecalhos de seguranca (hoje quase certamente inexistentes):
+    Content-Security-Policy (sem unsafe-eval; script-src 'self' + os dominios
+    do Firebase/Google), X-Content-Type-Options: nosniff, Referrer-Policy:
+    strict-origin-when-cross-origin, Permissions-Policy minimal,
+    Strict-Transport-Security.
+  - /api/* nao deve existir em producao: garantir que nao ha rewrite para
+    server.ts.
+Pronto quando: securityheaders.com da nota A (ou equivalente) e a app continua a
+autenticar e a ler o Firestore com a CSP activa.
+Esforco: M.  Liga: SEG-06.
+
+--------------------------------------------------------------------------------
+PA-09  server.ts (264 linhas)
+--------------------------------------------------------------------------------
+Onde: server.ts:1-264 — blocos: :1-20 imports, :21-60 setup + limit 50 MB,
+:89-100 CSP permissiva, :103-180 rotas de backup, :183-238 rotas de sync,
+:240-264 arranque.
+Fazer:
+  - DECISAO PRIMEIRO: este servidor vai para producao ou nao?
+    (a) NAO -> mover para tools/ ou apagar; retirar "start" do package.json.
+    (b) SIM -> :89-100 CSP deixa de ter 'unsafe-eval' e https: http: em
+        frame-ancestors; :107-238 todas as rotas exigem Authorization: Bearer
+        <SYNC_API_TOKEN> comparado com timingSafeEqual; :103 limite de corpo
+        desce para 5 MB; rate limiter em TODAS as rotas (:60 aplicar
+        globalmente); logs sem dados pessoais; escrita atomica em data/db.json
+        (escrever .tmp + rename) para nao corromper o ficheiro a meio.
+  - :183-238 /api/sync/delete apaga registos de credentials: se ficar, exigir
+    token + registo de auditoria.
+Pronto quando: curl sem token em todas as rotas -> 401; CSP sem 'unsafe-eval';
+teste de escrita concorrente nao corrompe db.json.
+Esforco: M.  Liga: SEG-06 (CRITICO se publicado), FIA-04.
+
+--------------------------------------------------------------------------------
+PA-10  .env.example (3 linhas) e .gitignore (13 linhas)
+--------------------------------------------------------------------------------
+Onde: .env.example:1-3; .gitignore:1-13
+Fazer:
+  - .env.example: documentar as variaveis reais (SYNC_API_TOKEN, VITE_FIREBASE_*)
+    com valores vazios e comentario de onde se obtem.
+  - .gitignore: acrescentar *.pdf de teste de impressao, data/, .env.local,
+    .vercel, e o ficheiro RELATORIO-AUDITORIA.txt (se nao quiser versionar).
+    Hoje o RECIBO_POS_*.pdf ja esta ignorado - confirmar.
+Pronto quando: git status limpo depois de usar a app em desenvolvimento.
+Esforco: P.  Liga: B-08.
+
+--------------------------------------------------------------------------------
+PA-11  AGENTS.md (5 linhas) e PLANO_CORRECCAO.md (110 linhas)
+--------------------------------------------------------------------------------
+Onde: AGENTS.md:1-5; PLANO_CORRECCAO.md:1-110
+Fazer:
+  - AGENTS.md: substituir "aplicar imediatamente todas as alteracoes" por regras
+    de seguranca para agentes de IA: (1) nunca alterar regras de Firestore sem
+    revisao humana; (2) nunca apagar colecções; (3) sempre correr tsc + testes;
+    (4) proibido criar uma segunda camada de dados; (5) migracoes obrigatorias
+    quando muda schema; (6) nenhum segredo em texto simples, nem em comentario.
+  - PLANO_CORRECCAO.md: e um plano antigo que contradiz o estado real. Marcar
+    como histórico (mover para docs/historico/) para nao ser seguido por engano.
+Pronto quando: um agente novo le AGENTS.md e nao consegue justificar uma acao
+destrutiva.
+Esforco: P.  Liga: B-03, COD-01.
+
+--------------------------------------------------------------------------------
+PA-12  README (nao existe)
+--------------------------------------------------------------------------------
+Onde: raiz do repositorio
+Fazer:
+  - Criar README.md com: o que e o sistema, stack, como correr localmente, como
+    publicar, onde estao as regras de Firestore, como restaurar um backup,
+    contactos, e um aviso de seguranca sobre credenciais.
+  - Ligar aos 6 documentos que importam de docs/ (SRS, arquitectura,
+    seguranca, RBAC, backup, runbook).
+Pronto quando: uma pessoa nova, sem ajuda, arranca o projecto em 15 minutos.
+Esforco: P.  Liga: B-04.
+
+--------------------------------------------------------------------------------
+PA-13  Scripts de remendo na raiz (7 ficheiros)
+--------------------------------------------------------------------------------
+Onde: fix_pdv.cjs (59), fix_pdv.js (59), fix_pdv_more.cjs (100),
+fix_stock_loss.cjs (21), replace_double_a5.cjs (38), pdv.patch (38),
+update_stock.patch (38), initialProducts.txt (117)
+Fazer: apagar todos. Sao remendos por expressao regular de sessoes antigas; se
+alguem os correr hoje, alteram codigo actual de forma imprevisivel.
+Pronto quando: git ls-files | grep -E '\.(cjs|patch)$' = 0.
+Esforco: P.  Liga: B-01, PH-05.
+
+--------------------------------------------------------------------------------
+PA-14  scripts/hash-password.mjs (31 linhas)
+--------------------------------------------------------------------------------
+Onde: scripts/hash-password.mjs:1-31
+Fazer: manter (utilidade legitima), mas: (a) garantir que nunca e executado
+com uma palavra-passe real em historico de shell partilhado; (b) passar a usar
+o mesmo formato PBKDF2 do securityHelper (com iteracoes configuraveis) e nao o
+formato legado; (c) documentar no README.
+Pronto quando: hash gerado pelo script e aceite pelo login e marcado como
+formato actual.
+Esforco: P.  Liga: SEG-03, SEG-05.
+
+--------------------------------------------------------------------------------
+PA-15  bun.lock (1497) e package-lock.json (9651)
+--------------------------------------------------------------------------------
+Onde: raiz
+Fazer: escolher UM gestor. Manter package-lock.json (npm e o que os scripts
+usam) e apagar bun.lock, ou o contrario. Dois lockfiles divergem e criam builds
+diferentes conforme a maquina.
+Pronto quando: existe um so lockfile e o CI usa esse.
+Esforco: P.  Liga: FIA-04.
+
+
+================================================================================
+3. BLOCO B — SEGURANCA, SESSOES E AUTORIZACAO
+================================================================================
+Este e o bloco que decide se o sistema pode guardar dados reais. Nada aqui e
+"melhoria": e correccao.
+
+--------------------------------------------------------------------------------
+PB-01  firestore.rules (92 linhas) — regra por regra, em DUAS FASES
+--------------------------------------------------------------------------------
+Ficheiro inteiro: firestore.rules:1-92.
+A versao anterior deste bloco mandava fechar credentials e products de
+imediato. Verifiquei no codigo: isso parte o login (o cliente le os hashes) e a
+eliminacao de produtos (StockModule.tsx:246). Corrigido para duas fases.
+
+  FASE 1 — agora (PR-01; ficheiro pronto em PR-01-PACOTE-REGRAS.txt)
+  So mexe onde a aplicacao NAO usa a permissao. Nao depende de papeis.
+
+  :1-17  cabecalho e instrucoes. MANTER e acrescentar data + motivo da alteracao.
+  :18-20 service / match raiz. MANTER.
+  :21-24 "allow read, write: if false" por omissao. MANTER — e a melhor linha do
+         ficheiro: fecha tudo o que nao esta listado.
+  :26-27 products: MANTER delete. A aplicacao apaga produtos (StockModule.tsx:246);
+         fechar agora partiria a funcao. Passa a false na Fase 2 (com PR-01b,
+         soft-delete, M-03).
+  :28    sales: delete -> false. Ninguem apaga vendas (grep). update continua
+         (anulacao e cobranca sao updates legitimos).
+  :29    losses: delete -> false (sem chamadores).
+  :30    transformations: delete -> false (dbService.deleteTransformation existe,
+         nao e chamado; cancelar e update).
+  :31    employees: MANTER delete na Fase 1 (HRModule.tsx:428 apaga). Fase 2:
+         false + desactivacao (PR-01b).
+  :32    attendance: delete -> false.
+  :33    customers: delete -> false (deleteCustomer existe, sem chamadores).
+  :34    paused_sales: MANTER read/write (carregar e remover carrinho suspenso e
+         comportamento correcto).
+  :35    active_cart: MANTER.
+  :36    settings: delete -> false. O write continua para autenticados enquanto
+         nao houver papeis (Fase 2: so tecnico). Contem NUIT e codigo de gestor.
+  :37    counters: delete -> false. Numeracao fiscal: apagar um contador faz o
+         sistema reemitir numeros ja usados.
+  :38    deletions: delete/update -> false (registo de eliminacoes).
+  :39    payroll_payments: delete -> false. O resto fica como esta na Fase 1
+         (nao ha papel de RH para restringir); Fase 2 restringe por claim.
+  :40    active_sessions: MANTER (a gestao de sessoes precisa de terminar sessoes).
+  :42-49 credentials: NAO MEXER NA FASE 1. O login le o hash do cliente; retirar
+         read hoje parte o login de toda a equipa (foi o erro da v1).
+         Fecha apenas na Fase 2, com a Cloud Function do PB-03: o servidor le
+         com Admin SDK (que ignora regras) e o cliente passa a receber
+         permission-denied.
+  :51-60 audit_logs: update -> false (ja esta); delete passa a exigir prova de
+         arquivo com getAfter (ver PR-01, seccao 6). Plano B se o Firebase
+         recusar: manter delete e registar o risco ate o arquivo passar para o
+         servidor.
+  :61-64 audit_logs_archive: MANTER (imutavel — correcto).
+  :66-71 stock_movements: MANTER (livro imutavel).
+  :73-90 cash_movements e debts: MANTER. Nota: os comentarios de cabecalho estao
+         trocados (:73-77 fala de caixa, :78-81 de dividas) — corrigir a ordem,
+         nao a regra.
+
+  FASE 2 — depois do PB-03 (claims) e do PR-01b (soft-delete)
+    - products / employees: delete -> false; escrita so com claim adequado.
+    - settings: write so tecnico; credentials: read negado.
+    - payroll_payments / employees: leitura so com claim de RH.
+    - sales: proteger campos depois de emitida (total, itens, numero, data) com
+      request.resource.data.diff(resource.data).affectedKeys().hasAny([...]);
+      anulacao continua permitida (muda estado e grava cancelledBy/At).
+    - acrescentar colecções novas quando existirem: cash_sessions (PD-14),
+      suppliers e purchase_orders (PD-18), stock_locations (PD-19).
+
+Pronto quando:
+  Fase 1 — teste de regras (PG-03, com o parser corrigido) a 0 falhas + 6
+  simulacoes no Rules Playground + vendas/anulacao/produtos/arquivo a funcionar.
+  Fase 2 — uma sessao sem claim de tecnico recebe permission-denied ao escrever
+  settings e ao ler credentials.
+Esforco: P (Fase 1, ja detalhada) / M (Fase 2).
+Liga: SEG-01, SEG-02, FIA-03, BD-03.
+
+
+--------------------------------------------------------------------------------
+PB-02  firebaseDB.ts:183-200 e :530-560 — autenticacao anonima
+--------------------------------------------------------------------------------
+Onde: firebaseDB.ts:183-200 (imports/init de auth), :279-320 (init),
+:530-560 (ensureAuth)
+Fazer:
+  - Manter signInAnonymously apenas enquanto PB-03 nao existir, mas:
+    (a) garantir que ensureAuth trata falha de auth com mensagem propria e nao
+        cai para "modo local" silencioso;
+    (b) registar em audit_logs o uid anonimo de cada sessao (hoje nao ha ligacao
+        entre accao e sessao Firebase);
+    (c) preparar o terreno: um unico ponto (AuthProvider) que devolve
+        { uid, role } para toda a app, substituindo leituras dispersas.
+Pronto quando: desligar a autenticacao anonima na consola produz erro claro
+("sem ligacao ao servidor de autenticacao"), nao um ecra vazio.
+Esforco: P.  Liga: SEG-01, SEG-02.
+
+--------------------------------------------------------------------------------
+PB-03  Autenticacao a serio: Cloud Function de login + custom token
+--------------------------------------------------------------------------------
+Onde: novo functions/ (funcao "login"), novo src/auth/ (AuthProvider, useAuth),
+      App.tsx:217-262, LoginPanel.tsx:117-351, firestore.rules
+Fazer (uma unica via — a v1 proponha um caminho impossivel):
+  1. Cloud Function `login` (Admin SDK):
+     - recebe { username, password } por HTTPS;
+     - le credentials no servidor (o cliente deixa de poder ler a coleccao);
+     - verifica PBKDF2-SHA256 com o mesmo salt e iteracoes, reutilizando a
+       logica de securityHelper.ts:90-109 portada para Node (crypto nativo);
+     - aplica bloqueio por CONTA (5 falhas -> 15 min) e registra a tentativa
+       em audit_logs;
+     - cria/actualiza o utilizador Firebase (<username>@agro.local) e define
+       custom claims { role, username };
+     - devolve um customToken.
+  2. Cliente: signInWithCustomToken(token). O perfil passa a vir de
+     getIdTokenResult().claims — nunca do sessionStorage.
+  3. firestore.rules passa a decidir por request.auth.token.role.
+  4. credentials: leitura negada ao cliente (a funcao usa o Admin SDK, que
+     ignora as regras). Fecha SEG-01 e SEG-04.
+  5. Todos repõem a palavra-passe no primeiro login — o fluxo ja existe
+     (mustChangePassword, LoginPanel.tsx:232).
+Porque nao "Firebase Auth em paralelo": o Firebase nao aceita os nossos hashes,
+  e signInWithEmailAndPassword exigiria conhecer a palavra-passe em texto. Sem
+  Cloud Function nao ha caminho.
+Pre-requisitos (novos, ver secao 16): plano Blaze, deploy de functions, conta de
+  servico, e custo mensal estimado e aceite pelo dono.
+Pronto quando: alterar a sessao/token no browser nao muda o perfil; o cliente
+  recebe permission-denied ao ler credentials; o login funciona e, sem rede,
+  falha com mensagem clara.
+Esforco: G (3-4 semanas, incluindo testes e reposicao de palavras-passe).
+Liga: SEG-01, SEG-02, SEG-04, SEG-05.
+
+
+--------------------------------------------------------------------------------
+PB-04  App.tsx:217-262 — restauro de sessao a partir do sessionStorage
+--------------------------------------------------------------------------------
+Onde: App.tsx:205-278 (efeitos), :217-262 (restauro + validacao)
+Fazer:
+  - Nao confiar no JSON. Guardar apenas { sessionId, username }.
+  - No arranque: ler active_sessions/{sessionId}; se nao existir, expirou ou o
+    utilizador foi eliminado -> logout. Se existir, obter o perfil da base.
+  - Se nao houver rede: permitir continuar apenas em modo leitura e com aviso
+    "a validar sessao" (nunca dar acesso a modulos sensiveis offline).
+  - Remover qualquer "fallback para Operador por omissao".
+Pronto quando: editar o sessionStorage para "role":"Tecnico" e recarregar nao
+abre o modulo tecnico.
+Esforco: M.  Liga: SEG-02, SEG-04.
+
+--------------------------------------------------------------------------------
+PB-05  App.tsx:303-340 e :341-378 — gate de modulo e login/logout
+--------------------------------------------------------------------------------
+Onde: App.tsx:47-61 (isModuleAccessible), :62-99 (selectModule), :303-340
+(handleVerifyGate), :341-378 (handleLoginSuccess/logout)
+Fazer:
+  - O gate passa a exigir palavra-passe de um perfil COM MAIS privilegio do que
+    o actual (gestor ou tecnico), nunca a do proprio utilizador.
+  - Verificacao do gate via securityHelper.verifyPassword contra o registo na
+    base (nao contra cache local).
+  - Registar em audit_logs cada desbloqueio (quem, que modulo, quando).
+  - logout: terminar sessao em active_sessions e limpar cache de credenciais.
+Pronto quando: operador tenta abrir Stock e o sistema pede credencial de gestor;
+o log regista a autorizacao.
+Esforco: M.  Liga: SEG-02.
+
+--------------------------------------------------------------------------------
+PB-06  securityHelper.ts (224 linhas) — hash, politica e verificacao
+--------------------------------------------------------------------------------
+Onde: :1-40 imports/constantes, :42-100 hashPassword, :100-140 fallback sem
+WebCrypto, :140-190 PBKDF2/iteracoes, :154-179 politica, :190-224 compare/verify
+Fazer:
+  - :154-179 politica: minimo 10 caracteres (ou 6 digitos com bloqueio no
+    servidor); exigir que nao seja igual ao nome de utilizador; lista de
+    proibidas (1234, 123456, 05082, admin).
+  - :123-129 remover o "sha256 de 32 bits" caseiro — e matematicamente invalido
+    e da falsa sensacao de seguranca. Sem WebCrypto: recusar o login com
+    mensagem clara em vez de usar hash fraco.
+  - :105 subir as iteracoes do fallback de 1000 para 120000 (alinhar) ou remover.
+  - :59 manter compatibilidade de leitura de hashes legados, mas marcar para
+    re-hash no proximo login (LoginPanel.tsx:207-229 ja faz isso — manter).
+  - ANTES de remover o fallback (:101-133), fazer o diagnostico: o fallback usa
+    min(iterations,1000) e um sha256 caseiro de 32 bits, portanto produz um hash
+    que SO verifica nesse tipo de ambiente. Script que corre os dois algoritmos
+    contra cada hash guardado e lista os afetados; esses ficam com
+    mustChangePassword = true e repõem a palavra-passe com WebCrypto. So depois
+    se remove o ramo, e se recusa login com mensagem propria ("este dispositivo
+    nao suporta login seguro") em vez de aceitar hash fraco.
+  - Acrescentar: needsRehash(hash) para subir iteracoes automaticamente.
+Pronto quando: testes provam (a) "1234" recusada, (b) hash legado migra no
+login, (c) sem WebCrypto o login e recusado, nao "aceite com hash fraco".
+Esforco: M.  Liga: SEG-03, SEG-05.
+
+--------------------------------------------------------------------------------
+PB-07  authorization.ts (45 linhas) — codigo de gestor de stock
+--------------------------------------------------------------------------------
+Onde: :1-20 constantes/default, :20-45 verify; settings.stockPasswordHash
+      (firebaseDB.ts:3288), hoje com o valor '05082' em TEXTO SIMPLES.
+Fazer, em tres passos (uma unica migracao, num PR proprio):
+  1. Remover o valor por omissao (:16): devolve null quando nao ha codigo.
+  2. Leitura tolerante ao formato:
+       - valor comeca por "pbkdf2:" -> verifica com securityHelper;
+       - valor legado (texto, como '05082') -> compara em texto, mas no
+         primeiro sucesso re-grava como "pbkdf2:..." automaticamente.
+     As operacoes de stock continuam a funcionar durante a transicao.
+  3. Passados 30 dias (ou quando o log mostrar zero usos legados), remover o
+     ramo legado e pedir redefinicao no modulo tecnico.
+  Acrescentar: 5 falhas -> bloqueio temporario de 15 min por posto, registado
+  em audit_logs.
+Pronto quando: instalacao nova nao autoriza stock sem codigo definido; nenhum
+  valor legado em uso; grep de 05082 em src/ = 0.
+Esforco: M (inclui a migracao).
+Liga: SEG-03, SEG-05.
+
+
+--------------------------------------------------------------------------------
+PB-08  roleHelper.ts (24 linhas) e utils/safeStorage.ts (91 linhas)
+--------------------------------------------------------------------------------
+Onde: roleHelper.ts:1-24; safeStorage.ts:1-91
+Fazer:
+  - roleHelper: uma unica funcao can(role, capability) com uma tabela de
+    capacidades (em vez de comparacoes de strings espalhadas pelos modulos).
+    Mapear as comparacoes existentes (grep "role ===" em src/) para a tabela.
+  - safeStorage: hoje protege contra quota/erros. Acrescentar: (a) versao de
+    schema por chave (agro_products_cache@v2) para invalidar caches antigas;
+    (b) TTL opcional; (c) nunca guardar credenciais/hashes (proibir no codigo e
+    documentar).
+Pronto quando: um grep encontra zero acessos directos a localStorage fora de
+safeStorage (excepto a chave de cache de credenciais, que sera removida).
+Esforco: M.  Liga: SEG-04, COD-03.
+
+--------------------------------------------------------------------------------
+PB-09  LoginPanel.tsx (608 linhas) — bloco a bloco
+--------------------------------------------------------------------------------
+Onde e acao:
+  :15-68 estado (username, password, lockout, captcha, contadores de sessoes).
+        Remover :34-62 estado de lockout/CAPTCHA em localStorage -> passa a ser
+        por conta na base (SEG-05).
+  :70-116 efeitos: carregar definicoes e contagens de sessoes activas. Nao deve
+        expor quantos operadores/tecnicos estao ligados a qualquer visitante
+        (hoje mostra :30-31) — mostrar apenas depois de autenticado.
+  :117-253 handleLoginSubmit: manter a estrutura (validacao, migracao de hash,
+        mustChangePassword) e acrescentar: registo de tentativas na base,
+        mensagem generica de erro ("utilizador ou palavra-passe invalidos") e
+        bloqueio apos N falhas.
+  :254-292 handleChangePasswordSubmit: exigir minimo 10 e confirmar com a
+        palavra-passe actual (re-autenticacao).
+  :293-351 finalizeSession: BOM (termina sessoes anteriores, grava
+        active_sessions, heartbeat). Acrescentar: guardar apenas sessionId no
+        browser; nao gravar perfil no sessionStorage (liga PB-04).
+  :353-608 JSX: remover a lista de contadores publicos; aria-labels; mensagens
+        de bloqueio com tempo restante.
+Pronto quando: nao e possivel entrar com um utilizador eliminado numa maquina
+com cache; tentativas ficam registadas; politica nova em vigor.
+Esforco: M.  Liga: SEG-04, SEG-05.
+
+--------------------------------------------------------------------------------
+PB-10  firebaseDB.ts:3191-3285 — sessoes activas
+--------------------------------------------------------------------------------
+Onde: :3191 getActiveSessions, :3204 terminatePreviousSessions, :3249
+heartbeat, :3262 saveActiveSession, :3272 removeActiveSession, :3278
+clearActiveSessions.
+Fazer:
+  - Heartbeat: hoje actualiza a hora; acrescentar expiracao real (sessao sem
+    heartbeat > 10 min deixa de ser valida e e removida).
+  - terminatePreviousSessions: garantir que so termina sessoes do MESMO
+    utilizador e que registra auditoria.
+  - clearActiveSessions: exigir perfil tecnico na UI (TechnicalModule:255) e
+    deixar rasto.
+  - Acrescentar: sessoes por dispositivo (deviceHelper) para o dono ver "onde
+    estou ligado".
+Pronto quando: matar o browser e voltar 15 min depois obriga a novo login.
+Esforco: M.  Liga: SEG-04.
+
+--------------------------------------------------------------------------------
+PB-11  firebaseDB.ts:3286-3400 — definicoes e credenciais
+--------------------------------------------------------------------------------
+Onde: :3286 getDefaultSettings, :3296 getSettings, :3324 saveSettings, :3331
+getCredentials, :3372 saveCredential, :3387 deleteCredential.
+Fazer (correccao critica — ver PC-30 a PC-34):
+  - :3286 tirar stockPasswordHash '05082' (vazio).
+  - :3296 separar "nao existe" de "falhou" (nunca gravar em catch).
+  - :3331 remover o bloco que cria usr-admin-inicial com hash fixo.
+  - :3331 adicionar cache com TTL e revalidacao (SEG-04); nunca devolver cache
+    quando a base respondeu.
+  - :3387 deleteCredential: invalidar cache em TODOS os dispositivos (solved by
+    PB-03; interino: tokenVersion por utilizador e recusa de login se local <
+    remoto).
+Pronto quando: apagar utilizador impede login na maquina onde ja tinha entrado
+(com rede); griot 05082 = 0.
+Esforco: M.  Liga: SEG-04, BD-02, BD-03, SEG-03.
+
+--------------------------------------------------------------------------------
+PB-12  Auditoria — coerencia de quem/quando/de onde
+--------------------------------------------------------------------------------
+Onde: firebaseDB.ts:3174 addAuditLog, :3072-3173 leitura/arquivo; chamadas em
+PDVModule.tsx:1459, App.tsx:166/333/409, FaturasModule.tsx:466
+Fazer:
+  - Um unico helper buildAuditEntry(user, action, details) que preenche:
+    username, role, timestamp ISO, ip (getClientIp ou "N/D"), deviceId, e
+    sessionId. Substituir os 4 pontos com '127.0.0.1'.
+  - Garantir que a auditoria de accoes de dinheiro inclui os valores antes/depois.
+  - Teste: cada tipo de accao sensivel produz exactamente um registo.
+Pronto quando: grep 127.0.0.1 em contexto de auditoria = 0; relatorio de
+auditoria mostra IP real ou N/D.
+Esforco: P.  Liga: SEG-07, FIA-03.
+
+
+================================================================================
+4. BLOCO C — CAMADA DE DADOS: firebaseDB.ts (3.844 linhas, ~140 metodos)
+================================================================================
+Um metodo por linha de accao. Os que resolvem achados criticos estao marcados.
+Leitura: "MANTER" = nao mexer agora; "ALTERAR" = ha trabalho; "CRIAR" = falta.
+
+C.1 INFRAESTRUTURA E AUTENTICACAO
+
+  PC-01  :1-130 imports, interfaces, InsufficientStockError (:132).
+         MANTER. Acrescentar export do tipo dos erros para tratamento uniforme.
+  PC-02  :140-278 campos privados, caches (productsCache, salesCache,
+         customersCache, settingsCache) e constantes de chaves de localStorage.
+         ALTERAR: cache com versao + TTL (PB-08); retirar a chave
+         "agro_credentials_cache" (:330/:3335/:3349).
+  PC-03  :279 init (initializeApp, appCheck?, signInAnonymously, ping).
+         ALTERAR: ver PB-02; falha de auth deve ser erro explicito.
+  PC-04  :424-451 enableLiveCatalogAndSalesSync.
+         ALTERAR (DES-01) — com substituto obrigatorio. Razao: a actualizacao
+         ENTRE POSTOS vem apenas destes listeners (8 componentes reagem so ao
+         evento local "db-update", que e disparado pela propria maquina que
+         escreve). Remover sem substituto = vender com stock desactualizado.
+         Desenho aprovavel:
+           (a) vendas: listener filtrado por dateKey == hoje;
+           (b) um unico doc settings/sync_pulse actualizado a cada escrita, para
+               os outros postos saberem que algo mudou (leitura baratissima);
+           (c) refresh do stock visivel a cada 30 s ou ao receber o pulso;
+           (d) catalogo por paginas, sem imagens base64 no documento;
+           (e) corrigir getSales (PC-22): fora a condicao length >= 0.
+         Sem (a)-(c) escritos no PR, nao aprovar.
+
+  PC-05  :454-529 fila de auditoria pendente (getPendingAuditLogs,
+         savePendingAuditLogs, queueAuditLog, removePendingAuditLog,
+         flushPendingAuditLogs, doFlushPendingAuditLogs).
+         MANTER (bom desenho) e acrescentar: limite de tamanho, expiracao e
+         aviso ao utilizador quando ha logs por enviar ha > 1 hora.
+  PC-06  :530-559 ensureAuth. ALTERAR: ver PB-02.
+  PC-07  :561-601 getDateRangeConstraints. MANTER. Cobrir com testes de
+         extremos (inicio/fim de mes, fusos horarios: usar ISO com Z).
+  PC-08  :602-617 sanitizeData. MANTER. Confirmar que remove undefined e
+         Timestamps, nao datas string.
+  PC-09  :618-632 upsert. MANTER; acrescentar updatedAt e updatedBy (hoje
+         depende do chamador).
+  PC-10  :633-656 upsertBatch. ALTERAR: usar writeBatch com lotes de 400
+         (limite 500) e devolver contagens/rejeicoes; hoje e o ponto por onde
+         passam reescritas massivas (BD-01).
+  PC-11  :657-674 deleteRow. ALTERAR (revisto em 09/11 — ver REVISAO H-03):
+         manter deleteRow como primitivo, mas proibir o seu uso nas colecções
+         de negocio (products, employees, customers, transformations) e trocar
+         esses chamadores por deactivate(). NAO aplicar soft-delete a tudo:
+         paused_sales e active_sessions devem continuar a ser apagados a serio.
+  PC-12  :675-685 sanitizeProduct. MANTER; garantir que nao inventa campos.
+
+C.2 PRODUTOS
+
+  PC-13  :686-719 getProducts. CRITICO. ALTERAR (BD-01): getAllOrFail, semear
+         apenas em instalacao nova confirmada, nunca quando ha vendas.
+  PC-14  :720-736 getLowStockProducts. MANTER; usar indice/limite.
+  PC-15  :737-757 getProductsPage. MANTER (paginacao correcta) e passa a ser o
+         caminho principal do catalogo no PDV (DES-01).
+  PC-16  :758-764 saveProduct. ALTERAR: validar campos obrigatorios (code
+         unico, unit, prices > 0), registar auditoria, invalidar cache.
+  PC-17  :765-792 deductProductStock. ALTERAR: verificar se ainda e usado
+         (a venda usa addSaleWithStockDeduction). Se nao, remover — duas vias
+         de baixar stock e o caminho para stock errado.
+  PC-18  :793-798 saveProducts. ALTERAR: so para migracao; nunca a partir de UI
+         normal. Marcar @internal.
+  PC-19  :799-811 deleteProduct. ALTERAR: soft-delete + bloquear se houver
+         vendas (ou permitir arquivar).
+  PC-20  :812-850 getProductUsage. MANTER; usar para decidir soft-delete.
+  PC-21  :851-911 deactivateProduct / :912-952 reactivateProduct.
+         MANTER (boa pratica) e usar como caminho oficial de "eliminar".
+
+C.3 VENDAS E NUMERACAO
+
+  PC-22  :953-974 getSales. ALTERAR (DES-01): remover a condicao
+         salesCache.length >= 0 (:954) e o refetch total; aceitar filtro por
+         data e limite por omissao (ex.: 500).
+  PC-23  :975-993 getSalesPage. MANTER (bom; usar no PDV e nas Faturas).
+  PC-24  :994-1008 getSalesForPeriod. MANTER.
+  PC-25  :1009-1074 getSalesSummary. ALTERAR: passar a devolver tambem
+         contagens de canceladas e proformas separadas (reporting.ts ja sabe
+         fazer isso; centralizar aqui).
+  PC-26  :1075-1091 nextDocumentNumber. MANTER (numeracao transaccional
+         correcta). Documentar que e a UNICA via.
+  PC-27  :1092-1132 nextDocumentNumberByKind. MANTER e NOTAR: hoje nao e
+         usada (PDV usa a anterior). Escolher uma e apagar a outra — duas
+         funcoes de numeracao e risco de series divergentes.
+  PC-28  :1133-1198 payInvoiceWithReceipt. MANTER. Cobrir com testes de
+         pagamento parcial/total e de concorrencia.
+  PC-29  :1199-1234 addSale. ALTERAR: garante coerencia de totais
+         (subtotal - desconto + IVA = total) e grava amountReceived/changeGiven
+         (NEG-02). Recusar se a soma das linhas nao bater.
+  PC-30  :1235-1379 addSaleWithStockDeduction. MANTER (e o melhor codigo).
+         Acrescentar: (a) validacao dos totais antes da transaccao (total tem de
+         ser igual a soma das linhas menos descontos — sem IVA somado, D1);
+         (b) taxRate por linha e ivaAmount extraido; (c) costUnknown quando nao
+         ha custo; (d) criacao da divida na mesma transaccao (NEG-06/PC-41);
+         (e) verificar limite de credito do cliente (D3/PD-35).
+  PC-31  :1396-1512 cancelSaleWithStockRestoration. MANTER. Acrescentar:
+         nota de credito referenciada e auditoria com valores; confirmar
+         idempotencia com teste concorrente.
+
+C.4 STOCK
+
+  PC-32  :1513-1724 applyCutoff (corte de inventario).
+         REVER com o dono: qual e a regra de negocio? Documentar em PF-xx e
+         testar cenarios; hoje e o fluxo menos compreendido do sistema.
+  PC-33  :1725-1844 adjustStock. MANTER (transaccional, com motivo e auditoria);
+         acrescentar limite de variacao (ex.: > 30% exige gestor) e motivo
+         obrigatorio de lista fechada.
+  PC-34  :1845-1946 registerLoss. MANTER; validar valor de custo desconhecido
+         (nao gravar 0 silencioso).
+  PC-35  :1947-2032 expireProductBatch. MANTER.
+  PC-36  :2033-2145 applyPhysicalCount. MANTER; acrescentar resumo
+         (faltas/sobras em quantidade e valor) e bloqueio de contagens
+         simultaneas (lock por documento).
+  PC-37  :2146-2208 updateProductPrices. ALTERAR: exigir perfil, registar
+         preco anterior/novo por artigo (hoje quem audita nao ve o antes).
+  PC-38  :2209-2302 requisitionSacks. MANTER; e a unica ponte para "armazem".
+         Documentar que NAO e transferencia entre locais.
+  PC-39  :2303-2313 getProductStock. MANTER.
+
+C.5 DIVIDAS E CAIXA
+
+  PC-40  :2314-2326 getDebts. MANTER; acrescentar filtros (em aberto/atrasadas)
+         e totais.
+  PC-41  :2327-2367 createDebtFromSale. CRITICO DE NEGOCIO: hoje sem
+         chamadores (NEG-06). Chamar em PC-30 e criar migracao para vendas
+         antigas em divida.
+  PC-42  :2368-2511 settleDebt. MANTER (solido). Acrescentar: recibo de
+         cobranca impresso e ligacao ao fecho de caixa.
+  PC-43  :2512-2525 getCashMovements. MANTER; paginar (cresce sem limite).
+  PC-44  :2526-2541 addCashMovement. ALTERAR: exigir que exista sessao de
+         caixa aberta (PD-14) e validar sinal/limite.
+  PC-45  :2542-2556 getLosses. MANTER; paginar.
+
+C.6 LIVRO DE MOVIMENTOS
+
+  PC-46  :2557-2582 recordStockMovements. MANTER (livro imutavel — bom).
+  PC-47  :2583-2594 flushStockMovementsQueue. MANTER; acrescentar aviso quando
+         ha fila pendente (o stock pode estar "atrasado" em relacao a vendas).
+  PC-48  :2595-2604 getStockMovements. MANTER; nunca devolver tudo sem limite.
+  PC-49  :2605-2624 addLoss. ALTERAR: verificar sobreposicao com registerLoss
+         (:1845). Duas vias de registar quebra = duas verdades. Unificar.
+
+C.7 TRANSFORMACOES
+
+  PC-50  :2625-2638 getTransformations / saveTransformation.
+         MANTER.
+  PC-51  :2639-2655 deleteTransformation. ALTERAR: proibir apagar
+         transformacao aplicada; usar cancelamento (:2897).
+  PC-52  :2656-2896 addTransformationWithStockUpdate. MANTER (aritmetica de
+         custo equilibrada); acrescentar teste de conservacao de valor e de
+         perdas de transformacao.
+  PC-53  :2897-3038 cancelTransformationWithStockReversal. MANTER; testar
+         cancelamento duplo.
+
+C.8 RECURSOS HUMANOS
+
+  PC-54  :3040-3057 getEmployees/saveEmployee/deleteEmployee.
+         ALTERAR: deleteEmployee -> soft-delete (ou bloquear se houver
+         pagamentos); validar NUIT/INSS.
+  PC-55  :3058-3071 getAttendance/saveAttendance. MANTER.
+  PC-56  :3396-3409 getPayrollPayments/savePayrollPayment. MANTER; acrescentar
+         recibo e ligacao ao fecho de caixa (pagamento em dinheiro) e ao
+         extracto bancario.
+  PC-57  (fora deste ficheiro) HRModule.tsx:269-327 gravar 3 funcionarios
+         ficticios: REMOVER (NEG-13).
+
+C.9 AUDITORIA
+
+  PC-58  :3072-3077 getAuditLogs. ALTERAR: paginar (hoje devolve tudo).
+  PC-59  :3078-3093 getAuditLogsPage. MANTER.
+  PC-60  :3094-3114 getAuditLogsForPeriod. MANTER.
+  PC-61  :3115-3173 archiveAuditLogsBefore. ALTERAR: mover para servidor
+         (funcao) para poder negar delete no cliente (FIA-03).
+  PC-62  :3174-3190 addAuditLog. MANTER; usar PC-12 (helper) para coerencia.
+
+C.10 SESSOES, DEFINICOES, CREDENCIAIS (ver PB-10/PB-11)
+  PC-63  :3191-3285 sessoes (5 metodos). Ver PB-10.
+  PC-64  :3286-3295 getDefaultSettings. ALTERAR: sem 05082.
+  PC-65  :3296-3323 getSettings. CRITICO: nao gravar em catch.
+  PC-66  :3324-3330 saveSettings. MANTER; validar campos e auditoria.
+  PC-67  :3331-3371 getCredentials. CRITICO: sem criacao automatica de admin,
+         sem cache eterna.
+  PC-68  :3372-3386 saveCredential. ALTERAR: validar politica, unicidade de
+         username, e invalidar cache.
+  PC-69  :3387-3395 deleteCredential. ALTERAR: invalidar sessoes activas desse
+         utilizador e cache remota (tokenVersion).
+
+C.11 CLIENTES E VENDAS SUSPENSAS
+
+  PC-70  :3410-3419 getCustomers/saveCustomer/deleteCustomer.
+         ALTERAR: deleteCustomer -> soft-delete se tiver vendas; deduplicar por
+         NUIT/telefone.
+  PC-71  :3420-3437 getPausedSales/savePausedSale/deletePausedSale.
+         MANTER; acrescentar expiracao (carrinho suspenso ha 7 dias).
+
+C.12 BACKUP E MANUTENCAO
+
+  PC-72  :3438-3505 exportAllData. CRITICO: incluir cash_movements, debts,
+         stock_movements, counters, cash_sessions (FIA-01).
+  PC-73  :3506-3557 importAllData. CRITICO: validar schema, pre-visualizar,
+         exportar estado actual antes, e recusar ficheiros parciais.
+  PC-74  :3558-3615 autoBackupToLocalStorage. ALTERAR: deixar de ser o
+         "backup" principal; passar a ser cache de emergencia; avisar o
+         utilizador que NAO substitui backup externo.
+  PC-75  :3616-3663 clearSystemData. ALTERAR: exigir perfil tecnico, backup
+         automatico imediatamente antes, e lista do que vai apagar com
+         contagem.
+  PC-76  :3664-3778 reconcileStock. MANTER (util) e transformar em
+         ferramenta de diagnostico com relatorio exportavel.
+  PC-77  :3779-3784 isSSEActive/getPendingCount/getLastSyncTime.
+         APAGAR (COD-05) ou substituir por valores reais.
+  PC-78  :3789-3824 carrinho activo (activeCartKey, saveActiveCart,
+         getActiveCart, clearActiveCart). MANTER; por utilizador e por posto.
+  PC-79  :3825-3834 isConfigured/getFirebaseConfig/setFirebaseConfig/
+         clearFirebaseConfig/testConnection/syncAllWithFirebase.
+         APAGAR os que mentem (testConnection devolve sucesso fixo, :3829-3831);
+         remover setFirebaseConfig/clearFirebaseConfig (nao fazem nada).
+  PC-80  :3835-3843 resetProductsToInitial. CRITICO: remover da API publica
+         (BD-04). Se ficar para testes, mover para ficheiro de testes.
+
+C.13 O QUE FALTA NA CAMADA DE DADOS (coleccoes/funcoes novas)
+
+  PC-81  cash_sessions + cash_closures (abertura e fecho de caixa) — PD-14.
+  PC-82  suppliers + purchase_orders + purchase_receipts (compras) — PD-18.
+  PC-83  stock_locations + transfers (armazem) — PD-19.
+  PC-84  employee_damages (hoje em localStorage) — PD-13.
+  PC-85  offline_sales_queue (fila local de vendas) — PD-20.
+  PC-86  getAllOrFail, assertTotalsMatch, withRetry — utilitarios internos.
+  PC-87  customers: creditLimit, creditTermDays, creditBlocked, notes —
+         campos novos para a politica de credito (D3). Migracao em M-07.
+  PC-88  getDebtStatus(customerId): total em aberto, vencido, dias de atraso —
+         consulta unica usada pelo PDV e pelo mapa de dividas.
+  PC-89  cash_sessions e cash_closures (D5): turno, abertoPor, abertoEm,
+         saldoTransportado, fechadoPor, conferidoPor, contagem por metodo,
+         diferenca, justificacao, estado (aberta/fechada), e ligacao a cada
+         movimento de cash_movements por cashSessionId. Imutavel depois de
+         fechada (regra de Firestore).
+
+
+================================================================================
+5. BLOCO D — UTILITARIOS E REGRAS DE NEGOCIO (src/utils, 39 ficheiros)
+================================================================================
+Cada ficheiro com o que fazer. Os que nao aparecem com problema: MANTER + teste.
+
+  PD-01  firebaseDB.ts ....... ver BLOCO C (nao repetido aqui).
+  PD-02  pdfGenerator.ts (1.629 l.) — o maior risco de "documento errado".
+         Blocos: :19-57 getLogoBase64, :58-77 getCompanyDefaults, :78-101
+         getDocTitle/fmtMT/fmtDate, :102-313 downloadInvoiceA4, :314-439
+         renderInvoiceFooter, :440-729 downloadReceiptA4, :730-943
+         downloadThermalReceipt, :944-988 downloadDuplicatedInvoiceA4,
+         :989-1098 renderCompactInvoice, :1099-1259 downloadCreditNoteA4,
+         :1260-1411 downloadSalesReportPDF, :1412-1605
+         downloadPeriodSalesReportPDF, :1606-1617 downloadDailySalesReportPDF,
+         :1618-1629 downloadInvoicePDF.
+         Fazer: (a) uma unica funcao de IVA (PD-04) usada por todos; (b) remover
+         "IVA (16%)" literal (:373-384, :647-654, :878-880, :1113-1116) e
+         escrever "IVA incluido (16%)" com o valor EXTRAIDO do preco (D1), em
+         todos os formatos; o total impresso nunca inclui IVA somado; (c) QRCodes/assinatura se exigido
+         fiscalmente (confirmar em PF-01); (d) escapar texto do utilizador nos
+         PDFs (nomes com caracteres especiais); (e) testes de snapshot de
+         valores (nao de imagem): total, IVA, troco, NUIT em cada formato;
+         (f) remover duplicacao entre A4/Recibo/A5 (hoje 3 implementacoes da
+         mesma tabela de itens: :180-260, :500-600, :1000-1090).
+         Esforco: M/G. Liga: NEG-03, UX-01.
+  PD-03  saleTotals.ts (52 l.) — :1-52. ALTERAR (D1 RESPONDIDA: o preco de
+         revenda JA INCLUI o IVA). Regra nova, uma so:
+           total   = subtotal - descontos          (nada e somado por cima)
+           iva     = total - total / (1 + taxa)    (IVA extraido, nao acrescido)
+           base    = total - iva
+         O parametro includeIva deixa de somar: passa a significar
+         "discriminar o IVA no documento" e nao altera o total em nenhum caso.
+         Consequencia directa: hoje, com o botao ligado (:125), o cliente paga
+         16% acima do preco de prateleira; com o botao desligado, o IVA nao fica
+         registado. As duas situacoes acabam com esta accao.
+         Testes: preco 116 -> base 100 + iva 16 + total 116; preco 100 -> base
+         86,21 + iva 13,79 + total 100; desconto por linha e global; centimos.
+         Liga: NEG-03, D1.
+  PD-04  taxHelper.ts (69 l.) — :1-69. ALTERAR: a funcao passa a EXTRAIR o IVA
+         (gross * taxa / (100 + taxa)) em vez de o somar ao preco, e passa a ser
+         a unica usada no PDV, nos PDF e nos relatorios. taxRate por linha vem
+         do produto (omissao 16%, ver M-01).
+         Pronto quando: total do ecra = soma dos precos; IVA apresentado como
+         "IVA incluido (16%)"; mapa de IVA = soma das extraccoes.
+         Liga: NEG-03, D1.
+  PD-05  priceHelper.ts (132 l.) — :1-132. ALTERAR: getUnitCost devolve null
+         quando desconhecido (:30-40), nao 0; documentar a regra de derivacao
+         quilo/saco; testes com produto sem custo. Liga: NEG-04.
+  PD-06  stockMath.ts (119 l.) — MANTER (bem testado). Acrescentar testes de
+         limites (0, negativo, decimal, lote hibrido).
+  PD-07  stockGuard.ts (80 l.) — MANTER; verificar que TODAS as escritas de
+         stock passam por aqui (grep setDoc em componentes).
+  PD-08  sequenceHelper.ts (130 l.) — MANTER; confirmar uso exclusivo de
+         counters.
+  PD-09  cashBox.ts (81 l.) — ALTERAR: contar dinheiro dentro de pagamentos
+         multiplos (:54-81) e descontar reembolsos; base para o fecho (PD-14).
+         Liga: NEG-05.
+  PD-10  debts.ts (98 l.) — MANTER; alinhar tipos com createDebtFromSale.
+  PD-11  reporting.ts (262 l.) — MANTER (separacao correcta de canceladas).
+         Acrescentar funcoes para o dashboard real (PD-15) e para o IVA.
+  PD-12  financeData.ts (69 l.) — ALTERAR: remover qualquer valor simulado;
+         garantir que agregacoes usam reporting.ts (uma so verdade).
+  PD-13  HR: hrCalculations.ts (149 l.) — ADIADO por decisao do dono
+         (09/11/2026): "a questao de salarios ainda nao devemos mexer". Nao se
+         altera o calculo, os escaloes nem a isencao por dependentes enquanto
+         nao houver tabela oficial do contabilista (P-04).
+         Mantem-se UMA accao minima, por honestidade:
+           - remover do recibo de salario a frase "total conformidade com as
+             tabelas oficiais" (HRModule.tsx:847) enquanto a tabela nao for
+             validada. 10 minutos. Nao muda nenhum valor pago.
+         Continua pendente: employeeDamages (localStorage -> Firestore), que
+         nao mexe no calculo, so no sitio onde o registo vive.
+  PD-14  NOVO utils/cashSessions.ts — fecho POR TURNO (D5 decidida):
+         - cada mudanca de turno fecha a sessao anterior e abre a seguinte;
+         - SEM fundo fixo declarado: a abertura de um turno e o valor contado
+           no fecho do turno anterior (transporte do saldo). No primeiro turno
+           do dia, e a contagem fisica de abertura;
+         - SEM tolerancia: toda a diferenca, por pequena que seja, e registada
+           com justificacao escrita. Nao existe "quebra aceitavel";
+         - assinaturas: quem conta + quem confere (dois nomes, nao um);
+         - contagem por metodo (dinheiro, M-Pesa, transferencia, E-Mola);
+         - SALARIOS NAO ENTRAM no fecho: sao pagos a partir do banco
+           (decisao do dono). Reembolsos ao cliente e sangrias entram;
+         - fecho fechado nao se altera: corrige-se com movimento contrario.
+         Liga: NEG-05, D5.
+  PD-15  NOVO utils/dashboardData.ts — KPIs reais do dia (vendas, dinheiro,
+         M-Pesa, dividas, stock critico) para ligar DashboardModule (PD-24).
+  PD-16  dateRangeHelper.ts (179 l.) — MANTER; testes de viragem de mes/ano e
+         fuso horario (Africa/Maputo = UTC+2).
+  PD-17  paginationHelper.ts (88 l.) — MANTER; usar em getAuditLogs,
+         getCashMovements, getLosses (hoje sem limite).
+  PD-18  NOVO utils/purchases.ts — fornecedores, encomendas, recepcao, custo
+         medio ponderado. Liga: NEG-11.
+  PD-19  NOVO utils/warehouse.ts — localizacoes e transferencias com autor.
+         Liga: NEG-07.
+  PD-20  NOVO utils/offlineQueue.ts — fila de vendas quando nao ha rede, com
+         numeracao provisoria e reconciliacao. Liga: NEG-08.
+  PD-21  errorHelper.ts (191 l.) — MANTER (bom) e usa-lo em TODOS os catch
+         (ver PD-27).
+  PD-22  postCommit.ts (43 l.) — MANTER.
+  PD-23  securityHelper.ts, authorization.ts, roleHelper.ts, safeStorage.ts —
+         ver BLOCO B (PB-06 a PB-08).
+  PD-24  credentialsReset.ts (119 l.) — ALTERAR: remover hashes fixos por
+         utilizador (:30-40); manter so a logica de "primeira instalacao".
+         Liga: SEG-03, BD-03.
+  PD-25  migrateStock.ts (142 l.) — MANTER como ferramenta de migracao;
+         marcar @internal e exigir backup antes de correr.
+  PD-26  inventoryCutoff.ts (473 l.) — REVER com o dono (regra de negocio
+         obscura); testes ja existem (test/inventory_cutoff_test.ts) — completar
+         com casos reais de loja.
+  PD-27  Passagem transversal "nunca falhar em silencio":
+         ficheiros: firebaseDB.ts:701, :3318, :3806-3818, :2571-2579;
+         StockModule.tsx (varios catch), TechnicalModule.tsx:1465.
+         Fazer: substituir catch vazio por erro com describeError + toast
+         accionavel; nos casos de escrita secundaria, fila + aviso.
+         Pronto quando: grep -c "catch {" vazio = 0 nos caminhos de negocio.
+         Liga: FIA-02.
+  PD-28  Utilitarios pequenos a MANTER com teste de caracterizacao:
+         productMatch.ts (71), unitHelper.ts (48), categoryHelper.ts (97),
+         categories.ts (76 — decidir qual fica, ver PH-03), clientInfo.ts (38),
+         companyInfo.ts (25 — duplicado, ver PH-03), confirmDialog.ts (74),
+         deviceHelper.ts (36), idHelper.ts (23), losses.ts (38),
+         numberToWords.ts (93 — usado nos PDFs? confirmar), reportExporter.ts
+         (156), saleStatus.ts (56 — incluir newSaleStatus, ver PD-29),
+         saleDuplicates.ts (107 — codigo morto, ver PH-02),
+         numberingAudit.ts (80 — codigo morto, ver PH-02), posHardware.ts (270 —
+         testar com impressora real e fallback quando Web Serial nao existe).
+  PD-29  saleStatus.ts + PDVModule.tsx:127 newSaleStatus — decidir o
+         comportamento "emitir sem receber" e usa-lo (NEG-01). Uma so fonte de
+         estados: 'Paga' | 'Pendente' | 'Credito' | 'Cancelada' | 'Proforma'.
+  PD-30  indexedDB.ts (2.008 l.) — APAGAR (PH-01). Nenhum import.
+  PD-31  script de higiene: verificar semanalmente com grep que nao voltaram
+         a entrar segredos (05082, gestor123, 2000SC, 131923) — pode ser um
+         teste (PG-18).
+  PD-36  NOVO utils/shifts.ts — definicao de turnos (hora de inicio/fim,
+         responsavel), resolucao do turno corrente e regra de transporte de
+         saldo entre turnos. Ponto unico: nenhuma venda sem turno aberto
+         (avisa) e nenhum fecho sem contagem.
+         Liga: D5, PD-14.
+  PD-35  NOVO utils/creditPolicy.ts — politica de credito (D3 RESPONDIDA):
+         limite por cliente, prazo, autorizacao acima do limite e bloqueio de
+         atrasados. API:
+           canSellOnCredit({ customer, openDebts, saleTotal }) ->
+             { allowed, reason, requiresManager }
+           defaultLimit = 20.000 MT · termDays = 30
+           acima do limite -> requiresManager = true (senha de gerencia)
+           cliente com divida vencida ha > 30 dias -> allowed = false
+         Testes: limite exacto, excedido por 0,01, cliente sem dividas, cliente
+         atrasado, cliente isento de limite (limit = null).
+         Liga: NEG-06, D3.
+  PD-33  NOVO utils/backupExterno.ts — backup diario FORA do browser:
+         export completo (PC-72) enviado para Firebase Storage (ou descarregado
+         automaticamente), com 30 copias de retencao, nome datado e verificacao
+         de integridade (contagem de registos por coleccao vs base). O
+         localStorage deixa de ser chamado "backup" e passa a "cache de
+         emergencia". Alerta ao dono se um backup falhar 2 dias seguidos.
+         Esforco: M. Liga: FIA-01.
+  PD-34  NOVO utils/migrations.ts — runner de migracoes/backfill com
+         --dry-run, contagem antes/depois e registo em audit_logs. Usado por
+         M-01..M-06 (secao 15). Sem ele, cada PR de dados inventa o seu script.
+         Esforco: M. Liga: secao 1.6.
+
+
+================================================================================
+6. BLOCO E — MODULOS DE INTERFACE
+================================================================================
+Cada modulo: blocos de logica (funcoes) + blocos de interface (seccoes e modais),
+com linha real de inicio. Onde digo "JSX geral", aplicam-se as regras 1.4.
+
+--------------------------------------------------------------------------------
+PE-01  PDVModule.tsx (4.705 linhas) — o modulo mais critico
+--------------------------------------------------------------------------------
+
+  Blocos de logica:
+  :26-107  props + ~50 estados + refs. ALTERAR: agrupar em um reducer
+           (useReducer) por dominio (carrinho, pagamento, modais). Reduz erros
+           de estado inconsistente (ex.: total calculado com carrinho antigo).
+  :108-141 askConfirmation. MANTER.
+  :142-228 carrinho guardado (restoreActiveCart, discardSavedCart,
+           getSavedCartTotal). ALTERAR: guardar por utilizador e por posto;
+           expirar; confirmar antes de substituir carrinho actual.
+  :229-282 operacoes do carrinho retroactivo. MANTER; extrair para hook comum
+           com o carrinho normal (hoje sao duas implementacoes).
+  :283-779 handleFinalizeRetroactiveSale (497 linhas!). DIVIDIR em:
+           validarDados -> construirVenda -> validarTotais -> gravar -> imprimir.
+           Corrigir aqui: totais (NEG-02/03), custo (NEG-04), estado (NEG-01).
+  :780-834 loadPDVData. ALTERAR: nao chamar enableLiveCatalogAndSalesSync
+           (DES-01); carregar catalogo leve paginado + vendas do dia.
+  :835-842 showToast. MANTER (usar sempre; hoje ha setToastMessage disperso).
+  :843-892 cliente (handleSaveCustomer, handleSelectCustomer). ALTERAR:
+           validar NUIT/telefone, evitar duplicados, confirmar dados fiscais.
+  :893-1003 pausar/retomar/apagar venda suspensa. MANTER; acrescentar aviso
+           "existe carrinho suspenso com X MT".
+  :1004-1112 leitura de codigo de barras (normalizeCode, handleBarcodeSubmit,
+           handleAssociateBarcode). MANTER (bom); acrescentar: se o codigo nao
+           existe, oferecer criar produto (hoje so avisa); impedir codigos
+           duplicados na base (validar no saveProduct).
+  :1113-1262 carrinho (addToCart, updateCartQty, removeFromCart,
+           updateCartDiscount, getSubtotal/Discount/Total).
+           ALTERAR: validar stock ao adicionar E ao finalizar (hoje valida em
+           sitios diferentes); limite de desconto por linha (30%) e por venda.
+  :1263-1295 beep + downloadInvoicePDF. MANTER (postCommit).
+  :1296-1556 handleFinalizeSale (261 linhas). CORRECCOES OBRIGATORIAS:
+           (a) :1374-1395 estado por pagamento e nao por formato (NEG-01);
+           (b) :1397-1399 validar soma do multiplo (NEG-02);
+           (c) :1401-1422 gravar amountReceived/changeGiven (NEG-02);
+           (d) :1363 custo desconhecido = null (NEG-04);
+           (e) :1075-1085 garantir numeracao unica (PC-26/27);
+           (f) :1459 IP real (SEG-07);
+           (g) dividir em 4 funcoes < 40 linhas.
+  :1557-1723 handlePayInvoice / handleCancelInvoice / handleRestoreInvoice.
+           DECISAO: apagar (nao renderizados) OU ligar com senha de gestor.
+           Recomendacao: apagar — FaturasModule ja faz isto bem.
+  :1724-1778 camera/scanner (simulateCameraScan, applyScanResult).
+           MANTER; verificar que html5-qrcode e libertado no unmount (cameras
+           ficam ligadas e o browser aquece).
+
+  Blocos de interface (JSX 1779-4705):
+  :1779-1865 cabecalho, separadores e indicadores. MANTER + aria.
+  :1866-3829 ecra de vendas: pesquisa de produto, grelha/lista, painel do
+           carrinho, pagamento. ALTERAR: (a) mostrar estado do IVA por linha;
+           (b) mostrar "sem ligacao" com o que fazer (NEG-08); (c) reduzir
+           cliques: quantidade editavel na linha, sem modal.
+  :3830-3976 modal de cliente. MANTER; acessibilidade.
+  :3977-4069 modal de vendas suspensas. MANTER.
+  :4070-4290+ modal retroactivo (venda manual). MANTER; separar campos
+           obrigatorios (data, n.º doc) e opcionais; validar duplicados por
+           numero de documento antes de gravar.
+  :restantes modais (impressora, confirmacao, troco). Uniformizar com
+           DialogHost/ConfirmDialog existentes.
+
+  Esforco total do modulo: G (3-4 dias). Liga: NEG-01, NEG-02, NEG-03,
+  NEG-04, NEG-08, DES-01, SEG-07, COD-01, COD-02.
+
+--------------------------------------------------------------------------------
+PE-02  StockModule.tsx (4.682 linhas)
+--------------------------------------------------------------------------------
+  :29-43 CATEGORIAS_BASE. MANTER (ou mover para utils/categories).
+  :44-191 estado + carga inicial. ALTERAR: reduzir estados; carregar por
+         paginas (DES-01).
+  :192-284 eliminar produto (handleConfirmDeleteProduct). ALTERAR: soft-delete
+         (PC-19); mostrar quantas vendas usam o artigo antes de confirmar.
+  :285-341 contagem fisica (handleApplyPhysicalInventory). MANTER (bom:
+         senha + transaccao); acrescentar lock contra contagens simultaneas.
+  :342-354 askConfirmation. MANTER.
+  :355-419 geradores de codigo/referencia. MANTER; garantir unicidade.
+  :420-530 regerar referencias (todas / seleccionadas). ALTERAR: senha de
+         gestor + guardar anterior (NEG-15).
+  :531-591 loadInventoryData. ALTERAR: paginacao e nao sync total.
+  :592-628 expirar lote (handleExpireProduct). MANTER (com senha).
+  :629-643 describeSnapshot + toast. MANTER.
+  :644-822 formulario de produto (handleAddProduct). ALTERAR: validacao
+         (preco>0, custo<=preco avisado, stock inicial inteiro para saco,
+         taxRate escolhido), impedir codigo duplicado, e nao aceitar imagens
+         base64 grandes (:3492-3497 no JSX) — usar Storage (DES-01).
+  :823-895 regerar codigos de barras (um / seleccionados / todos).
+         ALTERAR: senha + reversibilidade (NEG-15).
+  :896-1618 exportacoes PDF (stock baixo, alterados recentemente, por
+         categoria, etiquetas). MANTER funcionalmente; corrigir: custos
+         desconhecidos nao devem aparecer como 0; etiquetas devem mostrar
+         preco com IVA correcto; dividir em servico (PE-01 padrao).
+  :1619-1658 ajuste inline de quantidade. MANTER (senha ja exigida).
+  :1659-1695 requisicao de sacos. MANTER; documentar que nao e armazem.
+  :1696-1730 handleResetOfficialCatalog. CRITICO: remover (BD-04).
+  :1731-1862 formulario de ajuste de stock. MANTER; motivo de lista fechada
+         e limite de variacao (PC-33).
+  :1863-1901 registar quebra. MANTER; custo desconhecido nao pode virar 0.
+  :1902-1946 badge de validade. MANTER.
+
+  JSX 1947-4682:
+  :1947-2158 cabecalho, filtros, metricas. MANTER.
+  :2159-2208 separadores (inventory/transformations/losses/reconciliation).
+  :2209-2239 faixa de produtos vencidos. MANTER (util).
+  :2240-2560 tabela de inventario. ALTERAR: coluna de custo honesta, preco com
+         IVA, ordenacao por coluna, seleccao em massa com barra de accoes.
+  :2561-2570 transformacoes; :2571-2745 quebras.
+  :2746-3212 reconciliacao. MANTER; exportar relatorio.
+  :3213-3309 modal de contagem fisica; :3310-3407 modal de eliminar;
+  :3408-3866 modal de novo/editar produto; :3867-4381 modal de ajuste;
+  :4382-4472 modal de quebra; :4473-4628 modal de requisicao;
+  :4629-4682 modal de movimentos.
+  Aplicar em TODOS: ConfirmDialog, foco preso, validacao antes de submeter,
+  e botao desactivado durante gravacao (evita duplo clique = duplo movimento).
+
+  Esforco: G (3-4 dias). Liga: BD-04, NEG-15, NEG-04, DES-01, COD-02.
+
+--------------------------------------------------------------------------------
+PE-03  FinanceModule.tsx (2.804 linhas)
+--------------------------------------------------------------------------------
+  :25-92 estado. ALTERAR: separar dados de apresentacao (hoje tudo junto).
+  :93-126 loadFinancials. ALTERAR: sem sync total; por periodo.
+  :127-189 registar movimento de caixa (sangria/entrada). MANTER; exigir
+         sessao de caixa aberta (PD-14) e motivo de lista fechada.
+  :190-250 toast + geracao de series do grafico. CRITICO DE HONESTIDADE:
+         :232-240 e mock (percentagens inventadas) — substituir por agregacao
+         real (PD-15). Liga: NEG-09.
+  :251-323 vendas filtradas por periodo (getFilteredSalesForReport).
+         MANTER; garantir que canceladas e proformas ficam de fora conforme
+         regra, e que a coluna "Comprado" (:2129-2137) desaparece ou passa a
+         usar stock_movements. Liga: NEG-10.
+  :324-328 handleCompileReport. MANTER.
+  :329-452 exportacao Excel do dashboard. ALTERAR: uma so fonte de calculo
+         (PD-11), sem custo 0.
+  :453-708 PDF financeiro. MANTER; corrigir rotulos de IVA.
+  :709-782 balancete. MANTER; confirmar nomenclatura contabilistica com o
+         contabilista.
+  :783-810 CSV do livro; :811-835 PDF do livro; :836-966 PDF de auditoria;
+         :967-1100 PDF de alertas de stock.
+         ALTERAR: paginar leitura, custo desconhecido explicito, e separar
+         "sem dados" de "erro de leitura".
+  :1101-1189 generateChartData. Alimentar com dados reais (PD-15).
+  :1190-1206 livro de vendas; :1207-1363 PDF do livro de vendas.
+
+  JSX 1364-2804:
+  :1364-1477 cabecalho e separadores (dashboard/reports/transformacoes/
+         ledger/alerts/auditoria).
+  :1478-1898 dashboard. ALTERAR: grafico real, KPIs do dia, divida em aberto,
+         dinheiro em caixa (apos PD-14).
+  :1899-2255 relatorios. MANTER; acrescentar comparacao com periodo anterior.
+  :2256-2372 transformacoes. MANTER.
+  :2373-2682 livro/ledger. MANTER; filtros e exportacao coerentes.
+  :2683-2732 alertas. MANTER.
+  :2733-2804 auditoria. MANTER; ligar ao modulo tecnico em vez de duplicar.
+
+  Esforco: M/G. Liga: NEG-09, NEG-10, NEG-03, NEG-05.
+
+--------------------------------------------------------------------------------
+PE-04  HRModule.tsx (2.450 linhas)
+--------------------------------------------------------------------------------
+  :32-53 helpers de datas. MANTER; usar dateRangeHelper (uma so verdade).
+  :54-81 estado. MANTER.
+  :82-203 dados dos graficos de produtividade. ALTERAR: calcular de
+         attendance real; se faltar, dizer "sem dados".
+  :204-263 marcar presenca/falta. MANTER; impedir duplicado por dia.
+  :264-349 loadData. CRITICO: :269-327 semeia 3 funcionarios ficticios
+         (NEG-13) — REMOVER. Nao semear dados de pessoas.
+  :350-356 showToast. MANTER.
+  :357-404 guardar funcionario. ALTERAR: validar NUIT (9 digitos), INSS,
+         IBAN/NIB, data de admissao, e impedir salario negativo.
+  :405-438 editar/eliminar. ALTERAR: eliminar -> soft-delete (histórico
+         salarial e disciplinar tem de sobreviver); confirmar com nome.
+  :439-456 reset do formulario. MANTER.
+  :457-501 guardar assiduidade. MANTER (validar sobreposicao de periodos).
+  :502-531 disciplinar. MANTER; guardar em Firestore (hoje mistura fontes).
+  :532-565 danos. ALTERAR: passar de localStorage para coleccao
+         employee_damages (PD-13) e ligar ao desconto.
+  :566-624 processar pagamento. MANTER; exigir caixa aberta, recibo, e
+         impedir pagar duas vezes o mesmo mes.
+  :625-679 calculateEmployeePayrollTotals. ALTERAR: usar hrCalculations
+         corrigido (PD-13) e mostrar a memoria de calculo ao utilizador
+         (salario bruto -> INSS -> IRPS -> descontos -> liquido).
+  :680-872 recibo de salario (PDF). ALTERAR: retirar a afirmacao "conformidade
+         total" (:847) enquanto a tabela nao for validada; incluir NUIT/INSS e
+         assinaturas.
+  :873-909 SISSMO; :910-968 declaracao INSS.
+         ALTERAR: exportar apenas dados reais, com validacao; marcar como
+         "rascunho a confirmar" enquanto nao houver validacao do contabilista.
+  JSX 969-2450: separadores employees/attendance/disciplinary/damages/
+         payroll/reports. Aplicar regras 1.4 e esconder campos sensiveis a
+         quem nao e RH.
+
+  Esforco: M/G. Liga: NEG-12, NEG-13, NEG-14.
+
+--------------------------------------------------------------------------------
+PE-05  FaturasModule.tsx (2.365 linhas)
+--------------------------------------------------------------------------------
+  :38-102 estado. MANTER.
+  :103-110 resolveSettings. MANTER.
+  :111-115 openPreview. MANTER.
+  :116-145 confirmacao + toast. MANTER.
+  :146-256 consulta e paginacao (getCurrentSalesQuery, loadData, loadMoreSales).
+         MANTER — e o melhor exemplo de paginacao do projecto; usar como
+         modelo nos outros modulos.
+  :257-287 cobrar factura (handlePayInvoice). MANTER; emitir recibo.
+  :288-375 emitir factura a partir de proforma. ALTERAR: garantir que o estado
+         passa a Paga/Pendente conforme pagamento e que a serie fiscal e a
+         correcta (numeracao por tipo).
+  :376-401 anular/restaurar (intencoes). MANTER.
+  :402-793 modal de accao de seguranca (390 linhas!). DIVIDIR em componentes:
+         pedido de senha, escolha de motivo, resumo de efeitos, confirmacao.
+         MANTER a logica (validacao, senha, reembolso, nota de credito).
+  :794-839 pesquisa e filtro por estado. MANTER; pesquisa por NUIT, n.º doc,
+         cliente e intervalo.
+  :840-894 somas por separador. MANTER (mostrar contagem e total).
+  :895-1004 exportacoes. ALTERAR: uma so fonte (reporting.ts).
+  JSX 1005-2365: tabela, separadores (Todas/Paga/Pendente/Credito?/
+         Proforma/Cancelada), pre-visualizacao, modais.
+         ALTERAR: mostrar sempre cliente, NUIT, total, pago e em divida;
+         marcar visualmente proformas; impedir anular factura com cobranca
+         parcial sem aviso claro.
+
+  Esforco: M. Liga: NEG-01, NEG-03, COD-02.
+
+--------------------------------------------------------------------------------
+PE-06  TechnicalModule.tsx (2.070 linhas)
+--------------------------------------------------------------------------------
+  :30-109 estado. MANTER.
+  :110-157 registos de auditoria (consulta + carga). ALTERAR: paginar
+         (PC-58) e filtros por utilizador/accao/data.
+  :158-235 loadAllData. MANTER; nao carregar tudo de uma vez.
+  :236-282 sessoes activas (terminar / limpar). MANTER; exigir confirmacao e
+         registar auditoria.
+  :283-327 arquivar logs. ALTERAR: mover para servidor (FIA-03).
+  :328-401 exportacoes de auditoria (PDF/Excel). MANTER.
+  :402-420 upload de logotipo. ALTERAR: limite de tamanho, validar tipo,
+         guardar em Storage (hoje base64).
+  :421-511 criar/editar utilizador. ALTERAR: politica de palavra-passe
+         (PB-06), perfil unico por pessoa, impedir criar segundo "admin".
+  :512-569 editar/eliminar utilizador. ALTERAR: impedir apagar o ultimo
+         tecnico; terminar sessoes ao eliminar.
+  :570-646 guardar definicoes. ALTERAR: validar NUIT, IVA, numeracao, e exigir
+         senha para mudar o codigo de gestor de stock.
+  :647-666 fechar ano. REMOVER (corrigido em 09/11 — ver REVISAO H-01).
+         A funcao nao fecha nem arquiva nada: grava um log a dizer "executado
+         regulamentarmente", com IP 127.0.0.1, e mostra o toast "ano fiscal
+         fechado e arquivado". E prova falsa. Remover o botao; se o dono quiser
+         o fecho a serio, e um PR proprio (exportar exercicio, marcar registos
+         como arquivados, bloquear edicoes anteriores, backup previo).
+  :667-715 backup total. CRITICO: substituir por exportAllData completo
+         (PC-72) e por backup externo (PD-33).
+  PE-06c firebaseDB.ts:3616-3653 clearSystemData — APAGAR (achado novo; nao
+         estava na v1). Apaga sales, losses, attendance, payroll_payments,
+         paused_sales, transformations e stock_movements. Nao tem chamadores
+         (os botoes foram removidos — TechnicalModule.tsx:640-646) e ja falha a
+         meio, porque stock_movements e imutavel: apagava metade e rebentava.
+         Regra a escrever em AGENTS.md: nenhuma funcao de limpeza de dados vive
+         na aplicacao; e operacao de manutencao externa, com backup e aprovacao.
+  JSX 716-2070: separadores users/sessions/logs/settings + restauro.
+         ALTERAR: restauro com pre-visualizacao e backup previo automatico
+         (:1452-1470).
+
+  Esforco: M. Liga: FIA-01, FIA-03, SEG-03, SEG-05.
+
+--------------------------------------------------------------------------------
+PE-07  App.tsx (925 linhas) — espinha dorsal
+--------------------------------------------------------------------------------
+  :13-24 lazy imports. MANTER (bom: carregamento por modulo).
+  :25-46 estado global. ALTERAR: mover autenticacao para AuthProvider (PB-03).
+  :47-61 isModuleAccessible. ALTERAR: usar roleHelper.can (PB-08).
+  :62-99 navegacao + estado online. ALTERAR: aviso persistente de offline com
+         consequencias ("nao e possivel vender"), nao so um ponto colorido.
+  :100-115 alertas, bloqueio por inactividade. MANTER (bom); acrescentar
+         bloqueio tambem por mudanca de utilizador.
+  :116-176 heartbeat de sessao. MANTER; falha de heartbeat deve avisar.
+  :177-187 produtos criticos. ALTERAR: consulta dirigida (getLowStockProducts),
+         sem descarregar catalogo.
+  :188-203 copia automatica para localStorage a cada 10 min. ALTERAR: manter
+         como cache de emergencia, mas deixar de a chamar "backup" e criar o
+         backup real (PD-33).
+  :205-278 restauro de sessao. CRITICO: ver PB-04.
+  :279-302 efeitos restantes (tema, titulo). MANTER.
+  :303-340 gate de modulo. Ver PB-05.
+  :341-378 login/logout. ALTERAR: limpar caches e terminar sessao (PB-05).
+  :379-428 estados de carregamento. MANTER.
+  :433-925 render: barra lateral, cabecalho, modulos, avisos.
+         :889-908 ecra "Armazem em estruturacao" — D4: NAO MEXER por decisao
+         do dono (09/11/2026). O menu e o ecra ficam exactamente como estao.
+         Risco aceite e registado: continua a existir um menu que promete um
+         modulo inexistente. Rever quando o dono decidir (sem prazo).
+         Aplicar 1.4 (aria, foco, contraste).
+
+  Esforco: M. Liga: SEG-02, SEG-04, NEG-07, NEG-08, FIA-01.
+
+--------------------------------------------------------------------------------
+PE-08  Ficheiros base da aplicacao
+--------------------------------------------------------------------------------
+  src/main.tsx (14 l.) — ALTERAR: remover QueryClientProvider nao usado
+        (@tanstack/react-query) ou usar de facto; montar AuthProvider;
+        ErrorBoundary global que mostra "algo falhou" em vez de ecra branco.
+  src/index.css (196 l.) — MANTER; acrescentar tokens de tamanho de texto
+        minimo e foco visivel; reduzir classes de 9-10 px.
+  src/types.ts (531 l.) — ALTERAR: acrescentar amountReceived, changeGiven,
+        taxRate por linha, costUnknown, cashSessionId, deletedAt; tornar
+        opcionais os campos legados; documentar cada estado de venda.
+        Liga: NEG-02, NEG-03, NEG-04.
+
+--------------------------------------------------------------------------------
+PE-09  Componentes de apoio (13 ficheiros) — todos MANTER com ajustes
+--------------------------------------------------------------------------------
+  EmployeeDetailModal.tsx (1.066 l.) — dividir em separadores (perfil,
+        assiduidade, disciplinar, danos, salarios); carregar dados por pedido,
+        nao todos; validar permissoes (salario so para RH).
+  InventoryCutoffTool.tsx (1.052 l.) — rever com o dono (PD-26); confirmar
+        com resumo antes de aplicar; exigir backup.
+  TransformationModal.tsx (984 l.) — validar conservacao de valor e stock
+        antes de gravar; mostrar previa do resultado.
+  TransformationView.tsx (679 l.) — MANTER; ligar cancelamento (PC-53) com
+        senha.
+  InlineHeaderSearch.tsx (328 l.) — MANTER; limitar resultados (hoje pode
+        varrer tudo) e incluir clientes/facturas.
+  Barcode13.tsx (296 l.) — MANTER; testar impressao em etiquetas reais.
+  DateRangeFilter.tsx (155 l.) — MANTER; atalhos (hoje, ontem, este mes) e
+        nao permitir datas invertidas.
+  ConfirmDialog.tsx (113 l.) — MANTER; exigir texto de confirmacao nos casos
+        destrutivos (parametro destructive + requireTyping).
+  DialogHost.tsx (97 l.) — MANTER; garantir foco e Escape.
+  Toast.tsx (66 l.) — MANTER; fila de mensagens e duracao por gravidade.
+  DashboardModule.tsx (435 l.) — DECISAO: ligar ao App com dados reais
+        (PD-15) ou apagar. Nao pode continuar a existir sem estar ligado.
+  MasterReportModal.tsx (763 l.) — APAGAR (nunca importado) ou fundir com
+        FinanceModule; hoje e codigo morto que confunde.
+  StockAIEntry.tsx (504 l.) — APAGAR (nunca importado); se a ideia de entrada
+        por IA interessa, e um projecto separado, nao um ficheiro morto.
+
+  Esforco: M. Liga: COD-01, NEG-07, DES-01.
+
+
+================================================================================
+7. BLOCO F — DOCUMENTACAO (docs/, 26 ficheiros + raiz)
+================================================================================
+A documentacao e um ponto forte, mas afirma coisas que o codigo nao faz. Um
+documento que mente e pior do que nenhum: passa a ser prova contra o dono.
+
+  PF-01  docs/01-srs-requisitos.md (174 l.) — REESCREVER as partes falsas:
+         marcar o que existe, o que e parcial e o que nao existe (armazem,
+         compras, caixa-fecho). Cada requisito com estado e evidencia.
+  PF-02  docs/02-manual-utilizador.md (137 l.) — ACTUALIZAR com capturas e
+         passo-a-passo real (venda, anulacao, contagem, fecho de caixa quando
+         existir). E o documento que o balcao usa.
+  PF-03  docs/03-arquitectura.md (130 l.) — ACTUALIZAR: remover a afirmacao de
+         venda offline (nao existe), descrever o modelo real de dados e a
+         ausencia de backend.
+  PF-04  docs/04-matriz-permissoes-rbac.md (72 l.) — ALINHAR com o codigo:
+         hoje a matriz descreve permissoes que nao sao impostas (SEG-02).
+         Marcar "implementado / planeado".
+  PF-05  docs/05-plano-seguranca.md (66 l.) — CORRIGIR: afirma remocao de
+         chaves-mestras e de getAllOrFail/credential que nao existe. Reescrever
+         com o estado real e o plano de PB-03.
+  PF-06  docs/06-documentacao-api.md (154 l.) — ACTUALIZAR: lista de metodos
+         de firebaseDB, incluindo os que vao ser removidos/alterados.
+  PF-07  docs/07-plano-backup-recuperacao.md (84 l.) — REESCREVER: hoje
+         descreve backup que nao existe. Incluir procedimento de restauro
+         testado, retencao, responsavel e periodicidade.
+  PF-08  docs/08-changelog.md (51 l.) — MANTER e passar a actualizar a cada
+         publicacao (com versao e data).
+  PF-09  docs/09-relatorio-auditoria.md (89 l.) — ARQUIVAR como historico;
+         nao pode continuar a afirmar que D-03/D-05/D-09/D-18/D-20 estao
+         resolvidos quando nao estao.
+  PF-10  docs/auditoria-pdv.md (1.115), auditoria-stock.md (340),
+         auditoria-faturas.md (216), auditoria-pdv-consistencia.md (135),
+         auditoria-corte-inventario.md (76), relatorio-auditoria-fase1.md (459)
+         — MANTER como historico, com cabecalho "HISTORICO — nao reflecte
+         necessariamente o estado actual" e ligacao ao relatorio novo.
+  PF-11  docs/plano-melhoria.md (116) — SUBSTITUIR por este plano (ou apontar
+         para ele), para nao haver dois planos divergentes.
+  PF-12  docs/seguranca.md (162) — ACTUALIZAR: regras publicadas vs. repo,
+         modelo de ameaca, e o que fazer em caso de suspeita de fuga.
+  PF-13  docs/publicar-regras-agora.md (88) — MANTER e transformar em
+         checklist executavel de publicacao de regras (com testes antes/depois).
+  PF-14  docs/runbook-onda-0-1.md (97) — ACTUALIZAR com os passos reais desta
+         fase (o que ja foi feito, o que falta).
+  PF-15  docs/stock-e-dividas.md (98), sangrias-custo-e-duplicados.md (104),
+         relatorios-e-cancelados.md (109), reembolso-caixa.md (92),
+         limites-relatorios.md (123), firestore-scaling.md (51),
+         PLANO-CORTE-INVENTARIO.md (198) — MANTER; revisar os que descrevem
+         comportamento e confirmam que o codigo ainda faz isso.
+  PF-16  NOVOS documentos a criar, pela ordem em que vao ser precisos:
+         (a) DECISOES.md — regras de negocio decididas pelo dono (IVA, A4,
+             credito, desconto maximo, quem anula), com data. Fecha NEG-01/03.
+         (b) TABELAS-FISCAIS.md — IRPS e INSS com fonte oficial e data de
+             vigencia. Fecha NEG-12.
+         (c) BACKUP.md — como se faz, onde fica, como se restaura, quando se
+             testa. Fecha FIA-01.
+         (d) SEGURANCA-OPERACIONAL.md — que fazer se um funcionario sair, se
+             um telefone for perdido, se houver suspeita de acesso.
+         (e) README.md na raiz (PA-12).
+
+
+================================================================================
+8. BLOCO G — TESTES (test/, 17 ficheiros, 2.407 linhas)
+================================================================================
+
+  G.1 O QUE JA EXISTE (manter e reforcar)
+  PG-01  test/setup.ts (72 l.) — acrescentar: falhar em rejeicoes nao tratadas;
+         limpar localStorage/sessionStorage entre testes; fixar relogio quando
+         necessario.
+  PG-02  test/firestoreMock.ts (292 l.) — ALTERAR: permitir simular falha de
+         leitura ("unavailable") de forma explicita; hoje o guardWrite rejeita
+         e provoca as 2 rejeicoes que aparecem no npm test (:105).
+  PG-03  test/rules_coverage_test.ts (71 l.) — EXPANDIR para o novo
+         firestore.rules: uma assercao por colection (permitido/negado),
+         incluindo delete negado em sales/products/credentials/audit_logs.
+  PG-04  test/pdv_consistency_test.ts (55), test/pdv.retroactive.test.tsx
+         (135) — MANTER; acrescentar totais de IVA por linha e pagamento
+         multiplo.
+  PG-05  test/stock_debts_test.ts (185) — MANTER; acrescentar criacao
+         automatica de divida na venda.
+  PG-06  test/inventory_cutoff_test.ts (310) — MANTER; completar com casos
+         reais do dono.
+  PG-07  test/price_and_password_integrity_test.ts (122) — MANTER; acrescentar
+         custo desconhecido (null) e politica de 10 caracteres.
+  PG-08  test/silent_failures_test.ts (110) — MANTER e tornar bloqueante:
+         nenhuma leitura falhada pode terminar com escrita.
+  PG-09  test/failuremodes.test.tsx (160) — MANTER; e o teste que devia ter
+         apanhado BD-01/BD-02/BD-03. Acrescentar assercoes de "zero escritas".
+  PG-10  test/session_management_test.ts (133), test/inactivity_lock_test.ts
+         (155), test/technical.users.test.tsx (87) — MANTER; acrescentar
+         "utilizador eliminado nao entra" e "perfil do sessionStorage nao vale".
+  PG-11  test/reporting_test.ts (106), test/cash_box_test.ts (54),
+         test/sale_duplicates_test.ts (57), test/toast.test.tsx (27),
+         test/master_plan_test.ts (276) — MANTER; cash_box deve passar a testar
+         multiplo (hoje ignora).
+
+  G.2 TESTES QUE FALTAM (cada um ligado a um achado)
+  PG-12  checkout.test.ts — finalizar venda: estado por pagamento, multiplo
+         incompleto, troco gravado, custo desconhecido. (NEG-01/02/04)
+  PG-13  tax.test.ts — 0%, 16%, misto, desconto; total igual em PDV, PDF e
+         relatorio. (NEG-03)
+  PG-14  fallback.test.ts — getDocs falha -> nenhuma escrita, erro mostrado.
+         (BD-01/02/03)
+  PG-15  auth.test.ts — perfil vem da base, sessao eliminada, gate de modulo
+         com perfil superior. (SEG-01/02/04)
+  PG-16  audit.test.ts — IP nunca 127.0.0.1, uma entrada por accao sensivel.
+         (SEG-07)
+  PG-17  backup.test.ts — exportar -> importar -> contagens iguais, incluindo
+         caixa, dividas, movimentos. (FIA-01)
+  PG-18  secrets.test.ts — falha se aparecer 05082/gestor123/2000SC/131923 no
+         codigo. (SEG-03) — teste barato e eficaz.
+  PG-19  numbers.test.ts — duas vendas simultaneas nao repetem numero;
+         uma so funcao de numeracao. (PC-27)
+  PG-20  debts.test.ts — venda a credito cria divida; cobranca parcial;
+         cobranca acima do total recusada. (NEG-06)
+  PG-28  shifts.test.ts — fecho por turno: transporte de saldo, duas mudancas
+         no mesmo dia, diferenca de 0,01 registada (sem tolerancia), fecho
+         duplo recusado, assinaturas obrigatorias. (D5)
+  PG-21  cashsession.test.ts — abertura/fecho, diferenca, fecho duplo
+         recusado. (NEG-05, depois de PD-14)
+  PG-22  offline.test.ts — sem rede, venda falha com mensagem e carrinho
+         preservado. (NEG-08)
+  PG-23  performance.test.ts (limites, nao tempos): PDV nao pede a colection
+         inteira; consulta com limite. (DES-01)
+
+  G.3 COMO OS TESTES PASSAM A PROTEGER
+  PG-26  iva.test.ts — preco com IVA incluido: total = preco; extracao de 16%;
+         total identico em PDV, PDF A4, recibo termico, nota de credito e mapa.
+         (D1)
+  PG-27  credit.test.ts — limite 20.000: venda que cabe, venda que excede
+         (pede gerencia), cliente atrasado (bloqueia), cliente sem limite
+         definido (usa o global). (D3)
+  PG-24  GitHub Action (nova): npm ci, npm run typecheck, npm run test:unit,
+         npm run test:all. Bloquear merge sem verde. (FIA-04)
+  PG-25  Regra de contribuition em AGENTS.md: nenhuma correccao sem teste que
+         falhe antes. (B-03)
+
+
+================================================================================
+9. BLOCO H — LIMPEZA E REMOCOES (o que sai, com justificacao)
+================================================================================
+Regra: nada sai sem um grep a provar que ninguem usa, e cada remocao em PR
+proprio para poder ser revertida.
+
+  PH-01  src/utils/indexedDB.ts (2.008 l.) — APAGAR. Zero imports. Contem
+         palavras-passe reais. (SEG-03, COD-01)
+  PH-02  src/utils/numberingAudit.ts (80), src/utils/saleDuplicates.ts (107) —
+         APAGAR se o grep confirmar zero uso (verificar antes com knip).
+  PH-03  Duplicados: src/data/companyInfo.ts (39) vs src/utils/companyInfo.ts
+         (25); src/utils/categories.ts (76) vs categoryHelper.ts (97).
+         ESCOLHER UM de cada e apagar o outro, actualizando imports.
+  PH-04  @tanstack/react-query — desinstalar ou usar. Hoje paga-se o peso sem
+         beneficio.
+  PH-05  Raiz: fix_pdv.cjs, fix_pdv.js, fix_pdv_more.cjs, fix_stock_loss.cjs,
+         replace_double_a5.cjs, pdv.patch, update_stock.patch,
+         initialProducts.txt, firestore.rules.legacy-open, bun.lock (ou o
+         package-lock), PLANO_CORRECCAO.md (mover para historico).
+         (B-01, B-02, PA-13, PA-15)
+  PH-06  Componentes mortos: MasterReportModal.tsx, StockAIEntry.tsx,
+         DatabaseSchemaViewer.tsx — APAGAR. DashboardModule.tsx — ligar ou
+         apagar (decisao do dono).
+  PH-07  Handlers mortos no PDV (3) — apagar ou ligar com senha (PE-01).
+  PH-08  Funcoes de compatibilidade que mentem: firebaseDB.ts:3779-3784,
+         :3829-3833 — apagar (COD-05).
+  PH-09  Ficheiro RECIBO_POS_FAC-2026-0001.pdf no disco (ignorado pelo Git):
+         apagar; contem dados de uma venda real.
+  PH-10  Comentarios desactualizados: StockModule.tsx:106, :1730, :3866,
+         :4102 ("codigo 05082") — remover a referencia ao valor.
+  PH-11  Apos toda a limpeza, correr npx knip e tsc; o objectivo e reduzir de
+         146 para ~110 ficheiros sem perder funcionalidade.
+
+
+================================================================================
+10. INVENTARIO FICHEIRO A FICHEIRO — os 146 ficheiros do repositorio
+================================================================================
+Nenhum ficheiro fica de fora. VEREDITO: MANTER · MANTER+ (manter e
+melhorar) · ALTERAR · EXPANDIR · REVER · DECIDIR · ARQUIVAR · APAGAR.
+A coluna ACCAO remete para o bloco onde o trabalho esta descrito.
+
+ LINHAS  VEREDITO  ACCAO    FICHEIRO / NOTA
+--------------------------------------------------------------------------------------------------------------
+      3  ALTERAR   PA-10    .env.example  — documentar variáveis
+      5  ALTERAR   PA-05    .firebaserc  — alias staging
+     13  ALTERAR   PA-10    .gitignore  — acrescentar padrões
+      5  ALTERAR   PA-11    AGENTS.md  — regras para agentes
+    110  ARQUIVAR  PA-11    PLANO_CORRECCAO.md  — histórico
+   1497  APAGAR    PA-15    bun.lock  — dois lockfiles
+    174  ALTERAR   PF-01    docs/01-srs-requisitos.md  — actualizar conteúdo
+    137  ALTERAR   PF-02    docs/02-manual-utilizador.md  — actualizar conteúdo
+    130  ALTERAR   PF-03    docs/03-arquitectura.md  — actualizar conteúdo
+     72  ALTERAR   PF-04    docs/04-matriz-permissoes-rbac.md  — actualizar conteúdo
+     66  ALTERAR   PF-05    docs/05-plano-seguranca.md  — actualizar conteúdo
+    154  ALTERAR   PF-06    docs/06-documentacao-api.md  — actualizar conteúdo
+     84  ALTERAR   PF-07    docs/07-plano-backup-recuperacao.md  — actualizar conteúdo
+     51  ALTERAR   PF-08    docs/08-changelog.md  — actualizar conteúdo
+     89  ALTERAR   PF-09    docs/09-relatorio-auditoria.md  — actualizar conteúdo
+    198  ALTERAR   PF-15    docs/PLANO-CORTE-INVENTARIO.md  — actualizar conteúdo
+     76  ALTERAR   PF-10    docs/auditoria-corte-inventario.md  — actualizar conteúdo
+    216  ALTERAR   PF-10    docs/auditoria-faturas.md  — actualizar conteúdo
+    135  ALTERAR   PF-10    docs/auditoria-pdv-consistencia.md  — actualizar conteúdo
+   1115  ALTERAR   PF-10    docs/auditoria-pdv.md  — actualizar conteúdo
+    340  ALTERAR   PF-10    docs/auditoria-stock.md  — actualizar conteúdo
+     51  ALTERAR   PF-15    docs/firestore-scaling.md  — actualizar conteúdo
+    123  ALTERAR   PF-15    docs/limites-relatorios.md  — actualizar conteúdo
+    116  ALTERAR   PF-11    docs/plano-melhoria.md  — actualizar conteúdo
+     88  ALTERAR   PF-13    docs/publicar-regras-agora.md  — actualizar conteúdo
+     92  ALTERAR   PF-15    docs/reembolso-caixa.md  — actualizar conteúdo
+    459  ALTERAR   PF-10    docs/relatorio-auditoria-fase1.md  — actualizar conteúdo
+    109  ALTERAR   PF-15    docs/relatorios-e-cancelados.md  — actualizar conteúdo
+     97  ALTERAR   PF-14    docs/runbook-onda-0-1.md  — actualizar conteúdo
+    104  ALTERAR   PF-15    docs/sangrias-custo-e-duplicados.md  — actualizar conteúdo
+    162  ALTERAR   PF-12    docs/seguranca.md  — actualizar conteúdo
+     98  ALTERAR   PF-15    docs/stock-e-dividas.md  — actualizar conteúdo
+     12  MANTER    PA-07    firebase-applet-config.json  — documentar
+     83  MANTER    —        firebase-blueprint.json  — sem problema identificado; coberto por regras 1.3/1.4
+     23  MANTER    PA-05    firebase.json  — confirmar indexes
+     21  ALTERAR   PA-06    firestore.indexes.json  — índices reais
+     92  ALTERAR   PB-01    firestore.rules  — regra por regra
+      8  APAGAR    PH-05    firestore.rules.legacy-open  — risco de publicação
+     59  APAGAR    PH-05    fix_pdv.cjs  — remendo por regex
+     59  APAGAR    PH-05    fix_pdv.js  — remendo por regex
+    100  APAGAR    PH-05    fix_pdv_more.cjs  — remendo por regex
+     21  APAGAR    PH-05    fix_stock_loss.cjs  — remendo por regex
+     15  ALTERAR   PA-04    index.html  — lang pt-MZ, meta
+    117  APAGAR    PH-05    initialProducts.txt  — duplicado de data/initialProducts.ts
+     10  ALTERAR   PA-07    metadata.json  — actualizar
+   9651  MANTER    PA-15    package-lock.json  — lockfile oficial
+     54  ALTERAR   PA-01    package.json  — scripts, dependências
+     38  APAGAR    PH-05    pdv.patch  — patch antigo
+   1237  MANTER             public/logo.png
+     38  APAGAR    PH-05    replace_double_a5.cjs  — remendo por regex
+     31  ALTERAR   PA-14    scripts/hash-password.mjs  — formato PBKDF2
+    264  DECIDIR   PA-09    server.ts  — autenticar ou retirar de produção
+    925  ALTERAR   PE-07    src/App.tsx  — sessão/perfil, gate, backup falso, armazém
+    296  MANTER    PE-09    src/components/Barcode13.tsx  — testar impressão real
+    113  ALTERAR   PE-09    src/components/ConfirmDialog.tsx  — confirmação por texto
+    435  DECIDIR   PH-06    src/components/DashboardModule.tsx  — ligar com dados reais ou apagar
+    321  APAGAR    PH-06    src/components/DatabaseSchemaViewer.tsx  — nunca importado
+    155  ALTERAR   PE-09    src/components/DateRangeFilter.tsx  — atalhos e validação
+     97  MANTER    PE-09    src/components/DialogHost.tsx  — foco e Escape
+   1066  ALTERAR   PE-09    src/components/EmployeeDetailModal.tsx  — dividir, carregar por pedido, permissões
+   2365  MANTER+   PE-05    src/components/FaturasModule.tsx  — paginacao boa; ajustar estados e IVA
+   2804  ALTERAR   PE-03    src/components/FinanceModule.tsx  — gráfico falso, coluna Comprado, sync total
+   2450  ALTERAR   PE-04    src/components/HRModule.tsx  — semente fictícia, IRPS, danos em localStorage
+    328  ALTERAR   PE-09    src/components/InlineHeaderSearch.tsx  — limitar resultados
+   1052  REVER     PE-09    src/components/InventoryCutoffTool.tsx  — regra de negócio por confirmar
+    608  ALTERAR   PB-09    src/components/LoginPanel.tsx  — lockout local, política, contadores públicos
+    763  APAGAR    PH-06    src/components/MasterReportModal.tsx  — nunca importado
+   4705  ALTERAR   PE-01    src/components/PDVModule.tsx  — estado, checkout, pagamentos, estado A4, custo, IP, handlers mortos
+    504  APAGAR    PH-06    src/components/StockAIEntry.tsx  — nunca importado
+   4682  ALTERAR   PE-02    src/components/StockModule.tsx  — reset catálogo, regerar códigos, validação de produto, imagens
+   2070  ALTERAR   PE-06    src/components/TechnicalModule.tsx  — backup parcial, restauro sem validação, utilizadores
+     66  ALTERAR   PE-09    src/components/Toast.tsx  — fila e duração
+    984  ALTERAR   PE-09    src/components/TransformationModal.tsx  — validação e prévia
+    679  ALTERAR   PE-09    src/components/TransformationView.tsx  — cancelamento com senha
+     39  DECIDIR   PH-03    src/data/companyInfo.ts  — duplicado de utils/companyInfo
+     40  ALTERAR   PD-24    src/data/credentialsReset.ts  — remover hashes fixos
+    117  MANTER    PC-13    src/data/initialProducts.ts  — só semear em instalação nova
+      1  MANTER             src/data/logo_base64.txt  — ficheiro vazio (0 linhas) — verificar porquê
+    181  VERIFICAR PD-28    src/data/stockListUpdate.ts  — confirmar uso; senão histórico
+    196  ALTERAR   PE-08    src/index.css  — tamanho mínimo de texto, foco
+     14  ALTERAR   PE-08    src/main.tsx  — AuthProvider + ErrorBoundary
+    531  ALTERAR   PE-08    src/types.ts  — campos de troco, IVA por linha, costUnknown
+     45  ALTERAR   PB-07    src/utils/authorization.ts  — remover 05082
+     81  ALTERAR   PD-09    src/utils/cashBox.ts  — múltiplos e reembolsos
+     76  APAGAR    PH-03    src/utils/categories.ts  — duplicado de categoryHelper
+     97  MANTER    PH-03    src/utils/categoryHelper.ts  — fica este; apagar categories.ts
+     38  MANTER    PD-28    src/utils/clientInfo.ts
+     25  DECIDIR   PH-03    src/utils/companyInfo.ts  — duplicado de data/companyInfo
+     74  MANTER    PD-28    src/utils/confirmDialog.ts
+    119  MANTER    —        src/utils/credentialsReset.ts  — sem problema identificado; coberto por regras 1.3/1.4
+    179  MANTER    PD-16    src/utils/dateRangeHelper.ts  — testes de fuso horário
+     98  MANTER    PD-10    src/utils/debts.ts  — alinhar tipos
+     36  MANTER    PD-28    src/utils/deviceHelper.ts
+    191  MANTER    PD-21    src/utils/errorHelper.ts  — usar em todos os catch
+     69  ALTERAR   PD-12    src/utils/financeData.ts  — remover valores simulados
+   3844  ALTERAR   BLOCO C  src/utils/firebaseDB.ts  — fallbacks, backup, credenciais, sync total
+    149  ALTERAR   PD-13    src/utils/hrCalculations.ts  — tabela IRPS e erro /10
+     23  MANTER    PD-28    src/utils/idHelper.ts
+   2008  APAGAR    PH-01    src/utils/indexedDB.ts  — código morto com palavras-passe reais
+    473  REVER     PD-26    src/utils/inventoryCutoff.ts  — regra de negócio por confirmar
+     38  MANTER    PD-28    src/utils/losses.ts
+    142  MANTER    PD-25    src/utils/migrateStock.ts  — marcar @internal
+     93  MANTER    PD-28    src/utils/numberToWords.ts  — confirmar uso nos PDFs
+     80  APAGAR    PH-02    src/utils/numberingAudit.ts  — código morto
+     88  MANTER    PD-17    src/utils/paginationHelper.ts  — usar nos logs e caixa
+   1629  ALTERAR   PD-02    src/utils/pdfGenerator.ts  — IVA fixo, duplicação de 3 implementações
+    270  MANTER    PD-28    src/utils/posHardware.ts  — testar com impressora real
+     43  MANTER    PD-22    src/utils/postCommit.ts
+    132  ALTERAR   PD-05    src/utils/priceHelper.ts  — custo 0 -> null
+     71  MANTER    PD-28    src/utils/productMatch.ts  — testes de caracterização
+    156  MANTER    PD-28    src/utils/reportExporter.ts  — usar como exportador único
+    262  MANTER+   PD-11    src/utils/reporting.ts  — acrescentar IVA e dashboard
+     24  ALTERAR   PB-08    src/utils/roleHelper.ts  — tabela de capacidades
+     91  ALTERAR   PB-08    src/utils/safeStorage.ts  — versão e TTL
+    107  APAGAR    PH-02    src/utils/saleDuplicates.ts  — código morto
+     56  ALTERAR   PD-29    src/utils/saleStatus.ts  — estados únicos
+     52  ALTERAR   PD-03    src/utils/saleTotals.ts  — IVA por linha
+    224  ALTERAR   PB-06    src/utils/securityHelper.ts  — política e fallbacks
+    130  MANTER    PD-08    src/utils/sequenceHelper.ts  — documentar como única via
+     80  MANTER    PD-07    src/utils/stockGuard.ts  — garantir uso universal
+    119  MANTER    PD-06    src/utils/stockMath.ts  — mais testes de limites
+     69  MANTER    PD-04    src/utils/taxHelper.ts  — passa a ser a única via
+     48  MANTER    PD-28    src/utils/unitHelper.ts
+     54  EXPANDIR  PG-11    test/cash_box_test.ts  — pagamento múltiplo
+    160  EXPANDIR  PG-09    test/failuremodes.test.tsx  — zero escritas
+    292  ALTERAR   PG-02    test/firestoreMock.ts  — simular falha de leitura
+    155  MANTER    PG-10    test/inactivity_lock_test.ts
+    310  MANTER    PG-06    test/inventory_cutoff_test.ts
+    276  MANTER    PG-11    test/master_plan_test.ts
+    135  EXPANDIR  PG-04    test/pdv.retroactive.test.tsx  — totais
+     55  EXPANDIR  PG-04    test/pdv_consistency_test.ts  — IVA e múltiplo
+    122  EXPANDIR  PG-07    test/price_and_password_integrity_test.ts  — null e política
+    106  MANTER    PG-11    test/reporting_test.ts
+     71  EXPANDIR  PG-03    test/rules_coverage_test.ts  — regra por colecção
+     57  MANTER    PG-11    test/sale_duplicates_test.ts
+    133  EXPANDIR  PG-10    test/session_management_test.ts  — utilizador eliminado
+     72  ALTERAR   PG-01    test/setup.ts  — rejeições e limpeza
+    110  EXPANDIR  PG-08    test/silent_failures_test.ts  — bloqueante
+    185  EXPANDIR  PG-05    test/stock_debts_test.ts  — dívida na venda
+     87  MANTER    PG-10    test/technical.users.test.tsx
+     27  MANTER    PG-11    test/toast.test.tsx
+     27  ALTERAR   PA-03    tsconfig.json  — noUnused*
+     38  APAGAR    PH-05    update_stock.patch  — patch antigo
+      8  ALTERAR   PA-08    vercel.json  — cabeçalhos de segurança
+     41  ALTERAR   PA-02    vite.config.ts  — PWA e divisão de bundle
+     19  ALTERAR   PA-03    vitest.config.ts  — falhar em rejeições
+--------------------------------------------------------------------------------------------------------------
+TOTAL: 146 ficheiros versionados.
+
+RESUMO DOS VEREDITOS (soma = 146 ficheiros)
+  ALTERAR .......  72 ficheiros — precisam de trabalho (ver ACCAO de cada um)
+  MANTER ........  38 ficheiros — sem problema identificado; ficam cobertos
+                                  pelas regras transversais 1.3 e 1.4
+  APAGAR ........  17 ficheiros — codigo morto, remendos, duplicados, dados
+                                  sensiveis (indexedDB.ts, 3 componentes mortos,
+                                  2 utilitarios mortos, categories.ts, 7 remendos
+                                  da raiz, initialProducts.txt, bun.lock,
+                                  firestore.rules.legacy-open)
+  EXPANDIR ......   9 ficheiros de teste — ja existem, faltam casos
+  DECIDIR .......   4 ficheiros — server.ts, DashboardModule.tsx, e os dois
+                                  companyInfo.ts (qual fica)
+  MANTER+ .......   2 ficheiros — bons, com melhorias pontuais
+                                  (FaturasModule, reporting.ts)
+  REVER .........   2 ficheiros — regra de negocio do corte de inventario
+  ARQUIVAR ......   1 ficheiro  — PLANO_CORRECCAO.md (historico)
+  VERIFICAR .....   1 ficheiro  — data/stockListUpdate.ts (confirmar uso)
+
+  NOVOS ficheiros a criar no decurso do plano: ~14
+    codigo:  cashSessions.ts, dashboardData.ts, purchases.ts, warehouse.ts,
+             offlineQueue.ts, employeeDamages.ts, auth/AuthProvider.tsx (+3)
+    testes:  checkout, tax, fallback, auth, audit, backup, secrets, numbers,
+             debts, cashsession, offline, performance (12)
+    docs:    README.md, DECISOES.md, TABELAS-FISCAIS.md, BACKUP.md,
+             SEGURANCA-OPERACIONAL.md
+
+
+================================================================================
+11. ORDEM DE EXECUCAO — 7 ONDAS (0, 0.5, 1-5), 18 PULL REQUESTS
+================================================================================
+Regra: cada onda deixa o sistema a funcionar e melhor. Nunca duas ondas a meio.
+Tempo estimado com uma pessoa a tempo parcial (4 h/dia).
+
+--------------------------------------------------------------------------------
+ONDA 0 — ESTANCAR O SANGRAMENTO (2-3 dias, 3 PRs)
+--------------------------------------------------------------------------------
+Objectivo: parar as perdas de dados e o acesso anonimo. Nada de arquitectura.
+
+  PR-01  "Fecha o que pode ser apagado" ........................... PB-01 (fase 1)
+         - delete negado em: sales, losses, transformations, attendance,
+           customers, settings, counters, payroll_payments.
+         - audit_logs: delete so com prova de arquivo (getAfter); plano B
+           documentado.
+         - MANTEM-SE delete em products, employees, credentials, paused_sales e
+           active_sessions — a aplicacao usa-os (verificado por grep).
+         - Nao toca na LEITURA de credentials (o login depende dela; fecha no
+           PR-11, com a Cloud Function).
+         - Expande test/rules_coverage_test.ts com o parser corrigido (PG-03).
+         Pronto: 6 simulacoes da seccao 5 do PR-01 + teste a 0 falhas.
+         Risco: medio (arquivo de logs) — testar antes de publicar.
+         Reverter: copia das regras + git revert; sem alteracao de dados.
+
+  PR-02  "Nenhuma leitura falhada reescreve dados" ................. PC-13, PC-65,
+         PC-67, PD-27, PG-14
+         - getAllOrFail; semear so em instalacao nova.
+         - getSettings/getCredentials sem escritas em catch.
+         - Remove criacao automatica de admin e o hash fixo.
+         Risco: baixo. Reverter: simples.
+
+  PR-03  "Tira as palavras-passe do codigo" ...................... PB-07, PD-24,
+         PH-01, PH-10, PG-18
+         - Apaga indexedDB.ts, hashes fixos, 05082 por omissao.
+         - Teste de segredos (falha se voltarem).
+         Risco: baixo, mas exige definir o codigo de gestor na instalacao.
+         Aviso ao dono: nesta semana, mudar as palavras-passe de todos.
+
+  SAIDA DA ONDA 0: o historico ja nao e apagavel com a chave publica; uma falha
+  de rede ja nao destroi o catalogo; o repositorio ja nao contem senhas.
+
+
+--------------------------------------------------------------------------------
+ONDA 0.5 — MITIGAR O QUE AINDA ESTA ABERTO (2 horas, sem PR)
+--------------------------------------------------------------------------------
+Objectivo: reduzir a janela em que salarios, vendas e credenciais sao legiveis
+por qualquer pessoa (so fecha na Onda 3, semanas depois). Nao e codigo.
+
+  [ ] 1. Mudar TODAS as palavras-passe hoje (as actuais estao no repositorio).
+  [ ] 2. Retirar do GitHub quem ja nao trabalha na empresa; revisao de acessos
+         (GitHub, Firebase, Vercel) — ver 16.2.
+  [ ] 3. Abrir a consola do Firebase uma vez por dia (2 min) e ver se ha picos
+         de leitura anormais (sinal de extraccao de dados).
+  [ ] 4. Escrever em docs/seguranca.md: "ate ao PR-11 a base e legivel por
+         quem tiver o endereco; nao introduzir dados de terceiros (IBAN de
+         fornecedores, dados de cartao, dados de saude)".
+  [ ] 5. Avisar a equipa por escrito (ver 16.5).
+
+  Custo: 2 h. Valor: reduz de semanas para horas a janela em que o pior cenario
+  de leitura continua possivel.
+
+--------------------------------------------------------------------------------
+ONDA 1 — VERDADE NOS DOCUMENTOS E NO DINHEIRO (5-7 dias, 4 PRs)
+--------------------------------------------------------------------------------
+Objectivo: os papeis e os numeros passarem a bater com a realidade.
+
+  PR-04  "Estado da venda conforme o pagamento" ............. PE-01 (:1374-1395),
+         PD-29, PC-29, PG-12
+  PR-05  "Pagamento multiplo validado e troco gravado" ...... PE-01 (:1397-1422),
+         PE-08 (types), PG-12
+  PR-06  "IVA incluido no preco, de uma so forma" ........... PD-03, PD-04,
+         PD-05, PD-02, PC-30, PG-13, PG-26  [D1 fechada]
+  PR-07  "Credito controlado, dividas reais, auditoria" ..... PD-35, PC-87,
+         PC-88, PC-41, PC-12 (IP), PG-16, PG-20, PG-27  [D3 fechada]
+
+  SAIDA DA ONDA 1: factura paga e Paga; nao se aceita pagamento incompleto; IVA
+  igual no ecra/PDF/relatorio; margem nao inflacionada; dividas completas.
+
+--------------------------------------------------------------------------------
+ONDA 2 — PROTEGER O PATRIMONIO (6-8 dias, 3 PRs)
+--------------------------------------------------------------------------------
+  PR-08  "Backup real e restauro seguro" ................... PC-72, PC-73,
+         PC-74, PE-06 (:667-715, :1452-1470), PF-07, PG-17
+         - Export completo; restauro com previa; backup externo diario.
+  PR-09  "Destrutivos deixam de ser um clique" ............. PC-80, PC-75,
+         PC-37, PE-02 (:1696-1730, :420-530, :823-895), PG-09
+         - Remove reset de catalogo; senha + reversibilidade em regeracoes.
+  PR-10  ADIADO SEM DATA por decisao D4 (o dono quer o armazem como esta).
+         Nao se remove o menu, nao se implementa nada. O numero fica reservado
+         para quando a decisao mudar, para nao renumerar os outros 17 PRs.
+
+  SAIDA DA ONDA 2: existe um backup que se pode restaurar; um clique ja nao
+  apaga o inventario; o sistema nao promete o que nao tem.
+
+--------------------------------------------------------------------------------
+ONDA 3 — ACESSO A SERIO (3-4 semanas, 3 PRs)
+--------------------------------------------------------------------------------
+  PR-11  "Cloud Function de login + claims" ................. PB-03,
+         PB-02, PE-08 (AuthProvider), PG-15
+  PR-12  "Perfil vem dos claims, sessoes terminam" ......... PB-04, PB-05, PB-09,
+         PB-10, PB-11, PG-15
+  PR-13  "Politica de palavras-passe e bloqueio no servidor" PB-06, PB-09,
+         PB-07 (fase 2), PG-07
+
+  SAIDA DA ONDA 3: alterar o browser nao da privilegios; quem sai, sai mesmo;
+  os funcionarios deixam de usar 4 caracteres.
+
+--------------------------------------------------------------------------------
+ONDA 4 — CONTROLO DIARIO (3-4 semanas, 3 PRs)
+--------------------------------------------------------------------------------
+  PR-14  "Abertura e fecho de caixa" ....................... PD-14, PC-81, PC-44,
+         PE-03 (:127-189, dashboard), PG-21
+  PR-15  "Compras e fornecedores (fase 1)" ................. PD-18, PC-82, PC-83
+         (fase 1: fornecedores + recepcao com custo medio)
+  PR-16  "Desempenho: deixar de descarregar tudo" .......... PC-04, PC-22,
+         PC-15, PE-01 (:780-834), PE-02 (:531-591), PG-23
+
+  SAIDA DA ONDA 4: o dinheiro da gaveta fecha todos os dias; o custo do stock
+  vem de compras reais; o PDV abre em segundos.
+
+--------------------------------------------------------------------------------
+ONDA 5 — QUALIDADE CONTINUA (continuo, 2 PRs)
+--------------------------------------------------------------------------------
+  PR-17  "Base para nao voltar a partir" ................... PG-24 (CI), PA-01,
+         PA-03, COD-01, COD-04, PH-02..PH-08
+  PR-18  "Documentacao que nao mente" ...................... PF-01..PF-16, PA-12
+
+  SAIDA DA ONDA 5: pipeline que impede publicar codigo quebrado; documentacao
+  alinhada; repositorio menor e mais claro.
+
+--------------------------------------------------------------------------------
+DEPENDENCIAS (o que nao pode ser feito antes do que)
+--------------------------------------------------------------------------------
+  - PR-14 (caixa) depende de PR-08 (backup) e de PR-04 (estado correcto).
+  - PR-15 (compras) depende de PR-06 (custo honesto) e de PR-09 (stock seguro).
+  - PR-16 (desempenho) deve vir DEPOIS de PR-11/PR-12, para nao optimizar duas
+    vezes a mesma leitura.
+  - PD-33/PD-20 (offline) sao os ultimos: exigem caixa e numeracao estaveis.
+  - Nenhuma accao de interface (PE-*) deve ser feita antes de PR-02: corrigir
+    ecras sobre dados que se reescrevem e trabalho perdido.
+
+--------------------------------------------------------------------------------
+TEMPO TOTAL ESTIMADO
+--------------------------------------------------------------------------------
+  Onda 0 ....... 2-3 dias        Onda 3 ....... 3-4 semanas
+  Onda 0.5 ..... 2 horas         Onda 4 ....... 3-4 semanas
+  Onda 1 ....... 5-7 dias        Onda 5 ....... continuo
+  Onda 2 ....... 6-8 dias
+  ----------------------------------------------
+  Ate ao fim da Onda 2 (sistema "seguro para dados"): ~3 semanas
+  Ate ao fim da Onda 3 (acesso a serio): ................ ~7 semanas
+  Sistema completo (compras, armazem, offline): ......... 4 a 6 meses
+
+  Porque subiram: (a) a v1 contava 2-3 h para o PR-01b, que e 1 dia; (b) a
+  Onda 3 passou a incluir Cloud Function e reposicao de palavras-passe de toda
+  a equipa; (c) compras com custo medio e vendas offline no Firestore
+  (transaccoes exigem rede) sao redesenhos, nao acrescentos.
+
+  REGRA DE ROLLBACK (vale para os 18 PRs, nao so para o PR-01)
+  Cada PR declara, em duas linhas, como se desfaz e o que fica alterado nos
+  dados. Os PRs de dados (08, 09, 14, 15) declaram tambem que registos ficam
+  com campos novos e como se identificam depois.
+
+
+================================================================================
+12. RASTREABILIDADE — cada achado do relatorio tem accao neste plano
+================================================================================
+Nenhum achado fica orfao. Se estiver a executar e quiser saber "o que fecha
+isto", e esta a tabela.
+
+  ACHADO   GRAVIDADE   FECHA COM                                      ONDA
+  SEG-01   CRITICO     PB-01 (fase 1) + PB-03 (definitivo)            0 e 3
+  SEG-02   CRITICO     PB-04, PB-05, PB-03, PE-07                     3
+  SEG-03   CRITICO     PB-07, PD-24, PH-01, PH-10, PG-18              0
+  BD-01    CRITICO     PC-13, PC-86, PG-14                             0
+  BD-02    CRITICO     PC-64, PC-65, PG-14                             0
+  BD-03    CRITICO     PC-67, PD-24, PG-14                             0
+  BD-04    CRITICO     PC-80, PE-02 (:1696-1730)                       2
+  FIA-01   CRITICO     PC-72, PC-73, PC-74, PE-06, PD-33, PG-17       2
+  SEG-04   ALTO        PB-10, PB-11, PB-04, PG-15                      3
+  SEG-05   ALTO        PB-06, PB-09, PG-07                             3
+  SEG-06   ALTO        PA-09, PA-08                                    0-1
+  SEG-07   ALTO        PC-12, PG-16                                     1
+  NEG-01   ALTO        PE-01 (:1374-1395), PD-29, PG-12                 1
+  NEG-02   ALTO        PE-01 (:1397-1422), PE-08, PC-29, PG-12          1
+  NEG-03   ALTO        PD-02, PD-03, PD-04, PC-30, PG-13, PG-26 [D1]   1
+  NEG-04   ALTO        PD-05, PC-30, PC-34, PE-02 (exportacoes), PG-13  1
+  NEG-05   ALTO        PD-09, PD-14, PC-81, PE-03, PG-21                4
+  NEG-06   ALTO        PC-41, PD-35, PC-87, PC-88, PG-20, PG-27 [D3]   1
+  NEG-07   ALTO        ADIADO por D4 (nada a fazer agora)          —
+  NEG-08   ALTO        PA-02, PD-20, PE-01 (:1866-3829), PG-22          5
+  DES-01   ALTO        PC-04, PC-15, PC-22, PA-02, PE-01/02/03, PG-23   4
+  FIA-02   ALTO        PD-27, PC-13, PC-65, PG-08                        0 e 1
+  COD-01   MEDIO       PH-01, PH-02, PH-06, PH-07, PG-24                 5
+  COD-02   MEDIO       PE-01..PE-06 (divisao), seccao 1.3                5
+  COD-03   MEDIO       PD-11, PD-12, PD-28, PH-03, PB-08                 5
+  COD-04   MEDIO       PG-01, PG-24, PA-01, PA-03                        5
+  COD-05   MEDIO       PC-77, PC-79, PH-08                               5
+  NEG-09   MEDIO       PE-03 (:232-240), PD-15, PD-30                     1
+  NEG-10   MEDIO       PE-03 (:2129-2137), PC-46                           1
+  NEG-11   MEDIO       PD-18, PC-82                                      4
+  NEG-12   MEDIO       PD-13, PE-04 (:680-968), PF-16 (b)                4
+  NEG-13   MEDIO       PE-04 (:269-327)                                   1
+  NEG-14   MEDIO       PD-13 (employeeDamages), PC-84                     4
+  NEG-15   MEDIO       PE-02 (:420-530, :823-895), PC-37                 2
+  FIA-03   MEDIO       PC-61, PE-06 (:283-327), PB-01                    3
+  FIA-04   MEDIO       PG-24, PA-01, PA-05, PA-06, PA-15                 5
+  UX-01   BAIXO/MEDIO PA-04, PD-02 (rotulos), PF-16 (a)                  5
+  UX-02   BAIXO/MEDIO PD-27, PD-21                                        1
+  UX-03   BAIXO/MEDIO PA-04, 1.4, PE-03/04/05 (JSX)                       5
+  B-01    BAIXO       PA-13, PH-05                                          0
+  B-02    BAIXO       PH-05                                                 0
+  B-03    BAIXO       PA-11, PG-25                                          0
+  B-04    BAIXO       PA-12                                                 5
+  B-05    BAIXO       PA-07                                                 5
+  B-06    BAIXO       PA-01 (eslint)                                       5
+  B-07    BAIXO       PH-10                                                 0
+  B-08    BAIXO       PH-09, PA-10                                          0
+  B-09    BAIXO       PA-01 (versões), PA-02                                    1
+  B-10    BAIXO       PD-29, PE-01                                             1
+  B-11    BAIXO       PH-04, PE-08                                             5
+
+  Cobertura: 50 achados do relatorio -> 50 linhas com accao. Zero orfaos.
+  Distribuicao: 8 CRITICOS, 14 ALTOS, 17 MEDIOS, 11 BAIXOS.
+
+  ACHADOS NOVOS (nao estavam no relatorio; entraram nesta versao do plano):
+   - N-01  handleFecharAno nao fecha nem arquiva nada e grava um log a dizer
+           que executou (TechnicalModule.tsx:647-666). Entra em PE-06, Onda 2.
+   - N-02  clearSystemData apaga vendas sem chamadores e ja falha a meio
+           (firebaseDB.ts:3616-3653). Entra em PE-06c, Onda 2.
+   - N-03  taxRate existe no tipo e nunca e gravado (types.ts:52-53). Entra em
+           M-01, Onda 1.
+   - N-04  o fallback de hash produz hashes incompativeis com o caminho normal
+           (securityHelper.ts:101-133). Entra em M-06, Onda 3.
+   Total: 50 do relatorio + 4 novos = 54, todos com accao e onda.
+
+
+================================================================================
+13. CRITERIOS DE ACEITACAO GLOBAL (como saber que o plano acabou)
+================================================================================
+Nao e "quando o codigo estiver bonito". E quando estes 12 testes passarem.
+
+  SEGURANCA
+  [ ] 1. Com a chave publica do projecto, uma sessao anonima NAO consegue
+         apagar uma venda, um produto nem um registo de auditoria.
+  [ ] 2. A coleccao credentials NAO e legivel pelo cliente.
+  [ ] 3. grep de 05082, gestor123, 2000SC, 131923, 0147 em src/ = 0.
+  [ ] 4. Alterar o sessionStorage/localStorage nao muda o perfil nem da acesso
+         a modulos restritos.
+  [ ] 5. Um utilizador eliminado nao entra, mesmo no computador onde ja entrou.
+
+  DADOS
+  [ ] 6. Simular falha de leitura nao produz NENHUMA escrita (produtos,
+         definicoes, credenciais).
+  [ ] 7. Exportar -> apagar registo de teste -> importar -> todas as coleccoes
+         com as mesmas contagens, incluindo caixa, dividas e movimentos.
+  [ ] 8. Nenhum ecra destrutivo actua sem senha de perfil superior e backup
+         imediatamente anterior.
+
+  DINHEIRO
+  [ ] 9. Factura em dinheiro (A4 ou termica) fica Paga e emite recibo; venda a
+         credito cria divida imediatamente.
+  [ ] 10. Pagamento multiplo com soma diferente do total e recusado; troco fica
+         gravado no documento.
+  [ ] 11. IVA INCLUIDO (D1): o total cobrado e igual ao preco de venda; o IVA
+         aparece extraido e coincide ao centavo no ecra, PDF A4, recibo termico,
+         nota de credito, relatorio e mapa de IVA. Ligar/desligar o botao de
+         IVA nao altera o total em nenhum caso.
+  [ ] 11a. CREDITO (D3): venda acima do limite pede senha de gerencia; cliente
+         com divida vencida ha mais de 30 dias nao leva credito novo; toda a
+         venda a credito cria divida no momento da venda.
+  [ ] 12. Fecho de caixa POR TURNO (D5): cada mudanca de turno fecha com
+         contagem por metodo, diferenca (sem tolerancia), justificacao e duas
+         assinaturas (quem conta, quem confere). Nao existe venda sem turno
+         aberto e nao existe fecho alterado depois de gravado.
+
+  HONESTIDADE E MIGRACAO
+  [ ] 12a. Nenhum ecra afirma ter feito o que nao fez (fecho de exercicio,
+           arquivo, sincronizacao, "conformidade total").
+  [ ] 12b. Cada campo novo tem omissao documentada e um relatorio ANTIGO
+           comparado antes/depois (secao 15): zero diferenca de centimos.
+
+  OPERACAO
+  [ ] 13. npm run test:ci passa e o GitHub Actions corre-o em cada PR.
+  [ ] 14. PDV utilizavel em < 2 s com 5.000 vendas e 1.000 produtos.
+  [ ] 15. Documentacao: SRS, manual e plano de backup descrevem apenas o que o
+         sistema faz (verificavel por amostragem de 10 afirmacoes).
+
+
+================================================================================
+14. O QUE ESTE PLANO AINDA NAO PODE DECIDIR + PROXIMOS PASSOS
+================================================================================
+
+14.1 DECISOES DE NEGOCIO — ESTADO (actualizado 09/11/2026)
+
+  RESPONDIDAS (registadas em REGISTO-DECISOES.txt; base para os PRs)
+  [x] D1 — IVA. O preco de revenda JA INCLUI o IVA (16%). Nao se acrescenta
+      nada por cima e nao se ignora o imposto: extrai-se do preco e discrimina-se
+      nos documentos. Consequencia: o total deixa de variar com o botao de IVA,
+      e o IVA passa a aparecer em todas as vendas (antes so nas que tinham o
+      botao ligado). Accoes: PD-03, PD-04, PD-02, PC-30, PG-26, M-01.
+  [x] D2 — A4 paga a dinheiro = PAGA, com recibo. O estado passa a depender do
+      pagamento, nao do papel. Accoes: PE-01 (:1374-1395), PD-29, PG-12.
+      Pendente: revisao das facturas A4 antigas marcadas "Pendente" (M-08).
+  [x] D3 — Credito controlado: limite por cliente de 20.000 MT (ajustavel),
+      prazo de 30 dias, acima do limite exige senha de gerencia, cliente com
+      divida vencida ha mais de 30 dias nao leva credito novo. Accoes: PD-35,
+      PC-87, PC-88, PC-41, PG-27, M-07.
+
+  [x] D4 — ARMAZEM: ADIADO pelo dono ("por enquanto nao mexemos nele; nao se
+      mexe nada agora"). Nao se remove o menu, nao se implementa nada. O risco
+      fica aceite: existe um menu que promete um modulo inexistente. PR-10
+      adiado sem data. Accoes: nenhuma. Revisitar quando o dono quiser.
+
+  [x] D5 — CAIXA: fecho POR TURNO (obrigatorio a cada mudanca de turno);
+      SEM fundo fixo declarado (o turno abre com o que o anterior fechou e
+      contou); SEM tolerancia (toda a diferenca e registada com justificacao);
+      assinado por quem conta e por quem confere; contagem por metodo.
+      SALARIOS FORA DO AMBITO: pagos a partir do banco (decisao do dono), nao
+      passam pela gaveta nem pelo fecho. Accoes: PD-14, PD-36, PC-89, PG-28,
+      M-10. (NEG-05)
+
+  MICRO-PERGUNTAS AINDA ABERTAS PARA O PR-14 (nao bloqueiam o desenho, mas
+  tem de ser respondidas antes de programar):
+    Q1. Quantos turnos existem e a que horas mudam? (ex.: 08:00-15:00 e
+        15:00-20:00, ou um so turno com fecho ao fim do dia?)
+    Q2. Quem conta e quem confere, por turno? (nomes ou cargos)
+    Q3. O dinheiro fica na loja de um dia para o outro, ou ha deposito no banco
+        no fim do dia? (se ha, e um movimento de caixa do tipo "Deposito")
+    Q4. Diferenca acima de zero: o que acontece a quem contou? (desconto,
+        advertência, investigação) — a politica e do dono, nao do sistema.
+  Sem Q1-Q3 o PR-14 fica em espera; a Q4 pode ficar para depois do primeiro mes.
+  D4. Armazem: separar fisicamente deposito e loja? Se sim, quantos locais e
+      quem transfere? Decide entre remover o menu (barato) e construir (caro).
+  D5. Fim do dia: quem conta o dinheiro, a que horas, e o que acontece quando
+      a diferenca existe? (NEG-05)
+
+14.2 O QUE ESTE PLANO NAO COBRE (e porque)
+
+  - Nao cobre revisao linha a linha do JSX de apresentacao (classes, espacos,
+    cores). Esta coberto pelas regras 1.4.
+  - Nao cobre a base de dados real: nao vi dados, nao sei quantos registos
+    existem nem se ha sujidade (stock negativo, datas em falta). Depois da Onda
+    0 deve correr-se reconcileStock (PC-76) uma vez e analisar o relatorio.
+  - Nao cobre validacao fiscal com a Autoridade Tributaria mocambicana nem
+    tabelas oficiais de IRPS/INSS: precisa de contabilista. (PF-16b)
+  - Nao cobre infraestrutura (dominio, SSL, backups da Vercel, contas de
+    Google): verificar com quem gere a conta.
+  - Nao cobre hardware: impressora termica, leitor, gaveta. Os testes T e o
+    PD-28 (posHardware) precisam de equipamento real.
+
+14.3 SE QUISER CONTINUAR AGORA, POR ESTA ORDEM
+
+  1. Aprovar a Onda 0 (3 PRs, 1-2 dias) — e o unico trabalho que reduz risco
+     real esta semana.
+  2. Responder as 5 decisoes (D1-D5) — desbloqueia as ondas 1 e 4.
+  3. Pedir "plano detalhado do PR-01" (ou de qualquer PR) e recebe o diff
+     proposto ficheiro a ficheiro, com os testes, antes de aplicar.
+  4. Se preferir revisao literal linha a linha, escolher UM ficheiro por vez:
+     comecaria por src/utils/firebaseDB.ts (o que guarda o dinheiro) e depois
+     src/components/PDVModule.tsx (o que o cobra).
+
+================================================================================
+15. MIGRACOES E BACKFILL (M-01..M-06)
+================================================================================
+Nenhuma destas existia na v1. Sem elas, cada PR que acrescenta um campo cria
+duas verdades nos relatorios. Modelo unico, aplicado a todas:
+
+  CAMPO .............. o que se acrescenta
+  OMISSAO ............ o que vale para registos antigos, e porquê
+  BACKFILL ........... script (com --dry-run) ou "nao se faz, fica null"
+  TESTE DE INOCENCIA . compara um relatorio antigo antes/depois
+  REVERSAO ........... o que fica nos dados se o PR for desfeito
+
+--------------------------------------------------------------------------------
+M-01  taxRate por linha de venda (para o PR-06)
+--------------------------------------------------------------------------------
+  Campo ......... SaleItem.taxRate (ja existe em types.ts:52-53, nunca gravado)
+  Omissao ....... vendas anteriores a data do PR: 16% (foi a taxa cobrada). Ler
+                  como `item.taxRate ?? 16`, NUNCA `?? 0`.
+  Backfill ...... opcional: marcar explicitamente as vendas antigas com 16%, com
+                  contagem antes/depois. Se nao for feito, o `?? 16` cobre.
+  Teste ......... relatorio do mes anterior: mesmo total ao centimo.
+  Reversao ...... campo fica; codigo antigo ignora-o.
+  Risco se mal feito: o mapa de IVA do ano passa a diferir do que foi entregue.
+
+--------------------------------------------------------------------------------
+M-02  amountReceived / changeGiven (para o PR-05)
+--------------------------------------------------------------------------------
+  Campo ......... Sale.amountReceived, Sale.changeGiven (declarados em
+                  types.ts:86-88 com o comentario "para auditoria do troco").
+  Omissao ....... registos antigos: null = "nao registado" (nao 0 — zero e um
+                  valor, null e uma ausencia; apresentar "—" na interface).
+  Backfill ...... nao se faz: os dados nao existiram nunca.
+  Teste ......... relatorio de trocos mostra apenas vendas novas; nao inventa.
+  Reversao ...... campo fica.
+
+--------------------------------------------------------------------------------
+M-03  deletedAt (para o PR-01b, soft-delete)
+--------------------------------------------------------------------------------
+  Campo ......... deletedAt / deletedBy em products, employees, customers,
+                  transformations.
+  Omissao ....... ausente = activo (todo o historico).
+  Backfill ...... nao se faz.
+  Teste ......... produto arquivado nao aparece em NENHUMA lista nem pode ser
+                  vendido por codigo de barras; relatorios historicos continuam
+                  a mostra-lo nas vendas antigas.
+  Reversao ...... campo fica; o registo pode ser reativado.
+
+--------------------------------------------------------------------------------
+M-04  cashSessionId (para o PR-14, fecho de caixa)
+--------------------------------------------------------------------------------
+  Campo ......... cash_movements.cashSessionId e Sale.cashSessionId.
+  Omissao ....... movimentos anteriores: null = "sem sessao" (o fecho so vale
+                  para o periodo em que existir sessao aberta).
+  Backfill ...... nao se faz; o primeiro fecho e o marco zero.
+  Teste ......... fecho do primeiro dia: esperado = vendas em dinheiro com
+                  sessao + movimentos com sessao; os antigos ficam de fora e a
+                  interface diz isso.
+  Reversao ...... campo fica.
+
+--------------------------------------------------------------------------------
+M-05  stockPasswordHash: texto -> pbkdf2 (para o PB-07)
+--------------------------------------------------------------------------------
+  Ver PB-07. Migracao progressiva com deteccao de formato e re-gravacao no
+  primeiro sucesso; ramo legado removido ao fim de 30 dias.
+  Teste ......... codigo legado continua a autorizar até ser migrado; depois de
+                  migrado, o valor antigo deixa de funcionar.
+  Reversao ...... guardar o valor anterior em audit_logs (nunca no documento).
+
+--------------------------------------------------------------------------------
+M-06  Credenciais/hashes (para o PB-06 e o PB-03)
+--------------------------------------------------------------------------------
+  Diagnostico ... script que lista hashes que so verificam no fallback e hashes
+                  legados (sha256: e texto). Ver REVISAO F-03.
+  Omissao ....... users com hash ilegivel -> mustChangePassword = true.
+  Backfill ...... re-hash no proximo login bem-sucedido (ja implementado em
+                  LoginPanel.tsx:207-229).
+  Teste ......... nenhum utilizador fica sem conseguir entrar por causa do PR.
+  Reversao ...... manter a verificacao legada durante a transicao.
+
+
+--------------------------------------------------------------------------------
+M-07  creditLimit / creditTermDays (para o PR-07, D3)
+--------------------------------------------------------------------------------
+  Campo ......... customers.creditLimit (null = usa o global 20.000),
+                  customers.creditTermDays (omissao 30), creditBlocked (false).
+  Omissao ....... null / 30 / false — nenhum cliente fica bloqueado no dia 1.
+  Backfill ...... nao se faz. Mas gerar um RELATORIO no dia 1: clientes cujo
+                  saldo em aberto ja excede 20.000 (para o dono decidir caso a
+                  caso, em vez de bloquear vendas sem aviso).
+  Teste ......... venda que cabe no limite; venda que excede (pede gerencia);
+                  cliente atrasado (bloqueia); cliente com limite null.
+  Reversao ...... campos ficam; politica desactivavel por configuracoo.
+
+--------------------------------------------------------------------------------
+M-08  Facturas A4 marcadas "Pendente" que ja foram pagas (para o PR-04, D2)
+--------------------------------------------------------------------------------
+  Problema ...... desde sempre, toda a factura A4 ficou Pendente; uma parte foi
+                  paga a dinheiro. Nao ha como o sistema saber quais.
+  Passos ........ 1) listar todas as vendas com documentType = FaturaDefinitiva
+                     e estado Pendente (relatorio exportavel, com data, cliente,
+                     total, metodo);
+                  2) o dono/contabilista marca as que foram pagas (folha ou
+                     ficheiro);
+                  3) script corrige estado e grava auditoria "correccao D2",
+                     com o ficheiro de origem arquivado;
+                  4) as restantes continuam Pendente — e passam a ser divida
+                     real (ou sao anuladas, se foram erro).
+  Teste ......... contagem antes/depois; cada venda corrigida tem registo de
+                  auditoria com o motivo e a fonte.
+  Reversao ...... estado anterior guardado em previousStatus (o campo ja existe).
+
+--------------------------------------------------------------------------------
+M-09  Vendas com IVA somado por cima (para o PR-06, D1)
+--------------------------------------------------------------------------------
+  Problema ...... enquanto o botao de IVA existiu, cada venda com o botao ligado
+                  cobrou 16% ACIMA do preco de prateleira.
+  Passos ........ 1) contar vendas com includeIva = true e somar o valor
+                     cobrado a mais (ivaAmount);
+                  2) entregar a lista ao dono e ao contabilista;
+                  3) decidir caso a caso: nota de credito, devolucao ao cliente,
+                     ou manter (se o cliente sabia que o preco era sem IVA);
+                  4) so depois mudar o calculo (PD-03).
+  Importante .... NAO corrigir automaticamente. Mexer em vendas ja emitidas sem
+                  documento de correccao e pior do que o erro.
+  Teste ......... o relatorio do M-09 tem de fechar com a contagem da base.
+
+--------------------------------------------------------------------------------
+M-10  Primeiro turno e dinheiro que ja esta na gaveta (para o PR-14, D5)
+--------------------------------------------------------------------------------
+  Problema ...... no dia em que o fecho por turno entra em funcionamento, ha
+                  dinheiro na gaveta que nao pertence a nenhum turno registado.
+  Passos ........ 1) o gerente conta o dinheiro fisico e regista-o como
+                     "saldo inicial do primeiro turno" (documento assinado);
+                  2) a partir daí, todos os movimentos ficam ligados a um turno
+                     (cashSessionId);
+                  3) os movimentos anteriores ficam com cashSessionId = null e
+                     sao excluidos do fecho (a interface di-lo claramente:
+                     "movimentos sem turno, anteriores a <data>").
+  Teste ......... o primeiro fecho tem de explicar todo o dinheiro em gaveta:
+                  saldo inicial + vendas em dinheiro + entradas - sangrias -
+                  reembolsos = contado.
+  Reversao ...... sessoes ficam; podem ser anuladas apenas com auditoria.
+  Nota ......... nao se faz backfill de turnos antigos: seria inventar horarios
+                  e responsaveis que nunca existiram.
+
+================================================================================
+16. OPERACAO, ACESSOS, CUSTOS E COMUNICACAO
+================================================================================
+A v1 tratava disto em duas linhas. Sem esta secao, o plano tecnicamente correto
+falha na pratica.
+
+16.1 MONITORIZACAO DIARIA — 2 MINUTOS, TRES NUMEROS
+  [ ] Vendas de ontem: contagem no sistema vs soma dos recibos. Diferenca > 0
+      e investigacao, nao arredondamento.
+  [ ] Produtos com stock negativo (reconcileStock, PC-76). Deve ser zero; se
+      crescer, ha venda sem baixa.
+  [ ] "permission-denied" na consola do browser ou no log de auditoria. Um por
+      dia e ruido; vinte e regra mal publicada.
+  Onde registar: uma folha simples (papel serve) com data e as tres linhas.
+  Quem: o mesmo responsavel do fecho de caixa.
+
+16.2 INVENTARIO DE ACESSOS (fazer na Onda 0.5)
+  Preencher e guardar fora do repositorio:
+    CONTA                    QUEM TEM    COMO SE RECUPERA   ULTIMA ROTACAO
+    GitHub (repositorio)      ...        2FA + codigos      ...
+    Firebase (projeto)        ...        dono do projeto    ...
+    Vercel (publicacao)       ...        email              ...
+    Dominio / DNS             ...        registrador        ...
+    Impressora / equipamento  ...        fornecedor         ...
+  Regra: nenhuma conta com uma unica pessoa e sem recuperacao documentada.
+  E o risco mais comum em empresas pequenas: sai a pessoa, para o sistema.
+
+16.3 CUSTOS E QUOTAS (decidir antes da Onda 3)
+  - Cloud Functions exigem plano Blaze (pagamento por uso). Estimar: 12
+    utilizadores x ~20 logins/dia = 240 invocacoes/dia -> custo proximo de zero,
+    mas o cartao tem de existir e alguem tem de o controlar.
+  - Leituras do Firestore: hoje o PDV descarrega tudo (DES-01). Com 5.000 vendas,
+    cada abertura pode custar milhares de leituras. O PR-16 nao e so desempenho:
+    e tambem factura.
+  - Definir um limite de alerta na consola e quem o recebe.
+
+16.4 DADOS PESSOAIS (nao e opcional)
+  Estao na base: nomes, NUIT, INSS, IBAN, salarios, faltas e processos
+  disciplinares de funcionarios. Minimo a fazer:
+  - dizer, por escrito, QUEM pode ver salarios (hoje: qualquer sessao);
+  - nao exportar dados de RH para o WhatsApp/email pessoal;
+  - guardar os PDFs de salarios numa pasta com acesso restrito;
+  - definir prazo de conservacao (ex.: 5 anos) e o que se apaga depois;
+  - registar acessos a payroll (a auditoria ja existe; usar).
+  Nota legal: confirmar com o contabilista/jurista os prazos aplicaveis em
+  Mocambique. Nao inventar.
+
+16.5 COMUNICACAO A EQUIPA (uma pagina por mudanca visivel)
+  Cada mudanca que a equipa sente (palavras-passe, estado das facturas A4,
+  fecho de caixa) precisa de:
+    - uma nota de uma pagina: o que muda, o que fazer, a quem perguntar;
+    - 15 minutos de demonstracao no balcao, com um caso real;
+    - uma semana de tolerancia, com alguem a acompanhar.
+  Sem isto, a resposta natural e voltar ao caderno — e o sistema perde
+  credibilidade por causa de uma mudanca tecnicamente correta.
+
+16.6 JANELA DE PUBLICACAO E ROLLBACK
+  - Publicar fora do horario de maior venda; nunca na sexta ao fim do dia.
+  - Antes: export completo (PC-72) e copia das regras.
+  - Depois: 24 h de observacao com os tres numeros do 16.1.
+  - Se algo partir: rollback em duas linhas (codigo/regras) + registo do que
+    ficou alterado nos dados.
+
+
+================================================================================
+17. QUADRO DE EXECUCAO — UMA PAGINA (imprimir e afixar)
+================================================================================
+
+  SEMANA   O QUE FICA FEITO                            PRS        PROVA
+  -------- -------------------------------------------- ---------- --------------
+  Sem 1    Historico de vendas deixa de ser apagavel;  01, 02, 03 Antes/depois:
+           falha de rede nao reescreve catalogo;        +0.5       apagar venda =
+           palavras-passe fora do codigo.                           negado
+  Sem 2    Facturas pagas ficam Pagas; multiplo         04, 05, 06 Factura teste
+           validado; IVA e custo coerentes; dividas     +01b       ao centimo
+           criadas com a venda; produtos desactivam.
+  Sem 3    Backup completo com restauro provado;      07, 08, 09 Exportar,
+           nada destrutivo num clique; menu armazem               apagar, importar
+           removido (ou marcado).                                  = igual
+  Sem 4-7  Acesso a serio: Cloud Function, claims,    11, 12, 13 Perfil nao muda
+           sessoes, politica de palavras-passe.                   ao editar browser
+  Sem 8-11 Caixa com fecho POR TURNO (D5); compras e  14, 15, 16 Cada mudanca
+           fornecedores (fase 1); PDV rapido.                      de turno fecha
+                                                                   com assinaturas
+  Continuo Qualidade: CI, limpeza, documentacao       17, 18     CI verde;
+                                                                   docs verdadeiros
+
+  REGRA DE OURO: nao comecar uma semana sem a anterior verificada. Se a Sem 1
+  atrasar, a Sem 2 atrasa — e isso e normal. O que nao e aceitavel e comecar a
+  Sem 2 com a Sem 1 a meio.
+
+================================================================================
+FIM DO PLANO
+================================================================================
+Nota final: este plano nao alterou uma unica linha do sistema. Nada foi
+commitado. A regra combinada mantem-se — so executo quando disser "aplica o
+PR-xx".
+================================================================================
