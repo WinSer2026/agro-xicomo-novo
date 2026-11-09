@@ -19,7 +19,7 @@ import {
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
-import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
+import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import * as XLSX from 'xlsx';
 
 interface StockModuleProps {
@@ -47,6 +47,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [reconciliationFilter, setReconciliationFilter] = useState<'all' | 'discrepancies' | 'synced'>('all');
   const [reconciliationSearch, setReconciliationSearch] = useState('');
   const [physicalCounts, setPhysicalCounts] = useState<Record<string, number>>({});
+  /** Lotes vencidos com stock: listados, nunca apagados automaticamente. */
+  const [expiredProducts, setExpiredProducts] = useState<Product[]>([]);
+  const [expirePassword, setExpirePassword] = useState('');
+  const [expiringId, setExpiringId] = useState<string | null>(null);
   const [showApplyPhysicalModal, setShowApplyPhysicalModal] = useState(false);
   const [applyPassword, setApplyPassword] = useState('');
   const [applyError, setApplyError] = useState('');
@@ -121,12 +125,15 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showLossModal, setShowLossModal] = useState(false);
   const [lossProduct, setLossProduct] = useState<Product | null>(null);
   const [lossQty, setLossQty] = useState(0);
+  /** Unidade da quebra: sacos (converte para base) ou unidade base. */
+  const [lossUnit, setLossUnit] = useState<'base' | 'Bulk'>('base');
   const [lossReason, setLossReason] = useState<'Fora de Prazo' | 'Danos Físicos' | 'Quebras de Inventário' | 'Outro'>('Danos Físicos');
   const [lossJustification, setLossJustification] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Notification Banner
   const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('success');
 
   // Search and Barcode features state
   const [searchQuery, setSearchQuery] = useState('');
@@ -207,88 +214,58 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     }
   };
 
+  /**
+   * Contagem física.
+   *
+   * ES-31/32/34: antes gravava o saldo absoluto, a perda ia para a base antes do
+   * produto e as sobras não deixavam rasto. Agora cada diferença é aplicada numa
+   * transacção, com movimento de stock; as faltas registam perda no mesmo
+   * commit.
+   */
   const handleApplyPhysicalInventory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isApplyingAdjustment) return;
     setApplyError('');
 
-    const currentSettings = settings || await dbService.getSettings();
+    const currentSettings = settings || (await dbService.getSettings());
 
     if (!(await verifyAuthorizationPassword(applyPassword, currentSettings))) {
       setApplyError('Senha de autorização de gestor incorreta.');
       return;
     }
 
+    const contagens: Record<string, number> = {};
+    for (const [id, valor] of Object.entries(physicalCounts)) {
+      if (valor === undefined || valor === null || !Number.isFinite(Number(valor))) continue;
+      contagens[id] = Number(valor);
+    }
+
+    if (Object.keys(contagens).length === 0) {
+      setApplyError('Não há quantidades contadas para aplicar.');
+      return;
+    }
+
     setIsApplyingAdjustment(true);
     try {
-      const prodsToSave: Product[] = [];
-      let adjustedCount = 0;
-      let lossCount = 0;
-      let totalLossVal = 0;
-
-      for (const prod of products) {
-        const physicalQty = physicalCounts[prod.id] !== undefined ? physicalCounts[prod.id] : prod.stockQty;
-        const diff = physicalQty - prod.stockQty;
-
-        if (diff !== 0) {
-          adjustedCount++;
-
-          // If physical count is less than system recorded stock, record an automatic loss
-          if (diff < 0) {
-            const missingQty = Math.abs(diff);
-            const lossVal = missingQty * (Number(prod.buyingPrice) || 0);
-            totalLossVal += lossVal;
-            lossCount++;
-
-            await dbService.addLoss({
-              id: 'loss-phy-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-              date: new Date().toISOString().split('T')[0],
-              productId: prod.id,
-              productName: prod.name,
-              quantity: missingQty,
-              unit: prod.baseUnit || 'Unidades',
-              reason: 'Deterioração',
-              costValue: lossVal,
-              justification: `Ajuste por Reconciliação e Contagem Física de Inventário. Falta de ${missingQty} ${prod.baseUnit} identificada.`
-            });
-          }
-
-          const updatedProd: Product = {
-            ...prod,
-            stockQty: Math.max(0, physicalQty),
-            updatedAt: new Date().toISOString()
-          };
-          prodsToSave.push(updatedProd);
-        }
-      }
-
-      if (prodsToSave.length > 0) {
-        await dbService.saveProducts(prodsToSave);
-      }
-
-      // Log to Audit Log
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: currentUser?.username || 'Gestor de Stock',
-        ipAddress: await getClientIp(),
-        action: 'Ajuste de Contagem Física',
-        status: 'Sucesso',
-        level: 'WARNING',
-        details: `Reconciliação e contagem física aplicada: ${adjustedCount} produtos atualizados, ${lossCount} quebras geradas (${totalLossVal.toLocaleString('pt-MZ')} MT).`
+      const resultado = await dbService.applyPhysicalCount({
+        counts: contagens,
+        operator: currentUser?.username || 'Gestor de Stock',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
-      // Reload fresh data
-      const freshProds = await dbService.getProducts();
-      setProducts(freshProds);
-      const res = await dbService.reconcileStock();
-      setReconciliationData(res);
       setShowApplyPhysicalModal(false);
       setApplyPassword('');
-      setToastMessage(`Inventário físico sincronizado com sucesso! (${adjustedCount} artigos atualizados)`);
-    } catch (err) {
-      console.error(err);
-      setApplyError('Falha ao gravar os ajustes de inventário na base de dados.');
+      setPhysicalCounts({});
+      triggerToast(
+        `Contagem aplicada: ${resultado.adjusted} artigo(s) — ${resultado.shortages} falta(s), ` +
+          `${resultado.surpluses} sobra(s), ${resultado.lossValue.toFixed(2)} MT de perdas.`
+      );
+      await loadInventoryData();
+      const res = await dbService.reconcileStock();
+      setReconciliationData(res);
+    } catch (erro: any) {
+      console.error(erro);
+      setApplyError(erro?.message || 'Falha ao gravar os ajustes de inventário.');
     } finally {
       setIsApplyingAdjustment(false);
     }
@@ -505,49 +482,30 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       console.warn('Error loading settings in StockModule:', err);
     }
 
-    // 1. Rigorous Automatic Expiration Checks and transfers
-    const todayStr = new Date().toISOString().split('T')[0];
+    /**
+     * ES-01: o expurgo de lotes vencidos deixou de acontecer sozinho.
+     *
+     * Antes, abrir o ecrã de stock apagava o stock de todos os artigos vencidos
+     * — sem autorização, a cada carregamento, e só no total (sacos e retalho
+     * ficavam a vender). Uma data mal digitada fazia desaparecer mercadoria.
+     *
+     * Agora os vencidos são apenas **listados**; a baixa é uma decisão explícita
+     * com palavra-passe de gestor.
+     */
+    const todayStr = toLocalDateKey(new Date().toISOString());
     const updatedProducts: Product[] = [];
-    
+    const vencidos: Product[] = [];
+
     for (const prod of list) {
       let changed = false;
-      // Auto-generate EAN-13 barcode starting with "961" if missing completely
+      // Código em falta: gerado, mas registado na auditoria da importação.
       if (!prod.code) {
         prod.code = generateValidEAN13('961');
         changed = true;
       }
 
       if (prod.expiryDate && prod.expiryDate <= todayStr && prod.stockQty > 0) {
-        // Product expired! Automatically move all remaining qty to losses
-        const lostCost = prod.stockQty * prod.buyingPrice;
-        
-        await dbService.addLoss({
-          id: 'loss-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-          productId: prod.id,
-          productName: prod.name + ' (VENCIDO - AUTO REMOVIDO)',
-          quantity: prod.stockQty,
-          unit: prod.baseUnit,
-          date: todayStr,
-          reason: 'Fora de Prazo',
-          justification: `Lote vencido na data de validade (${prod.expiryDate}). Transferência automática de segurança fiscal.`,
-          costValue: lostCost
-        });
-
-        // Set active stock to 0
-        prod.stockQty = 0;
-        await dbService.saveProduct(prod);
-        changed = true;
-
-        // Audit Log
-        void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
-          timestamp: new Date().toISOString(),
-          username: 'Sistema Automático',
-          ipAddress: '127.0.0.1',
-          action: 'Lote Expirado Removido',
-          status: 'Alerta',
-          details: `Lote de ${prod.name} atingiu a data de validade (${prod.expiryDate}) e foi movido para perdas.`
-        });
+        vencidos.push(prod);
       }
 
       if (changed) {
@@ -555,6 +513,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       }
       updatedProducts.push(prod);
     }
+
+    setExpiredProducts(vencidos);
 
     setProducts(updatedProducts.sort((a, b) => a.name.localeCompare(b.name)));
     setLosses(lossList);
@@ -567,7 +527,44 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setCategories(Array.from(customCats));
   };
 
-  const triggerToast = (msg: string) => {
+  /**
+   * Baixa de um lote vencido — acção explícita, com palavra-passe de gestor.
+   * Substitui o expurgo automático que corria ao abrir o ecrã (ES-01).
+   */
+  const handleExpireProduct = async (produto: Product) => {
+    if (isSubmitting) return;
+    const pw = await appPrompt(
+      `Dar baixa do lote vencido de ${produto.name} (${produto.stockQty} ${produto.baseUnit})?\n\n` +
+        'A mercadoria sai do stock e é registada uma perda. Introduza a palavra-passe de gestor.'
+    );
+    if (pw === null) return;
+    const configAtual = settings || (await dbService.getSettings().catch(() => null));
+    if (!(await verifyAuthorizationPassword(pw, configAtual))) {
+      triggerToast('Palavra-passe incorrecta: a baixa não foi feita.', 'error');
+      return;
+    }
+
+    setExpiringId(String(produto.id));
+    try {
+      const resultado = await dbService.expireProductBatch({
+        productId: String(produto.id),
+        operator: currentUser?.username || 'Gestor',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
+      });
+      triggerToast(
+        `${resultado.removedBase} ${produto.baseUnit} de ${resultado.productName} dados como perdidos (${resultado.costValue.toFixed(2)} MT).`,
+        'success'
+      );
+      await loadInventoryData();
+    } catch (erro: any) {
+      triggerToast(erro?.message || 'Falha ao dar baixa do lote vencido.', 'error');
+    } finally {
+      setExpiringId(null);
+    }
+  };
+
+  const triggerToast = (msg: string, tipo: 'success' | 'error' | 'warning' = 'success') => {
+    setToastType(tipo);
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
   };
@@ -608,9 +605,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     setIsSubmitting(true);
 
     try {
-      const codeToUse = newProdCode.trim() || generateBarcodeValue();
+      const codeToUse = (newProdCode.trim() || generateBarcodeValue()).trim();
 
       const cat = newProdCategory === 'Nova Categoria' ? newCustomCategory : newProdCategory;
+
+      /**
+       * ES-07: código único. Dois artigos com o mesmo código de barras fazem o
+       * scanner do PDV vender o primeiro que encontrar — o cliente leva um
+       * produto e a factura descreve outro.
+       */
+      const donoDoCodigo = products.find(
+        p => String(p.code || '').trim().toLowerCase() === codeToUse.toLowerCase()
+      );
+      if (donoDoCodigo) {
+        setNewProdError(`O código ${codeToUse} já pertence a "${donoDoCodigo.name}".`);
+        triggerToast(`Código duplicado: já é usado por ${donoDoCodigo.name}.`, 'error');
+        setIsSubmitting(false);
+        return;
+      }
       const finalProdName = newProdName.trim().toUpperCase();
 
       const computedStockQty = isBulkEnabled 
@@ -624,9 +636,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         code: codeToUse,
         name: finalProdName,
         category: cat || 'Geral',
-        stockQty: computedStockQty,
-        stockQtyBulk: isBulkEnabled ? Number(newProdQtyBulk) : undefined,
-        stockQtyRetail: isBulkEnabled ? Number(newProdQtyRetail) : undefined,
+        // O stock inicial entra depois, como movimento de entrada — assim o
+        // livro de movimentos explica o saldo desde o primeiro dia (ES-08).
+        stockQty: 0,
+        stockQtyBulk: isBulkEnabled ? 0 : undefined,
+        stockQtyRetail: isBulkEnabled ? 0 : undefined,
         buyingPriceBulk: isBulkEnabled ? bulkBuyPrice : undefined,
         buyingPrice: isBulkEnabled ? bulkBuyPrice / Number(newConversionRate) : Number(newProdBuyPrice),
         sellingPrice: Number(newProdSellPrice),
@@ -642,6 +656,32 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       };
 
       await dbService.saveProduct(newProduct);
+
+      if (computedStockQty > 0) {
+        await dbService.adjustStock({
+          productId: newProduct.id,
+          deltaBase: computedStockQty,
+          reason: 'Stock inicial no cadastro do artigo',
+          operator: currentUser?.username || 'Gestor de Stock',
+          source: 'Entrada Manual',
+          ipAddress: await getClientIp().catch(() => 'desconhecido')
+        });
+      }
+
+      // ES-09: criar produto passa a ficar em auditoria.
+      void dbService.addAuditLog({
+        id: 'log-prod-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        username: currentUser?.username || 'Gestor de Stock',
+        ipAddress: await getClientIp().catch(() => 'desconhecido'),
+        action: 'Criação de Produto',
+        status: 'Sucesso',
+        entity: 'products',
+        details:
+          `Produto "${finalProdName}" (código ${codeToUse}, categoria ${newProduct.category}) criado ` +
+          `com stock inicial ${computedStockQty} ${newProduct.baseUnit}.`
+      });
+
       setShowAddModal(false);
       triggerToast(`Produto/Serviço ${newProdName} cadastrado com sucesso!`);
       loadInventoryData();
@@ -1462,48 +1502,50 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   };
 
   // Direct Inline Adjustment helper with password dialog verification
+  /**
+   * Ajuste directo na tabela.
+   *
+   * ES-21: antes escrevia o saldo absoluto a partir do ecrã — uma venda feita
+   * entre a leitura e o clique era apagada. Agora a diferença é calculada
+   * dentro da transacção, com movimento de stock e auditoria no mesmo commit.
+   */
   const adjustProductStockDirectly = async (product: Product, newQty: number) => {
     if (newQty < 0) {
-      triggerToast('A quantidade em stock não pode ser negativa.');
+      triggerToast('A quantidade em stock não pode ser negativa.', 'error');
       return;
     }
 
     const pw = await appPrompt('Introduza a Palavra-passe de Autorização do Stock para alterar o stock deste produto.');
     if (!pw) {
-      triggerToast('Operação cancelada: é necessária a palavra-passe de autorização do stock.');
+      triggerToast('Operação cancelada: é necessária a palavra-passe de autorização do stock.', 'error');
       return;
     }
     if (!(await verifyAuthorizationPassword(pw, settings))) {
-      triggerToast('A palavra-passe de segurança do stock está incorreta.');
+      triggerToast('A palavra-passe de segurança do stock está incorreta.', 'error');
       return;
     }
 
-    const prevQty = product.stockQty;
-    product.stockQty = newQty;
-    
-    // Auto-reallocate for hybrid products
-    if (product.parentUnit && product.conversionRate && product.conversionRate > 1) {
-      const rate = product.conversionRate || 1;
-      product.stockQtyBulk = Math.floor(newQty / rate);
-      product.stockQtyRetail = newQty % rate;
+    try {
+      const resultado = await dbService.adjustStock({
+        productId: String(product.id),
+        absoluteBase: Number(newQty),
+        reason: 'Ajuste directo na lista de stock',
+        operator: currentUser?.username || 'Gestor de Stock',
+        source: 'Ajuste',
+        ipAddress: await getClientIp().catch(() => 'desconhecido'),
+        allowNegative: false
+      });
+
+      triggerToast(
+        resultado.delta === 0
+          ? `O stock de ${product.name} já estava em ${newQty}.`
+          : `Stock de ${product.name}: ${resultado.previousBase} → ${resultado.newBase} ${product.baseUnit}.`
+      );
+      await loadInventoryData();
+      setInlineEditingProductId(null);
+    } catch (erro: any) {
+      triggerToast(erro?.message || 'Falha ao ajustar o stock.', 'error');
     }
-
-    await dbService.saveProduct(product);
-
-    // Security Audit Log
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Operador / Técnico',
-      ipAddress: '127.0.0.1',
-      action: 'Ajuste de Stock Direto',
-      status: 'Sucesso',
-      details: `Produto: ${product.name} (SKU: ${product.code}). Quantidade de stock alterada de ${prevQty} para ${newQty}. Validação de senha inline efetuada.`
-    });
-
-    triggerToast(`Stock ajustado de ${prevQty} para ${newQty} ${product.baseUnit}!`);
-    loadInventoryData();
-    setInlineEditingProductId(null);
   };
 
   // Sack requisition flow: moves sacks from wholesale (bulk) to retail stock
@@ -1631,47 +1673,66 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     setIsSubmitting(true);
     try {
-      const computedStockQty = isBulkEnabled 
-        ? (Number(editStockQtyBulk) * Number(editConversionRate)) + Number(editStockQtyRetail) 
+      const computedStockQty = isBulkEnabled
+        ? (Number(editStockQtyBulk) * Number(editConversionRate)) + Number(editStockQtyRetail)
         : Number(editStockQty);
 
       const prevQty = selectedProduct.stockQty;
-      
-      const codeToUse = editCode.trim() || selectedProduct.code || generateBarcodeValue();
 
-      // Update all properties
-      selectedProduct.name = editName;
-      selectedProduct.code = codeToUse;
-      selectedProduct.category = editCategory;
-      selectedProduct.baseUnit = editBaseUnit;
-      selectedProduct.parentUnit = editParentUnit || undefined;
-      selectedProduct.conversionRate = editConversionRate > 1 ? Number(editConversionRate) : undefined;
-      selectedProduct.stockQty = computedStockQty;
-      selectedProduct.stockQtyBulk = isBulkEnabled ? Number(editStockQtyBulk) : undefined;
-      selectedProduct.stockQtyRetail = isBulkEnabled ? Number(editStockQtyRetail) : undefined;
-      selectedProduct.buyingPriceBulk = isBulkEnabled ? Number(editBuyingPriceBulk) : undefined;
-      selectedProduct.buyingPrice = isBulkEnabled
-        ? Number(editBuyingPriceBulk) / Number(editConversionRate)
-        : Number(editBuyingPrice);
-      selectedProduct.sellingPrice = Number(editSellingPrice);
-      selectedProduct.sellingPriceBulk = isBulkEnabled ? Number(editSellingPriceBulk) : undefined;
-      selectedProduct.expiryDate = editExpiryDate || undefined;
-      selectedProduct.reference = editReference || undefined;
-      selectedProduct.isService = editIsService;
-      selectedProduct.imageUrl = editImageUrl || undefined;
-      selectedProduct.taxRate = Number(editTaxRate) || 0;
+      /**
+       * ES-14/15: deixou de se mutar o objecto em estado e de gravar saldos
+       * absolutos. Primeiro os dados do artigo, depois o stock — sempre por
+       * diferença, com movimento e auditoria.
+       */
+      const codeToUse = (editCode.trim() || selectedProduct.code || generateBarcodeValue()).trim();
 
-      await dbService.saveProduct(selectedProduct);
+      const donoDoCodigo = products.find(
+        p =>
+          String(p.id) !== String(selectedProduct.id) &&
+          String(p.code || '').trim().toLowerCase() === codeToUse.toLowerCase()
+      );
+      if (donoDoCodigo) {
+        setAdjustError(`O código ${codeToUse} já pertence a "${donoDoCodigo.name}".`);
+        setIsSubmitting(false);
+        return;
+      }
 
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: 'Operador / Técnico',
-        ipAddress: '127.0.0.1',
-        action: 'Ajuste Completo de Produto',
-        status: 'Sucesso',
-        details: `Produto: ${editName} (SKU: ${editCode}). Alteração geral realizada. Qtd anterior: ${prevQty} -> Nova Qtd: ${editStockQty}. Validação por senha bem-sucedida.`
-      });
+      const produtoAtualizado: Product = {
+        ...selectedProduct,
+        name: editName,
+        code: codeToUse,
+        category: editCategory,
+        baseUnit: editBaseUnit,
+        parentUnit: editParentUnit || undefined,
+        conversionRate: editConversionRate > 1 ? Number(editConversionRate) : undefined,
+        buyingPriceBulk: isBulkEnabled ? Number(editBuyingPriceBulk) : undefined,
+        buyingPrice: isBulkEnabled
+          ? Number(editBuyingPriceBulk) / Number(editConversionRate)
+          : Number(editBuyingPrice),
+        sellingPrice: Number(editSellingPrice),
+        sellingPriceBulk: isBulkEnabled ? Number(editSellingPriceBulk) : undefined,
+        expiryDate: editExpiryDate || undefined,
+        reference: editReference || undefined,
+        isService: editIsService,
+        imageUrl: editImageUrl || undefined,
+        taxRate: Number(editTaxRate) || 0
+      };
+
+      await dbService.saveProduct(produtoAtualizado);
+
+      // O stock é sempre a última operação: se falhar, os dados do artigo já
+      // estão gravados e o stock continua intacto (nunca um saldo inventado).
+      if (Number.isFinite(computedStockQty)) {
+        await dbService.adjustStock({
+          productId: String(selectedProduct.id),
+          absoluteBase: computedStockQty,
+          reason: `Ajuste no formulário do artigo (antes: ${prevQty})`,
+          operator: currentUser?.username || 'Gestor de Stock',
+          source: 'Ajuste',
+          ipAddress: await getClientIp().catch(() => 'desconhecido'),
+          allowNegative: false
+        });
+      }
 
       setShowAdjustModal(false);
       setSelectedProduct(null);
@@ -1680,79 +1741,61 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setEditSacksForWholesale(0);
       setEditSacksForRetail(0);
       setEditIsService(false);
-      triggerToast(`Artigo ${editName} e stock ajustados com sucesso!`);
-      loadInventoryData();
-    } catch (err) {
-      setAdjustError('Erro ao gravar alteração.');
+      triggerToast(`Artigo ${editName} actualizado${computedStockQty !== prevQty ? ' e stock ajustado' : ''}.`);
+      await loadInventoryData();
+    } catch (err: any) {
+      setAdjustError(err?.message || 'Erro ao gravar alteração.');
+      // Os dados do artigo podem já estar gravados: o ecrã não pode continuar a
+      // mostrar os valores antigos como se nada tivesse mudado.
+      await loadInventoryData().catch(() => undefined);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   // Explicit Loss Log Handlers
+  /**
+   * Quebra / perda.
+   *
+   * ES-27: a baixa era sempre em unidade base — dar baixa de 1 saco (50 kg)
+   * retirava 1 kg do stock, enquanto o relatório registava 50 kg. Agora a
+   * conversão é aplicada e tudo (saldo, perda, movimento, auditoria) é escrito
+   * na mesma transacção.
+   */
   const handleRegisterLoss = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
 
     if (!lossProduct || lossQty <= 0 || !lossJustification) {
-      triggerToast('Preencha todos os campos do registo de quebra.');
-      return;
-    }
-
-    if (lossQty > lossProduct.stockQty) {
-      triggerToast('A quantidade de quebra excede o stock ativo disponível.');
+      triggerToast('Preencha todos os campos do registo de quebra.', 'error');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const costLost = lossQty * lossProduct.buyingPrice;
-
-      // Deduct stock quantity
-      if (typeof (dbService as any).deductProductStock === 'function') {
-        await (dbService as any).deductProductStock([{
-          productId: lossProduct.id,
-          hasConversion: false,
-          qtyToReduce: lossQty
-        }]);
-      } else {
-        lossProduct.stockQty = Math.max(0, lossProduct.stockQty - lossQty);
-        await dbService.saveProduct(lossProduct);
-      }
-
-      // Register loss
-      await dbService.addLoss({
-        id: 'loss-' + Date.now(),
-        productId: lossProduct.id,
-        productName: lossProduct.name,
+      const resultado = await dbService.registerLossAtomic({
+        productId: String(lossProduct.id),
         quantity: Number(lossQty),
-        unit: lossProduct.baseUnit,
-        date: new Date().toISOString().split('T')[0],
+        unit: lossUnit === 'Bulk' ? 'Bulk' : 'base',
         reason: lossReason,
         justification: lossJustification,
-        costValue: costLost
+        operator: currentUser?.username || 'Operador',
+        ipAddress: await getClientIp().catch(() => 'desconhecido')
       });
 
-    // Security Audit Log
-    void dbService.addAuditLog({
-      id: 'log-' + Date.now(),
-      timestamp: new Date().toISOString(),
-      username: 'Operador',
-      ipAddress: '127.0.0.1',
-      action: 'Registo de Quebra/Perda',
-      status: 'Alerta',
-      details: `Quebra de ${lossQty} de ${lossProduct.name} devido a ${lossReason}. Valor do prejuízo: ${costLost}MT.`
-    });
-
-    setShowLossModal(false);
-    setLossProduct(null);
-    setLossQty(0);
-    setLossJustification('');
-    triggerToast('Quebra física registada com sucesso.');
-    loadInventoryData();
-    } catch (err) {
-      console.error(err);
-      triggerToast('Erro ao registar quebra.');
+      const unidadeBase = lossProduct.baseUnit;
+      setShowLossModal(false);
+      setLossProduct(null);
+      setLossUnit('base');
+      setLossQty(0);
+      setLossJustification('');
+      triggerToast(
+        `Quebra registada: ${resultado.baseQty} ${unidadeBase} = ${resultado.costValue.toFixed(2)} MT.`
+      );
+      await loadInventoryData();
+    } catch (erro: any) {
+      console.error(erro);
+      triggerToast(erro?.message || 'Erro ao registar quebra.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -1807,8 +1850,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     <div className="space-y-6" id="stock_module">
       {/* Toast banner */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border border-green-700">
-          <span className="material-symbols-outlined">info</span>
+        <div
+          className={`fixed bottom-6 right-6 z-50 text-white p-4 rounded-xl shadow-2xl flex items-center gap-2 border ${
+            toastType === 'error'
+              ? 'bg-red-700 border-red-900'
+              : toastType === 'warning'
+                ? 'bg-amber-600 border-amber-800'
+                : 'bg-primary border-green-700'
+          }`}
+        >
+          <span className="material-symbols-outlined">
+            {toastType === 'error' ? 'error' : toastType === 'warning' ? 'warning' : 'info'}
+          </span>
           <span className="text-sm font-semibold">{toastMessage}</span>
         </div>
       )}
@@ -2055,6 +2108,37 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       </div>
 
       {/* --- SUB-TAB 1: INVENTÁRIO GERAL DE PRODUTOS --- */}
+      {expiredProducts.length > 0 && stockSubTab === 'inventory' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-xl px-3 py-2.5 space-y-1.5">
+          <p className="text-[11px] font-black text-rose-800 flex items-center gap-1">
+            <span className="material-symbols-outlined text-[15px]">event_busy</span>
+            {expiredProducts.length} lote(s) vencido(s) com stock — nada foi apagado
+          </p>
+          <p className="text-[10px] text-rose-700">
+            O sistema já não dá baixa sozinho. Confirme fisicamente e dê baixa, um a um, com a
+            palavra-passe de gestor.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {expiredProducts.slice(0, 6).map(produto => (
+              <button
+                key={produto.id}
+                type="button"
+                onClick={() => handleExpireProduct(produto)}
+                disabled={expiringId === String(produto.id)}
+                className="px-2 py-1 rounded-md bg-white border border-rose-300 text-[10px] font-bold text-rose-800 hover:bg-rose-100 disabled:opacity-60"
+              >
+                {produto.name} · {produto.stockQty} {produto.baseUnit}
+              </button>
+            ))}
+            {expiredProducts.length > 6 && (
+              <span className="text-[10px] text-rose-700 font-bold self-center">
+                +{expiredProducts.length - 6} outro(s)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {stockSubTab === 'inventory' && (
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto custom-scrollbar">
@@ -2255,6 +2339,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                             <button
                               onClick={() => {
                                 setLossProduct(prod);
+                                setLossUnit('base');
+                                setLossQty(0);
                                 setShowLossModal(true);
                               }}
                               className="px-2 py-0.5 text-[10px] bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100 font-bold cursor-pointer w-[72px] text-center"
@@ -2893,10 +2979,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                                 <input
                                   type="number"
                                   min="0"
+                                  step="0.001"
                                   value={currentPhysical}
                                   onChange={(e) => {
-                                    const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                    setPhysicalCounts(prev => ({ ...prev, [item.productId]: val }));
+                                    // A contagem de artigos a peso é em kg: 12,5 kg
+                                    // tem de ser contável. Antes `parseInt` cortava
+                                    // a parte decimal e a falta era inventada.
+                                    const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                    setPhysicalCounts(prev => ({
+                                      ...prev,
+                                      [item.productId]: Number.isFinite(val) ? Math.max(0, val) : 0
+                                    }));
                                   }}
                                   className="w-16 text-center font-mono font-black text-xs text-indigo-950 focus:outline-none"
                                 />
@@ -4119,7 +4212,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <span className="material-symbols-outlined">delete_sweep</span>
                 Registar Quebra Comercial
               </span>
-              <button onClick={() => { setShowLossModal(false); setLossProduct(null); }} className="text-white hover:opacity-80">
+              <button onClick={() => { setShowLossModal(false); setLossProduct(null); setLossUnit('base'); setLossQty(0); }} className="text-white hover:opacity-80">
                 <span className="material-symbols-outlined">close</span>
               </button>
             </div>
@@ -4131,13 +4224,38 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               </p>
 
               <div>
-                <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">Quantidade Danificada / Perdida</label>
-                <input
-                  type="number"
-                  value={lossQty}
-                  onChange={(e) => setLossQty(Number(e.target.value))}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm text-center font-bold"
-                />
+                <label className="block text-[10px] font-black uppercase text-gray-500 mb-1">
+                  Quantidade Danificada / Perdida
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    value={lossQty}
+                    onChange={(e) => setLossQty(Number(e.target.value))}
+                    className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm text-center font-bold"
+                  />
+                  {lossProduct?.parentUnit && Number(lossProduct.conversionRate) > 1 ? (
+                    <select
+                      value={lossUnit}
+                      onChange={(e) => setLossUnit(e.target.value as 'base' | 'Bulk')}
+                      className="border border-gray-300 rounded px-2 py-2 text-xs font-bold bg-white"
+                      title="Escolha a unidade: um saco vale pela conversão do artigo"
+                    >
+                      <option value="base">{lossProduct.baseUnit}</option>
+                      <option value="Bulk">{lossProduct.parentUnit}</option>
+                    </select>
+                  ) : (
+                    <span className="self-center text-[11px] font-bold text-slate-500">
+                      {lossProduct?.baseUnit}
+                    </span>
+                  )}
+                </div>
+                {lossProduct?.parentUnit && Number(lossProduct.conversionRate) > 1 && lossUnit === 'Bulk' && (
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    1 {lossProduct.parentUnit} = {lossProduct.conversionRate} {lossProduct.baseUnit} · sai do stock{' '}
+                    <strong>{(Number(lossQty) * Number(lossProduct.conversionRate)).toLocaleString('pt-MZ')} {lossProduct.baseUnit}</strong>
+                  </p>
+                )}
               </div>
 
               <div>

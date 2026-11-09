@@ -50,6 +50,15 @@ import { INITIAL_PRODUCTS } from '../data/initialProducts';
 import { safeStorage, safeSessionStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
 import {
+  clampStockDelta,
+  hybridStock,
+  physicalDelta,
+  roundStock,
+  splitHybrid,
+  stockLossValue,
+  toBaseQty
+} from './stockMath';
+import {
   getArchiveCutoffTimestamp,
   getCursorPageMetadata,
   getInclusiveDateBounds,
@@ -1523,6 +1532,439 @@ export class FirebaseDBService {
       this.cashMovementsCache = null;
       window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_movements', action: 'cutoff-refund' } }));
     }
+    return resultado;
+  }
+
+  // --- Ajustes de stock transaccionais (auditoria da gestão de stock) ---
+
+  /**
+   * Altera o stock de um artigo por **diferença**, dentro de uma transacção, e
+   * deixa três rastos no mesmo commit: o saldo, o movimento de stock e a
+   * auditoria.
+   *
+   * Porque existe: todos os ecrãs de stock escreviam o saldo **absoluto**
+   * calculado no formulário. Uma venda feita entre abrir o modal e gravar era
+   * apagada pelo valor do ecrã — sem erro, sem aviso. E nenhum desses ecrãs
+   * deixava movimento no livro: o saldo mudava e não havia explicação.
+   *
+   * Regras:
+   *  - lê o saldo dentro da transacção e aplica só a variação;
+   *  - recusa deixar o saldo negativo (salvo `allowNegative`, usado só por
+   *    correcções de contagem que já foram validadas);
+   *  - nos artigos híbridos mantém base, sacos e retalho coerentes entre si;
+   *  - produto inexistente nunca é criado por acidente.
+   */
+  public async adjustStock(input: {
+    productId: string;
+    /** Variação em unidade base (positiva entra, negativa sai). */
+    deltaBase?: number;
+    /** Variação em sacos (multiplica pela conversão). */
+    deltaBulk?: number;
+    /** Valor absoluto em unidade base (contagem física). */
+    absoluteBase?: number;
+    reason: string;
+    operator: string;
+    source: 'Ajuste' | 'Contagem Física' | 'Expiração' | 'Requisição' | 'Entrada IA' | 'Entrada Manual' | 'Transformação';
+    ipAddress?: string;
+    allowNegative?: boolean;
+  }): Promise<{
+    previousBase: number;
+    newBase: number;
+    delta: number;
+    clamped: boolean;
+    productName: string;
+  }> {
+    await this.ensureAuth();
+
+    const productId = String(input.productId);
+    const ref = doc(db, 'products', productId);
+    const movementId = `mov-ajuste-${productId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const auditId = `log-ajuste-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const resultado = await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) {
+        throw new Error('Produto não encontrado. Actualize a lista antes de ajustar.');
+      }
+      const produto = snap.data() as Product;
+
+      const baseAtual = roundStock(Number(produto.stockQty) || 0);
+      const { hasConversion, rate } = hybridStock(produto);
+
+      let deltaBruto = 0;
+      if (typeof input.absoluteBase === 'number' && Number.isFinite(input.absoluteBase)) {
+        // Contagem/valor absoluto: o delta nasce da diferença para o saldo lido.
+        deltaBruto = roundStock(input.absoluteBase) - baseAtual;
+      } else if (typeof input.deltaBulk === 'number' && Number.isFinite(input.deltaBulk) && hasConversion) {
+        deltaBruto = roundStock(Number(input.deltaBulk) * rate);
+      } else {
+        deltaBruto = roundStock(Number(input.deltaBase) || 0);
+      }
+
+      const aplicado = clampStockDelta(baseAtual, deltaBruto, Boolean(input.allowNegative));
+      const { target: alvoFinal, delta: deltaFinal, clamped } = aplicado;
+
+      if (!input.allowNegative && clamped) {
+        throw new Error(
+          `Stock insuficiente para ${produto.name}: existem ${baseAtual} ${produto.baseUnit || 'un'} ` +
+            `e a operação retiraria ${Math.abs(deltaBruto)}.`
+        );
+      }
+
+      if (deltaFinal === 0) {
+        return { previousBase: baseAtual, newBase: baseAtual, delta: 0, clamped, productName: produto.name };
+      }
+
+      const escritas: Record<string, unknown> = { stockQty: increment(deltaFinal) };
+
+      if (hasConversion) {
+        // Sacos e retalho derivam do total para não divergirem dele. Um valor
+        // fraccionário no retalho é aceite (venda ao peso).
+        const { stockQtyBulk, stockQtyRetail } = splitHybrid(alvoFinal, produto);
+        escritas.stockQtyBulk = stockQtyBulk;
+        escritas.stockQtyRetail = stockQtyRetail;
+      }
+
+      transaction.set(ref, escritas, { merge: true });
+
+      const movimento: StockMovement = {
+        id: movementId,
+        date: new Date().toISOString(),
+        productId,
+        productName: produto.name,
+        type: input.source === 'Transformação' ? 'Transformação' : input.source === 'Entrada IA' || input.source === 'Entrada Manual' ? 'Entrada' : 'Ajuste',
+        qtyDelta: deltaFinal,
+        unit: produto.baseUnit || 'un',
+        reference: input.source,
+        operatorName: input.operator,
+        note: input.reason
+      };
+      transaction.set(doc(db, 'stock_movements', movementId), this.sanitizeData(movimento));
+
+      const auditoria: AuditLog = {
+        id: auditId,
+        timestamp: new Date().toISOString(),
+        username: input.operator,
+        ipAddress: input.ipAddress || 'desconhecido',
+        action: `Ajuste de Stock (${input.source})`,
+        status: 'Sucesso',
+        level: 'WARNING',
+        entity: 'products',
+        details:
+          `${produto.name}: ${baseAtual} → ${alvoFinal} ${produto.baseUnit || 'un'} ` +
+          `(${deltaFinal > 0 ? '+' : ''}${deltaFinal}). Motivo: ${input.reason}`
+      };
+      transaction.set(doc(db, 'audit_logs', auditId), this.sanitizeData(auditoria));
+
+      return { previousBase: baseAtual, newBase: alvoFinal, delta: deltaFinal, clamped, productName: produto.name };
+    });
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'adjust' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'stock_movements', action: 'adjust' } }));
+    return resultado;
+  }
+
+  /**
+   * Quebra/perda: saldo, registo de perda, movimento e auditoria no mesmo
+   * commit.
+   *
+   * Antes: a quebra era deduzida **sempre em unidade base**, sem conversão —
+   * dar baixa de 1 saco (50 kg) retirava 1 kg do stock, enquanto o relatório de
+   * quebras registava 50 kg. O prejuízo da contabilidade e o stock real nunca
+   * coincidiam.
+   */
+  public async registerLossAtomic(input: {
+    productId: string;
+    /** Quantidade na unidade escolhida pelo operador. */
+    quantity: number;
+    /** 'Bulk' converte para base; 'base' usa a quantidade tal como está. */
+    unit?: 'Bulk' | 'base';
+    reason: string;
+    justification: string;
+    operator: string;
+    ipAddress?: string;
+  }): Promise<{ baseQty: number; costValue: number; productName: string }> {
+    await this.ensureAuth();
+
+    const productId = String(input.productId);
+    const ref = doc(db, 'products', productId);
+    const lossId = `loss-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const movementId = `mov-quebra-${lossId}`;
+    const auditId = `log-quebra-${lossId}`;
+
+    const resultado = await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+
+      const produto = snap.data() as Product;
+      const qtdBase = toBaseQty(Number(input.quantity) || 0, input.unit, produto);
+      if (qtdBase <= 0) throw new Error('A quantidade da quebra tem de ser maior que zero.');
+
+      const atual = roundStock(Number(produto.stockQty) || 0);
+      if (qtdBase > atual + 1e-6) {
+        throw new Error(
+          `A quebra (${qtdBase} ${produto.baseUnit || 'un'}) excede o stock disponível (${atual}).`
+        );
+      }
+
+      const costValue = stockLossValue(qtdBase, Number(produto.buyingPrice) || 0);
+      const agora = new Date().toISOString();
+
+      const escritas: Record<string, unknown> = { stockQty: increment(-qtdBase) };
+      const { stockQtyBulk, stockQtyRetail } = splitHybrid(atual - qtdBase, produto);
+      if (stockQtyBulk !== null) {
+        escritas.stockQtyBulk = stockQtyBulk;
+        escritas.stockQtyRetail = stockQtyRetail;
+      }
+      transaction.set(ref, escritas, { merge: true });
+
+      const perda: LossRecord = {
+        id: lossId,
+        productId,
+        productName: produto.name,
+        quantity: qtdBase,
+        unit: produto.baseUnit || 'un',
+        date: agora,
+        reason: input.reason as LossRecord['reason'],
+        justification: input.justification,
+        costValue
+      };
+      transaction.set(doc(db, 'losses', lossId), this.sanitizeData(perda));
+
+      const movimento: StockMovement = {
+        id: movementId,
+        date: agora,
+        productId,
+        productName: produto.name,
+        type: 'Quebra',
+        qtyDelta: -qtdBase,
+        unit: produto.baseUnit || 'un',
+        reference: lossId,
+        operatorName: input.operator,
+        note: input.reason
+      };
+      transaction.set(doc(db, 'stock_movements', movementId), this.sanitizeData(movimento));
+
+      const auditoria: AuditLog = {
+        id: auditId,
+        timestamp: agora,
+        username: input.operator,
+        ipAddress: input.ipAddress || 'desconhecido',
+        action: 'Registo de Quebra/Perda',
+        status: 'Alerta',
+        level: 'WARNING',
+        entity: 'losses',
+        details: `Quebra de ${qtdBase} ${produto.baseUnit || 'un'} de ${produto.name} (motivo: ${input.reason}). Prejuízo: ${costValue} MT.`
+      };
+      transaction.set(doc(db, 'audit_logs', auditId), this.sanitizeData(auditoria));
+
+      return { baseQty: qtdBase, costValue, productName: produto.name };
+    });
+
+    this.productsCache = null;
+    this.lossesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'loss' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', action: 'add' } }));
+    return resultado;
+  }
+
+  /**
+   * Expurgo de um lote vencido — só quando alguém o decide.
+   *
+   * Antes isto acontecia sozinho ao abrir o ecrã de stock: bastava uma data mal
+   * digitada para o stock de um artigo inteiro desaparecer, e nos artigos
+   * híbridos só o total era zerado (sacos e retalho ficavam a vender).
+   */
+  public async expireProductBatch(input: {
+    productId: string;
+    operator: string;
+    ipAddress?: string;
+  }): Promise<{ removedBase: number; costValue: number; productName: string }> {
+    await this.ensureAuth();
+
+    const productId = String(input.productId);
+    const ref = doc(db, 'products', productId);
+    const lossId = `loss-venc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const auditId = `log-venc-${lossId}`;
+
+    const resultado = await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+
+      const produto = snap.data() as Product;
+      const qtd = Number(produto.stockQty) || 0;
+      if (qtd <= 0) {
+        throw new Error(`${produto.name} já não tem stock para dar baixa.`);
+      }
+
+      const custo = Math.round(qtd * (Number(produto.buyingPrice) || 0) * 100) / 100;
+      const agora = new Date().toISOString();
+
+      // As três quantidades caem juntas: nenhum ecrã pode continuar a vender
+      // mercadoria que foi dada como perdida.
+      transaction.set(ref, { stockQty: 0, stockQtyBulk: 0, stockQtyRetail: 0 }, { merge: true });
+
+      const perda: LossRecord = {
+        id: lossId,
+        productId,
+        productName: `${produto.name} (LOTE VENCIDO)`,
+        quantity: qtd,
+        unit: produto.baseUnit || 'un',
+        date: agora,
+        reason: 'Fora de Prazo',
+        justification: `Lote vencido em ${produto.expiryDate || '—'}. Baixa autorizada por ${input.operator}.`,
+        costValue: custo
+      };
+      transaction.set(doc(db, 'losses', lossId), this.sanitizeData(perda));
+
+      const movimento: StockMovement = {
+        id: `mov-venc-${lossId}`,
+        date: agora,
+        productId,
+        productName: produto.name,
+        type: 'Quebra',
+        qtyDelta: -qtd,
+        unit: produto.baseUnit || 'un',
+        reference: lossId,
+        operatorName: input.operator,
+        note: 'Lote vencido — baixa autorizada'
+      };
+      transaction.set(doc(db, 'stock_movements', movimento.id), this.sanitizeData(movimento));
+
+      const auditoria: AuditLog = {
+        id: auditId,
+        timestamp: agora,
+        username: input.operator,
+        ipAddress: input.ipAddress || 'desconhecido',
+        action: 'Baixa de Lote Vencido',
+        status: 'Alerta',
+        level: 'WARNING',
+        entity: 'products',
+        details: `${produto.name}: ${qtd} ${produto.baseUnit || 'un'} vencidos (validade ${produto.expiryDate || '—'}). Prejuízo ${custo} MT.`
+      };
+      transaction.set(doc(db, 'audit_logs', auditId), this.sanitizeData(auditoria));
+
+      return { removedBase: qtd, costValue: custo, productName: produto.name };
+    });
+
+    this.productsCache = null;
+    this.lossesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'expire' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', action: 'expire' } }));
+    return resultado;
+  }
+
+  /**
+   * Contagem física: aplica as diferenças por transacção, com movimento de
+   * stock em todas elas (faltas e sobras) e perda registada nas faltas.
+   *
+   * Antes: `stockQty = physicalQty` absoluto, a perda gravada antes do produto e
+   * as sobras sem qualquer rasto.
+   */
+  public async applyPhysicalCount(input: {
+    counts: Record<string, number>;
+    operator: string;
+    ipAddress?: string;
+  }): Promise<{ adjusted: number; shortages: number; surpluses: number; lossValue: number; skipped: string[] }> {
+    await this.ensureAuth();
+
+    const resultado = { adjusted: 0, shortages: 0, surpluses: 0, lossValue: 0, skipped: [] as string[] };
+    const agora = new Date().toISOString();
+
+    for (const [productId, physRaw] of Object.entries(input.counts || {})) {
+      const fisico = Number(physRaw);
+      if (!Number.isFinite(fisico) || fisico < 0) {
+        resultado.skipped.push(productId);
+        continue;
+      }
+
+      try {
+        await runTransaction(db, async transaction => {
+          const ref = doc(db, 'products', productId);
+          const snap = await transaction.get(ref);
+          if (!snap.exists()) {
+            resultado.skipped.push(productId);
+            return;
+          }
+          const produto = snap.data() as Product;
+          const atual = roundStock(Number(produto.stockQty) || 0);
+          const delta = physicalDelta(atual, fisico);
+          if (delta === 0) return;
+
+          const escritas: Record<string, unknown> = { stockQty: increment(delta) };
+          const { stockQtyBulk, stockQtyRetail } = splitHybrid(atual + delta, produto);
+          if (stockQtyBulk !== null) {
+            escritas.stockQtyBulk = stockQtyBulk;
+            escritas.stockQtyRetail = stockQtyRetail;
+          }
+          transaction.set(ref, escritas, { merge: true });
+
+          const movementId = `mov-contagem-${productId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const movimento: StockMovement = {
+            id: movementId,
+            date: agora,
+            productId,
+            productName: produto.name,
+            type: 'Ajuste',
+            qtyDelta: delta,
+            unit: produto.baseUnit || 'un',
+            reference: 'Contagem Física',
+            operatorName: input.operator,
+            note: `Sistema ${atual} → contagem ${fisico}`
+          };
+          transaction.set(doc(db, 'stock_movements', movementId), this.sanitizeData(movimento));
+
+          resultado.adjusted += 1;
+          if (delta < 0) {
+            const custo = stockLossValue(delta, Number(produto.buyingPrice) || 0);
+            resultado.shortages += 1;
+            resultado.lossValue += custo;
+
+            // A perda nasce na MESMA transacção da correcção de stock.
+            const lossId = `loss-phy-${productId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const perda: LossRecord = {
+              id: lossId,
+              productId,
+              productName: produto.name,
+              quantity: Math.abs(delta),
+              unit: produto.baseUnit || 'un',
+              date: agora,
+              reason: 'Diferença de Inventário',
+              justification: `Contagem física: sistema ${atual}, contado ${fisico}.`,
+              costValue: custo
+            };
+            transaction.set(doc(db, 'losses', lossId), this.sanitizeData(perda));
+          } else {
+            resultado.surpluses += 1;
+          }
+        });
+      } catch (erro) {
+        console.error('[FirebaseDB] Falha na contagem física de', productId, erro);
+        resultado.skipped.push(productId);
+      }
+    }
+
+    const auditId = `log-contagem-${Date.now()}`;
+    const auditoria: AuditLog = {
+      id: auditId,
+      timestamp: agora,
+      username: input.operator,
+      ipAddress: input.ipAddress || 'desconhecido',
+      action: 'Ajuste de Contagem Física',
+      status: 'Sucesso',
+      level: 'WARNING',
+      entity: 'products',
+      details:
+        `${resultado.adjusted} artigo(s) ajustado(s): ${resultado.shortages} falta(s) e ${resultado.surpluses} sobra(s). ` +
+        `Valor das faltas: ${resultado.lossValue.toFixed(2)} MT.` +
+        (resultado.skipped.length ? ` Ignorados: ${resultado.skipped.length}.` : '')
+    };
+    await this.upsert('audit_logs', auditId, this.sanitizeData(auditoria));
+
+    this.productsCache = null;
+    this.lossesCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'physical-count' } }));
     return resultado;
   }
 

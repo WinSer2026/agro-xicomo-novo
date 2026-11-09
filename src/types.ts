@@ -162,7 +162,14 @@ export interface LossRecord {
   quantity: number;
   unit: string;
   date: string;
-  reason: 'Fora de Prazo' | 'Danos Físicos' | 'Deterioração' | 'Quebras de Inventário' | 'Perda em Transformação' | 'Outro';
+  reason:
+    | 'Fora de Prazo'
+    | 'Danos Físicos'
+    | 'Deterioração'
+    | 'Quebras de Inventário'
+    | 'Perda em Transformação'
+    | 'Diferença de Inventário'
+    | 'Outro';
   responsibleEmployeeId?: string;
   justification: string;
   costValue: number; // total cost lost in MT

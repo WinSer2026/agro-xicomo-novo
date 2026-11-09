@@ -3,6 +3,15 @@
  */
 import { checkStockAddition, lineBaseQty } from '../src/utils/stockGuard';
 import { describeDebt, daysOverdue, summarizeDebts } from '../src/utils/debts';
+import {
+  clampStockDelta,
+  hybridStock,
+  physicalDelta,
+  roundStock,
+  splitHybrid,
+  stockLossValue,
+  toBaseQty
+} from '../src/utils/stockMath';
 import type { Debt } from '../src/types';
 
 let passou = 0, falhou = 0;
@@ -64,6 +73,50 @@ ok('duas em aberto', resumo.openCount === 2);
 ok('valor em aberto', resumo.openValue === 1500);
 ok('uma vencida', resumo.overdueCount === 1);
 ok('valor vencido', resumo.overdueValue === 1000);
+
+// ------------------------------------------------- aritmética do inventário
+// ES-27: dar baixa de 1 saco tem de retirar 50 kg, não 1 kg.
+ok('saco converte para a unidade base', toBaseQty(1, 'Bulk', hibrido) === 50);
+ok('dois sacos são 100 kg', toBaseQty(2, 'Bulk', hibrido) === 100);
+ok('unidade base não converte', toBaseQty(7, 'base', hibrido) === 7);
+ok('artigo simples ignora "saco"', toBaseQty(1, 'Bulk', simples) === 1);
+ok('conversão 1 não é conversão', !hybridStock({ parentUnit: 'Saco', conversionRate: 1 } as any).hasConversion);
+ok('conversão em texto é aceite', toBaseQty(2, 'Bulk', { parentUnit: 'Saco', conversionRate: '50' as any }) === 100);
+
+// Híbrido: base = sacos + retalho, sempre.
+const duzentos = splitHybrid(120, hibrido);
+ok('120 kg = 2 sacos', duzentos.stockQtyBulk === 2);
+ok('120 kg = 20 kg de retalho', duzentos.stockQtyRetail === 20);
+ok('sacos e retalho somam o total', duzentos.stockQtyBulk! * 50 + duzentos.stockQtyRetail! === 120);
+const aposQuebra = splitHybrid(70, hibrido);
+ok('depois de 1 saco de quebra sobram 70 kg', aposQuebra.stockQtyBulk === 1 && aposQuebra.stockQtyRetail === 20);
+const vazio = splitHybrid(0, hibrido);
+ok('zero não cria saco fantasma', vazio.stockQtyBulk === 0 && vazio.stockQtyRetail === 0);
+ok('artigo simples não tem sacos', splitHybrid(120, simples).stockQtyBulk === null);
+ok('retalho com dízima fecha no total', roundStock(splitHybrid(50.5, hibrido).stockQtyRetail!) === 0.5);
+
+// Ajuste por diferença: grava-se o delta, nunca o absoluto.
+const ajuste = clampStockDelta(120, 100 - 120);
+ok('ajuste para 100 retira 20', ajuste.delta === -20 && ajuste.target === 100);
+ok('ajuste para cima entra 30', clampStockDelta(100, 130 - 100).delta === 30);
+ok('ajuste sem diferença não escreve', clampStockDelta(100, 100 - 100).delta === 0);
+
+// Ninguém deve stock a negativo por engano.
+const recusado = clampStockDelta(10, -20);
+ok('retirar mais do que existe trava em zero', recusado.delta === 0 && recusado.clamped);
+const corrigido = clampStockDelta(10, -20, true);
+ok('correcção autorizada desce só até zero', corrigido.target === 0 && corrigido.delta === -10);
+
+// Contagem física: faltas e sobras.
+ok('contagem com falta', physicalDelta(120, 100) === -20);
+ok('contagem com sobra', physicalDelta(100, 120) === 20);
+ok('contagem igual não escreve', physicalDelta(100, 100) === 0);
+ok('contagem negativa é recusada', physicalDelta(100, -1) === 0);
+ok('contagem com pó de saco não inventa milésimos', physicalDelta(100, 100.0001) === 0);
+
+// Valor do prejuízo.
+ok('50 kg a 20 MT valem 1000 MT', stockLossValue(50, 20) === 1000);
+ok('prejuízo arredonda a cêntimos', stockLossValue(3, 33.333) === 100);
 
 console.log(`\n--- RESULTADO: ${passou} testes passaram, ${falhou} falharam ---`);
 if (falhou > 0) process.exit(1);

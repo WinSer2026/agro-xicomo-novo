@@ -220,10 +220,51 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 ## 6. Verificação disponível
 
 ```
-npm run test:all     → 228 asserções, 0 falhas (não cobre ainda o stock — é o objectivo da fase 4)
-npx tsc --noEmit
+npm run test:all     → 247 asserções, 0 falhas
+npx tsc --noEmit     → sem erros
+npx vite build       → sem erros
 ```
+
+A aritmética do inventário (conversão saco↔base, derivação de sacos/retalho, travão do saldo negativo,
+diferença de contagem, valor do prejuízo) vive agora em `src/utils/stockMath.ts` e é testada sem
+Firestore: 25 asserções novas em `test/stock_debts_test.ts`. O que **não** é testável daqui é o
+comportamento transaccional real (dois postos a ajustar ao mesmo tempo) — isso exige dois caixas.
 
 **O que não se pode provar daqui:** comportamentos com dois postos reais, impressão, e o efeito de
 uma venda a meio de um ajuste. Esses ficam para prova no local, bloco a bloco, com uma lista de
 verificação preparada no fim de cada fase.
+
+---
+
+## 7. Estado de execução
+
+### Fase 1 — executada (parcial) · 2026-11-09
+
+| # | Acção | Estado | Onde |
+|---|---|---|---|
+| 1 | Expurgo de validade deixa de ser automático | **feito** | `StockModule.loadInventoryData` só lista; banner «lotes vencidos» com botão por lote, senha de gestor e `expireProductBatch` |
+| 2 | Zerar as três quantidades | **feito** | `expireProductBatch` grava `stockQty = stockQtyBulk = stockQtyRetail = 0` na mesma transacção; `adjustStock`, `registerLossAtomic` e `applyPhysicalCount` derivam sempre sacos+retalho do total (ES-02, ES-33, ES-45) |
+| 3 | Código único ao criar e editar | **feito** | verificação sem distinção de maiúsculas/ espaços em novo produto e no formulário de ajuste; recusa com o nome do artigo dono (ES-07, ES-20) |
+| 4 | Ajustes por diferença, dentro de transacção | **feito** | `dbService.adjustStock` (`deltaBase` / `deltaBulk` / `absoluteBase` lido no `runTransaction`); usado pelo ajuste inline, pelo formulário do artigo e pelo stock inicial do novo produto (ES-04, ES-14, ES-21, ES-31, ES-32, ES-34, ES-45) |
+| 5 | Quebras com conversão de unidade | **feito** | `registerLossAtomic`: selector saco/base no modal, `1 saco = N kg`, recusa acima do saldo; perda + movimento + auditoria no mesmo commit (ES-27, ES-28, ES-32) |
+| 6 | Transformação verifica stock | **em aberto** | Fase 3 — `addTransformationWithStockUpdate` continua a poder deixar saldo negativo (ES-39) |
+| 7 | Entrada por IA com correspondência exacta | **em aberto** | Fase 3 — `StockAIEntry` ainda procura por substring e não pede senha (ES-44, ES-46) |
+
+**Também fechado nesta fase, embora estivesse atribuído a outras:**
+
+- **ES-08 / ES-16** (livro de movimentos): o stock inicial de um artigo novo entra como movimento
+  `Entrada` (`Entrada Manual`), em vez de nascer já no saldo.
+- **ES-09** (auditoria da criação de produto): `Criação de Produto` com utilizador e IP reais.
+- **ES-05 / ES-29 / ES-36** (dia de Maputo): a comparação de validade passou a usar `toLocalDateKey`
+  em vez de `toISOString().split('T')[0]` — o corte às 22:00 UTC deixava de existir.
+- **ES-11** (quantidades negativas): a contagem física recusa negativos e o servidor valida o saldo.
+- Bug encontrado ao implementar: a contagem física usava `parseInt`, pelo que 12,5 kg de um artigo a
+  peso era contado como 12 kg e a falta era inventada. Passou a aceitar decimais (passo 0,001).
+- O *toast* do módulo passou a distinguir sucesso / erro / aviso — antes um «palavra-passe errada»
+  aparecia a verde.
+
+**Prova local que continua pendente** (não se prova num sandbox): dar baixa de um lote vencido num
+posto e confirmar que o outro deixa de vender; ajustar o mesmo artigo em dois postos ao mesmo tempo;
+contar 12,5 kg e ver o saldo ficar em 12,5; quebrar 1 saco e ver o relatório em kg.
+
+### Fases 2–4 — por executar
