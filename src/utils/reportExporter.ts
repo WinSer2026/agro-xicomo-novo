@@ -1,3 +1,4 @@
+import { companyNuit, companyName } from './companyInfo';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -61,7 +62,7 @@ export async function exportToPDF(data: ReportData, settings: SystemSettings) {
   }
 
   const companyName = settings.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-  const nuit = settings.companyNuit || '401976590';
+  const nuit = companyNuit(settings.companyNuit);
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);

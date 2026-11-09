@@ -251,7 +251,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
     }
   };
 
-  // Primeiro acesso: o operador define a palavra-passe que quiser (4 a 6 caracteres)
+  // Primeiro acesso: o operador define a palavra-passe (mínimo 8 caracteres)
   const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -434,7 +434,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
                   onChange={(e) => setNewPassword(e.target.value)}
                   maxLength={6}
                   autoComplete="new-password"
-                  placeholder="4 a 6 caracteres (letras ou números)"
+                  placeholder="Mínimo 8 caracteres, com letras e números"
                   className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-xs font-bold focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
                 />
               </div>
@@ -455,7 +455,7 @@ export default function LoginPanel({ onLoginSuccess }: LoginPanelProps) {
               </div>
 
               <p className="text-[10px] text-gray-500 text-center leading-relaxed">
-                Pode usar qualquer palavra-passe com 4 a 6 caracteres (apenas números, apenas letras ou mistos).
+                Use pelo menos 8 caracteres, combinando letras e números.
                 Não é obrigatório usar símbolos.
               </p>
 

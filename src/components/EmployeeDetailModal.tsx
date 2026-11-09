@@ -797,7 +797,7 @@ export default function EmployeeDetailModal({ employee, onClose, onSave, initial
                     <input
                       type="text"
                       required
-                      placeholder="Ex: 401976590"
+                      placeholder="Ex: 123456789"
                       value={nuit}
                       onChange={(e) => setNuit(e.target.value.replace(/\D/g, '').substring(0, 9))}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"

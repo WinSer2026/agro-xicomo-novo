@@ -1,3 +1,4 @@
+import { companyNuit, companyName } from '../utils/companyInfo';
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { jsPDF } from 'jspdf';
@@ -5,7 +6,7 @@ import { dbService } from '../utils/firebaseDB';
 import { getClientIp } from '../utils/clientInfo';
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { appConfirm, appPrompt, appAlert } from '../utils/confirmDialog';
-import { Product, LossRecord, SystemSettings } from '../types';
+import { Product, LossRecord, SystemSettings, StockMovement } from '../types';
 import Barcode13, { generateValidEAN13, getEan13SvgString } from './Barcode13';
 import { getSingularUnit, getUnitIcon } from '../utils/unitHelper';
 import {
@@ -67,6 +68,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [newProdBuyPrice, setNewProdBuyPrice] = useState(0);
   const [newProdBuyPriceBulk, setNewProdBuyPriceBulk] = useState(0);
   const [newProdSellPrice, setNewProdSellPrice] = useState(0);
+  const [newProdTaxRate, setNewProdTaxRate] = useState(16);
   const [newProdSellPriceBulk, setNewProdSellPriceBulk] = useState(0);
   const [newProdUnit, setNewProdUnit] = useState('Unidades');
   const [newProdExpiry, setNewProdExpiry] = useState('');
@@ -101,6 +103,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [editBuyingPrice, setEditBuyingPrice] = useState(0);
   const [editBuyingPriceBulk, setEditBuyingPriceBulk] = useState(0);
   const [editSellingPrice, setEditSellingPrice] = useState(0);
+  const [editTaxRate, setEditTaxRate] = useState(16);
+  const [showMovementsModal, setShowMovementsModal] = useState(false);
+  const [movementsProduct, setMovementsProduct] = useState<Product | null>(null);
+  const [movementRows, setMovementRows] = useState<StockMovement[]>([]);
+  const [loadingMovements, setLoadingMovements] = useState(false);
   const [editSellingPriceBulk, setEditSellingPriceBulk] = useState(0);
   const [editExpiryDate, setEditExpiryDate] = useState('');
   const [editReference, setEditReference] = useState('');
@@ -268,7 +275,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         action: 'Ajuste de Contagem Física',
         status: 'Sucesso',
         level: 'WARNING',
-        details: `Reconciliação e contagem física aplicada: ${adjustedCount} produtos atualizados, ${lossCount} quebras geradas (${totalLossVal.toLocaleString()} MT).`
+        details: `Reconciliação e contagem física aplicada: ${adjustedCount} produtos atualizados, ${lossCount} quebras geradas (${totalLossVal.toLocaleString('pt-MZ')} MT).`
       });
 
       // Reload fresh data
@@ -356,6 +363,21 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       .toUpperCase() || "GEN";
     const lotNumber = Math.floor(1000 + Math.random() * 9000);
     return `${abbreviation}-${lotNumber}`;
+  };
+
+  // F-05: consulta do livro de movimentos de um artigo.
+  const openMovements = async (product: Product) => {
+    setMovementsProduct(product);
+    setShowMovementsModal(true);
+    setLoadingMovements(true);
+    try {
+      setMovementRows(await dbService.getStockMovements(product.id, 100));
+    } catch {
+      setMovementRows([]);
+      triggerToast('Não foi possível carregar os movimentos deste artigo.');
+    } finally {
+      setLoadingMovements(false);
+    }
   };
 
   const handleRegenerateReferencesAll = async () => {
@@ -615,7 +637,8 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         parentUnit: newParentUnit || undefined,
         reference: newProdReference || undefined,
         isService: newProdIsService,
-        imageUrl: newProdImageUrl || undefined
+        imageUrl: newProdImageUrl || undefined,
+        taxRate: Number(newProdTaxRate) || 0
       };
 
       await dbService.saveProduct(newProduct);
@@ -633,6 +656,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       setNewProdBuyPriceBulk(0);
       setNewProdSellPrice(0);
       setNewProdSellPriceBulk(0);
+      setNewProdTaxRate(16);
       setNewProdError('');
       setNewProdExpiry('');
       setNewConversionRate(1);
@@ -745,7 +769,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(190, 18, 60);
@@ -902,7 +926,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(0, 106, 78);
@@ -1014,7 +1038,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     });
 
     const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-    const cNuit = settings?.companyNuit || '401976590';
+    const cNuit = companyNuit(settings?.companyNuit);
 
     // Group products by category
     const categoryMap: { [cat: string]: Product[] } = {};
@@ -1260,13 +1284,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     productsToExport.forEach(p => {
       stickersHtml += `
         <div class="sticker">
-          <div class="company">AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590</div>
+          <div class="company">{companyName(settings?.companyName)} • NUIT: {companyNuit(settings?.companyNuit)}</div>
           <div class="prod-name">${p.name}</div>
           <div class="category">${p.category}</div>
           <div class="barcode-container">
             ${getEan13SvgString(p.code, 180, 80)}
           </div>
-          <div class="price">Preço: ${p.sellingPrice.toLocaleString()} MT</div>
+          <div class="price">Preço: ${p.sellingPrice.toLocaleString('pt-MZ')} MT</div>
         </div>
       `;
     });
@@ -1635,6 +1659,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
       selectedProduct.reference = editReference || undefined;
       selectedProduct.isService = editIsService;
       selectedProduct.imageUrl = editImageUrl || undefined;
+      selectedProduct.taxRate = Number(editTaxRate) || 0;
 
       await dbService.saveProduct(selectedProduct);
 
@@ -2121,7 +2146,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                     {/* Selling Price */}
                     <td className="px-8 py-4 text-right font-bold font-mono text-slate-800">
-                      {prod.sellingPrice.toLocaleString()} MT
+                      {prod.sellingPrice.toLocaleString('pt-MZ')} MT
                     </td>
 
                     {/* Quantidade em Sacos Column */}
@@ -2204,6 +2229,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                               setEditBuyingPriceBulk(getBulkCost(prod));
                               setEditSellingPrice(prod.sellingPrice);
                               setEditSellingPriceBulk(prod.sellingPriceBulk || 0);
+                              setEditTaxRate(prod.taxRate ?? 16);
                               setEditExpiryDate(prod.expiryDate || '');
                               setEditReference(prod.reference || generateRandomReference());
                               setEditIsService(!!prod.isService);
@@ -2239,6 +2265,13 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           ) : (
                             <div className="w-[72px]" />
                           )}
+                          <button
+                            onClick={() => void openMovements(prod)}
+                            className="px-2 py-0.5 text-[10px] bg-slate-100 text-slate-700 border border-slate-200 rounded hover:bg-slate-200 font-bold cursor-pointer w-[72px] text-center"
+                            title="Ver o livro de movimentos deste artigo"
+                          >
+                            Movimentos
+                          </button>
                         </div>
                         <div className="flex gap-1.5">
                           {prod.parentUnit && prod.conversionRate && prod.conversionRate > 1 ? (
@@ -2334,7 +2367,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
             onExportPDF={() => {
               const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
               const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-              const nuit = settings?.companyNuit || '401976590';
+              const nuit = companyNuit(settings?.companyNuit);
               doc.setFont('helvetica', 'bold');
               doc.setFontSize(14);
               doc.setTextColor(185, 28, 28);
@@ -2363,7 +2396,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 doc.text((loss.productName || '').substring(0, 30), 45, y);
                 doc.text(`${loss.quantity} ${loss.unit}`, 110, y);
                 doc.text((loss.reason || '').substring(0, 15), 130, y);
-                doc.text(`${(loss.costValue || 0).toLocaleString()} MT`, 165, y);
+                doc.text(`${(loss.costValue || 0).toLocaleString('pt-MZ')} MT`, 165, y);
                 y += 6;
               });
               doc.save(`Mapa_Quebras_${lossesStartDate}_${lossesEndDate}.pdf`);
@@ -2401,12 +2434,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 </div>
                 <div className="bg-white p-5 border border-amber-200 rounded-2xl shadow-sm space-y-1">
                   <span className="text-[10px] uppercase font-black text-amber-800 tracking-wider">Artigos Perdidos</span>
-                  <p className="text-2xl font-black text-amber-900 font-mono mt-1">{totalQty.toLocaleString()} unid.</p>
+                  <p className="text-2xl font-black text-amber-900 font-mono mt-1">{totalQty.toLocaleString('pt-MZ')} unid.</p>
                   <p className="text-[10px] text-amber-700">Volume físico deduzido</p>
                 </div>
                 <div className="bg-white p-5 border border-red-200 rounded-2xl shadow-sm space-y-1">
                   <span className="text-[10px] uppercase font-black text-red-800 tracking-wider">Prejuízo Financeiro Total</span>
-                  <p className="text-2xl font-black text-red-900 font-mono mt-1">{totalVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</p>
+                  <p className="text-2xl font-black text-red-900 font-mono mt-1">{totalVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</p>
                   <p className="text-[10px] text-red-700">Valor de custo das perdas</p>
                 </div>
               </div>
@@ -2458,7 +2491,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                             {loss.reason}
                           </span>
                         </td>
-                        <td className="p-3 font-mono font-bold text-red-600">{(loss.costValue || 0).toLocaleString()} MT</td>
+                        <td className="p-3 font-mono font-bold text-red-600">{(loss.costValue || 0).toLocaleString('pt-MZ')} MT</td>
                         <td className="p-3 text-gray-500 italic truncate max-w-xs" title={loss.justification}>
                           {loss.justification}
                         </td>
@@ -2608,7 +2641,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               <div className="bg-white p-5 border border-slate-200 rounded-2xl shadow-sm space-y-1">
                 <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider">Valor em Sistema (Custo)</span>
                 <p className="text-2xl font-black text-slate-900 font-mono mt-1">
-                  {totalSystemVal.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalSystemVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] text-slate-400">Património registado em base de dados</p>
               </div>
@@ -2617,7 +2650,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
               <div className="bg-white p-5 border border-indigo-200 rounded-2xl shadow-sm space-y-1">
                 <span className="text-[10px] uppercase font-black text-indigo-700 tracking-wider">Valor Físico Real (Custo)</span>
                 <p className="text-2xl font-black text-indigo-900 font-mono mt-1">
-                  {totalPhysicalVal.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalPhysicalVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] text-indigo-600">Património físico apurado na contagem</p>
               </div>
@@ -2634,14 +2667,14 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   Desvio Financeiro Global
                 </span>
                 <p className="text-2xl font-black font-mono mt-1">
-                  {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : totalFinancialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
+                  {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : totalFinancialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT
                 </p>
                 <p className="text-[10px] font-bold">
                   {totalFinancialDiff === 0 
                     ? '100% ALINHADO / SEM DESVIO ✓'
                     : totalFinancialDiff < 0 
-                      ? `QUEBRA TOTAL: ${Math.abs(totalFinancialDiff).toLocaleString()} MT`
-                      : `SOBRA TOTAL: +${totalFinancialDiff.toLocaleString()} MT`}
+                      ? `QUEBRA TOTAL: ${Math.abs(totalFinancialDiff).toLocaleString('pt-MZ')} MT`
+                      : `SOBRA TOTAL: +${totalFinancialDiff.toLocaleString('pt-MZ')} MT`}
                 </p>
               </div>
             </div>
@@ -2694,7 +2727,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                     onClick={() => {
                       const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
                       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-                      const nuit = settings?.companyNuit || '401976590';
+                      const nuit = companyNuit(settings?.companyNuit);
                       doc.setFont('helvetica', 'bold');
                       doc.setFontSize(14);
                       doc.setTextColor(67, 56, 202);
@@ -2703,7 +2736,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       doc.setFontSize(9);
                       doc.setTextColor(100, 116, 139);
                       doc.text(`${cName} • NUIT: ${nuit} • Data de Emissão: ${new Date().toLocaleString('pt-MZ')}`, 15, 24);
-                      doc.text(`Valor Sistema: ${totalSystemVal.toLocaleString()} MT | Valor Físico: ${totalPhysicalVal.toLocaleString()} MT | Desvio: ${totalFinancialDiff.toLocaleString()} MT`, 15, 29);
+                      doc.text(`Valor Sistema: ${totalSystemVal.toLocaleString('pt-MZ')} MT | Valor Físico: ${totalPhysicalVal.toLocaleString('pt-MZ')} MT | Desvio: ${totalFinancialDiff.toLocaleString('pt-MZ')} MT`, 15, 29);
 
                       doc.setDrawColor(67, 56, 202);
                       doc.line(15, 33, 282, 33);
@@ -2725,12 +2758,12 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       auditedItems.forEach(i => {
                         if (y > 190) { doc.addPage(); y = 20; }
                         doc.text(i.productName.substring(0, 35), 15, y);
-                        doc.text(`${i.buyPrice.toLocaleString()} MT`, 85, y);
+                        doc.text(`${i.buyPrice.toLocaleString('pt-MZ')} MT`, 85, y);
                         doc.text(String(i.systemQty), 115, y);
-                        doc.text(`${i.systemValue.toLocaleString()} MT`, 145, y);
+                        doc.text(`${i.systemValue.toLocaleString('pt-MZ')} MT`, 145, y);
                         doc.text(String(i.physicalQty), 178, y);
-                        doc.text(`${i.physicalValue.toLocaleString()} MT`, 208, y);
-                        doc.text(`${i.financialDiff > 0 ? `+${i.financialDiff.toLocaleString()}` : i.financialDiff.toLocaleString()} MT`, 240, y);
+                        doc.text(`${i.physicalValue.toLocaleString('pt-MZ')} MT`, 208, y);
+                        doc.text(`${i.financialDiff > 0 ? `+${i.financialDiff.toLocaleString('pt-MZ')}` : i.financialDiff.toLocaleString('pt-MZ')} MT`, 240, y);
                         doc.text(i.isAligned ? '100% OK' : (i.qtyDiff > 0 ? `+${i.qtyDiff}` : String(i.qtyDiff)), 265, y);
                         y += 6;
                       });
@@ -2831,7 +2864,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* Buy Price */}
                             <td className="p-3 text-right font-mono font-bold text-slate-700">
-                              {item.buyPrice.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.buyPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* System Stock */}
@@ -2841,7 +2874,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* System Value */}
                             <td className="p-3 text-right font-mono font-black text-slate-800">
-                              {item.systemValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.systemValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* Physical Count Interactive Input */}
@@ -2882,7 +2915,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
                             {/* Physical Value */}
                             <td className="p-3 text-right font-mono font-black text-indigo-950">
-                              {item.physicalValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                              {item.physicalValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                             </td>
 
                             {/* Qty Diff */}
@@ -2901,9 +2934,9 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                               {item.financialDiff === 0 ? (
                                 <span className="text-slate-400">0.00 MT</span>
                               ) : item.financialDiff > 0 ? (
-                                <span className="text-blue-700 font-black">+{item.financialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</span>
+                                <span className="text-blue-700 font-black">+{item.financialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</span>
                               ) : (
-                                <span className="text-red-700 font-black">{item.financialDiff.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT</span>
+                                <span className="text-red-700 font-black">{item.financialDiff.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT</span>
                               )}
                             </td>
 
@@ -2957,7 +2990,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       </p>
                       <p>
                         Impacto financeiro apurado: <strong className={totalFinancialDiff < 0 ? 'text-red-700' : 'text-emerald-700'}>
-                          {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString()}` : totalFinancialDiff.toLocaleString()} MT
+                          {totalFinancialDiff > 0 ? `+${totalFinancialDiff.toLocaleString('pt-MZ')}` : totalFinancialDiff.toLocaleString('pt-MZ')} MT
                         </strong>.
                       </p>
                       <p className="text-[11px] text-indigo-700">
@@ -3774,6 +3807,19 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         className="w-full border border-gray-300 rounded px-2 py-1.5 text-[10.5px] focus:outline-none bg-white font-medium"
                       />
                     </div>
+
+                    <div>
+                      <label className="block text-[9.5px] font-black uppercase text-gray-500 mb-0.5">Taxa de IVA (%)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={editTaxRate}
+                        onChange={(e) => setEditTaxRate(Number(e.target.value))}
+                        className="w-full border border-gray-300 rounded px-2 py-1.5 text-[10.5px] focus:outline-none bg-white font-medium"
+                      />
+                    </div>
                   </div>
 
                   <div className="pt-1 border-t border-gray-200">
@@ -4280,6 +4326,57 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                   Confirmar Operação
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMovementsModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+            <div className="px-5 py-4 border-b flex items-center justify-between">
+              <div>
+                <h3 className="font-black text-slate-800">Livro de Movimentos</h3>
+                <p className="text-[11px] text-slate-500">{movementsProduct?.name} · {movementsProduct?.baseUnit}</p>
+              </div>
+              <button onClick={() => setShowMovementsModal(false)} className="text-slate-400 hover:text-slate-700">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="overflow-auto flex-1">
+              {loadingMovements ? (
+                <p className="p-6 text-center text-sm text-slate-500">A carregar…</p>
+              ) : movementRows.length === 0 ? (
+                <p className="p-6 text-center text-sm text-slate-500">
+                  Sem movimentos registados. O livro começou a ser escrito com esta correcção — os saldos
+                  anteriores não têm rasto.
+                </p>
+              ) : (
+                <table className="w-full text-[11px]">
+                  <thead className="bg-slate-50 text-slate-500 uppercase text-[9px]">
+                    <tr>
+                      <th className="p-2 text-left">Data</th>
+                      <th className="p-2 text-left">Tipo</th>
+                      <th className="p-2 text-right">Quantidade</th>
+                      <th className="p-2 text-left">Documento</th>
+                      <th className="p-2 text-left">Operador</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {movementRows.map(movimento => (
+                      <tr key={movimento.id} className="border-t border-slate-100">
+                        <td className="p-2 font-mono">{new Date(movimento.date).toLocaleString('pt-MZ')}</td>
+                        <td className="p-2 font-bold">{movimento.type}</td>
+                        <td className={`p-2 text-right font-mono font-bold ${movimento.qtyDelta < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                          {movimento.qtyDelta > 0 ? '+' : ''}{movimento.qtyDelta.toLocaleString('pt-MZ')} {movimento.unit}
+                        </td>
+                        <td className="p-2 font-mono">{movimento.reference || '—'}</td>
+                        <td className="p-2">{movimento.operatorName || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         </div>

@@ -1,3 +1,4 @@
+import { companyNuit, hasCompanyNuit, MISSING_NUIT_LABEL } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -12,7 +13,10 @@ import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { DateRangeFilter } from './DateRangeFilter';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
 import { runPostCommitTask, runPostCommitTasks } from '../utils/postCommit';
-import { isFinancialSale, isCancelledSale } from '../utils/saleStatus';
+import { isFinancialSale, isCancelledSale, settlementDisclaimer } from '../utils/saleStatus';
+import { lineTaxAmount, normalizeTaxRate } from '../utils/taxHelper';
+import { appAlert, appPrompt } from '../utils/confirmDialog';
+import { verifyAuthorizationPassword } from '../utils/authorization';
 import { InsufficientStockError } from '../utils/firebaseDB';
 import * as XLSX from 'xlsx';
 
@@ -136,6 +140,45 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
   } | null>(null);
   const isInitialLoadCompletedRef = useRef(false);
   const activeCartStartedAtRef = useRef<string | null>(null);
+  // K-07: o PDV não dizia se estava sem rede — o operador continuava a vender
+  // sem saber que os dados estavam só neste posto.
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // C-03: compara o relógio do posto com o do servidor. Um relógio adiantado
+  // ou atrasado grava vendas com a data errada e estraga os relatórios.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch('/api/client-info', { headers: { Accept: 'application/json' } });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled && data?.serverTime) {
+          const skew = (Date.now() - new Date(data.serverTime).getTime()) / 60000;
+          setClockSkewMinutes(Math.round(skew));
+        }
+      } catch {
+        /* sem servidor: não há como comparar */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
+  const [clockSkewMinutes, setClockSkewMinutes] = useState(0);
+  /** Última quantidade válida por linha, para o blur não repor 1 (K-05). */
+  const lastValidQtyRef = useRef<Record<string, number>>({});
 
 /**
  * Identificador único de venda.
@@ -144,6 +187,22 @@ export default function PDVModule({ currentUser }: PDVModuleProps) {
  * milissegundo (dois postos ou duplo clique) e a segunda apagava a primeira
  * (achado A-03). Passa a usar UUID com fallback para timestamp + sufixo.
  */
+/**
+ * B-05: identifica o posto/caixa. Sem série, dois postos emitem a mesma
+ * sequência e não há forma de saber de onde saiu cada documento.
+ */
+function currentTerminalId(): string {
+  try {
+    const stored = safeStorage.getItem('agro_terminal_id');
+    if (stored) return stored;
+    const generated = `POSTO-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    safeStorage.setItem('agro_terminal_id', generated);
+    return generated;
+  } catch {
+    return 'POSTO-?';
+  }
+}
+
 function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
@@ -317,7 +376,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         costPrice: getUnitCost(product, 'Retail'),
         buyingPrice: getUnitCost(product, 'Retail'),
         isService: product.isService,
-        sellingUnit: 'Retail'
+        sellingUnit: 'Retail',
+        taxRate: normalizeTaxRate((product as any).taxRate)
       };
       setRetroactiveCart(prev => [...prev, newItem]);
     }
@@ -527,7 +587,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       }
 
       if (receiptGenerated) {
-        showToast(`Venda antiga de ${tot.toLocaleString('pt-PT')} MT registada com sucesso!`, 'success');
+        showToast(`Venda antiga de ${tot.toLocaleString('pt-MZ')} MT registada com sucesso!`, 'success');
       } else {
         showToast('Venda antiga registada com sucesso. O recibo não foi gerado agora; pode reimprimir pela janela de opções.', 'warning');
       }
@@ -958,7 +1018,10 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
       paymentMethod,
       documentType,
       includeIva,
-      customSubtotalDiscount
+      customSubtotalDiscount,
+      operatorId: currentUser?.username,
+      operatorName: currentUser?.username,
+      terminalId: currentTerminalId()
     };
 
     try {
@@ -1248,6 +1311,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           totalPrice: customQty * itemPrice,
           isService: product.isService,
           sellingUnit: selectedUnit,
+          taxRate: normalizeTaxRate((product as any).taxRate),
+          conversionRate: Number(product.conversionRate) > 1 ? Number(product.conversionRate) : undefined,
           category: product.category || 'Outro',
           costPrice: getUnitCost(product, selectedUnit),
           buyingPrice: getUnitCost(product, selectedUnit)
@@ -1376,7 +1441,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   };
 
   const downloadInvoicePDF = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4' | 'FaturaProforma') => {
-    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as SystemSettings;
+    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
     if (format === 'Thermal') {
       downloadThermalReceipt(sale, s);
     } else if (format === 'DoubleA5') {
@@ -1417,10 +1482,57 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
     };
 
     try {
+      // J-08: sem nome e NUIT da empresa, o documento sai com o cabeçalho
+      // errado. Bloqueia-se a emissão até as definições estarem preenchidas.
+      if (!hasCompanyNuit(settings)) {
+        showToast('Configure o NUIT da empresa nas definições antes de emitir documentos.', 'error');
+        void appAlert(
+          'Não é possível emitir documentos fiscais sem os dados da empresa.\n\nVá a Definições → Empresa e preencha o nome e o NUIT. Depois repita a venda.'
+        );
+        return;
+      }
+
+      // J-08: sem nome e NUIT da empresa, o documento sai com o cabeçalho
+      // errado. Bloqueia-se a emissão até as definições estarem preenchidas.
+      if (!hasCompanyNuit(settings)) {
+        showToast('Configure o NUIT da empresa nas definições antes de emitir documentos.', 'error');
+        void appAlert(
+          'Não é possível emitir documentos fiscais sem os dados da empresa.\n\nVá a Definições → Empresa e preencha o nome e o NUIT. Depois repita a venda.'
+        );
+        return;
+      }
+
       const sub = getSubtotal();
       const disc = getDiscount();
       const tot = getTotal();
-      const iva = includeIva ? Math.round((sub - disc) * 0.16 * 100) / 100 : 0;
+
+      // K-03: o desconto não tinha qualquer limite — o total podia ir a zero e
+      // a venda ficava registada como paga. Acima de 20% exige autorização; o
+      // desconto nunca pode exceder o subtotal.
+      if (disc > sub + 0.001) {
+        showToast('O desconto não pode ser superior ao subtotal da venda.', 'error');
+        return;
+      }
+      const discountPercent = sub > 0 ? (disc / sub) * 100 : 0;
+      if (discountPercent > 20) {
+        const authorization = await appPrompt(
+          `Desconto de ${discountPercent.toFixed(1)}% (${disc.toFixed(2)} MT) excede o limite de 20%.\nIntroduza a palavra-passe de autorização para continuar.`
+        );
+        if (authorization === null) return;
+        if (!(await verifyAuthorizationPassword(authorization, settings))) {
+          showToast('Autorização recusada: palavra-passe incorrecta.', 'error');
+          return;
+        }
+      }
+      // E-02: o IVA é calculado por linha, com a taxa do produto (16% por
+      // omissão). Antes era 16% fixo sobre o total, o que tornava impossível
+      // declarar produtos com outra taxa ou isentos.
+      const iva = includeIva
+        ? Math.round(cart.reduce((acc, item) => {
+            const produto = products.find(p => p.id === item.productId);
+            return acc + lineTaxAmount(item, produto);
+          }, 0) * 100) / 100
+        : 0;
 
       // --- Controlo do pagamento (D-06) -------------------------------------
       // O estado da venda é financeiro: não se grava uma venda como paga sem
@@ -1480,7 +1592,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
           category: cat,
           costPrice: cost,
           buyingPrice: cost,
-          totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item)
+          totalPrice: (item.unitPrice * item.quantity) - getItemDiscount(item),
+          // A taxa fica gravada na linha: o histórico não depende do catálogo.
+          taxRate: normalizeTaxRate(item.taxRate ?? (prod as any)?.taxRate),
+          conversionRate: item.conversionRate
+            ?? (Number(prod?.conversionRate) > 1 ? Number(prod?.conversionRate) : undefined)
         };
       });
 
@@ -1546,6 +1662,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         documentType: effectiveDocType,
         operatorId: currentUser.username,
         operatorName: currentUser.username,
+        terminalId: currentTerminalId(),
         synced: settings?.mode === 'Online',
         includeIva,
         ivaAmount: iva
@@ -1602,7 +1719,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
       let directPrinted = false;
       if (isSerialPrinterConnected() && printFormat === 'Thermal') {
-        const activeConfig = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as SystemSettings;
+        const activeConfig = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
         await runPostCommitTask({
           label: 'enviar o recibo para a impressora térmica',
           task: async () => {
@@ -1682,8 +1799,14 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
         showToast('A venda foi gravada com sucesso. Alguns passos posteriores não foram concluídos; consulte o histórico antes de repetir a operação.', 'warning');
       } else if (err instanceof InsufficientStockError) {
         showToast(err.message, 'error');
+        void appAlert(`Venda não registada.\n\n${err.message}`);
       } else {
+        // K-04: um toast de 4 segundos escondia o facto de a venda NÃO ter
+        // ficado gravada. Erros de gravação passam a exigir reconhecimento.
         showToast('Erro ao gravar a venda no sistema.', 'error');
+        void appAlert(
+          `A venda NÃO foi gravada.\n\n${err instanceof Error ? err.message : 'Erro desconhecido.'}\n\nO carrinho foi mantido. Se o problema repetir, avise o responsável técnico.`
+        );
       }
     } finally {
       setIsFinalizing(false);
@@ -1694,7 +1817,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
   const handlePayInvoice = (sale: Sale) => {
     askConfirmation(
       'Liquidar Fatura',
-      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString()} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
+      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString('pt-MZ')} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
       async () => {
         let paymentSaved = false;
         try {
@@ -1918,7 +2041,31 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
   return (
     <div className="flex flex-col lg:h-full lg:overflow-hidden" id="pdv_module_root">
-      
+
+      {(!isOnline || Math.abs(clockSkewMinutes) >= 5) && (
+        <div className="mb-2 flex flex-col gap-1">
+          {!isOnline && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-800">
+              <span className="material-symbols-outlined text-base">cloud_off</span>
+              <span>
+                Sem ligação ao servidor. As vendas ficam registadas neste posto e sincronizam quando a rede voltar —
+                não feche o navegador antes disso.
+              </span>
+            </div>
+          )}
+          {Math.abs(clockSkewMinutes) >= 5 && (
+            <div className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-800">
+              <span className="material-symbols-outlined text-base">schedule</span>
+              <span>
+                O relógio deste computador está {clockSkewMinutes > 0 ? 'adiantado' : 'atrasado'} cerca de{' '}
+                {Math.abs(clockSkewMinutes)} minuto(s) em relação ao servidor. As datas e os números dos documentos
+                podem sair errados — corrija a hora do sistema.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top Header Actions (Portaled to App.tsx) */}
       {document.getElementById('module-header-actions') && createPortal(
         <div className="flex items-center gap-2 shrink-0 flex-nowrap">
@@ -1939,7 +2086,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               setRetroactiveCustomerAddress('');
               setRetroactiveSaveCustomer(false);
               setRetroactivePaymentMethod('Dinheiro');
-              setRetroactiveDeductStock(true);
+              setRetroactiveDeductStock(false);
               setRetroactiveCart([]);
               setRetroactiveProductQuery('');
               setShowRetroactiveModal(true);
@@ -2009,7 +2156,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <h4 className="font-bold text-amber-950 text-sm">Venda Anterior não Finalizada Detetada</h4>
                   <p className="text-xs text-amber-800 leading-relaxed mt-0.5">
                     O sistema recuperou uma sessão que fechou inesperadamente com <strong>{savedActiveCart.cart.length} artigo(s)</strong> no valor total de <strong>{
-                      getSavedCartTotal().toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                      getSavedCartTotal().toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                     } MT</strong> para o cliente <strong>{savedActiveCart.customerName}</strong>. Deseja restaurar este carrinho?
                   </p>
                 </div>
@@ -2169,9 +2316,9 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           const unit = hybridUnits[prod.id] || (prod.parentUnit === 'Sacos' ? 'Bulk' : 'Retail');
                           if (prod.parentUnit && prod.conversionRate && prod.conversionRate > 1 && unit === 'Bulk') {
                             const bulkPrice = prod.sellingPriceBulk && prod.sellingPriceBulk > 0 ? prod.sellingPriceBulk : (prod.sellingPrice * prod.conversionRate);
-                            return `${bulkPrice.toLocaleString()} MT / ${getSingularUnit(prod.parentUnit || 'Saco')}`;
+                            return `${bulkPrice.toLocaleString('pt-MZ')} MT / ${getSingularUnit(prod.parentUnit || 'Saco')}`;
                           }
-                          return `${prod.sellingPrice.toLocaleString()} MT / ${getSingularUnit(prod.baseUnit || 'Kg')}`;
+                          return `${prod.sellingPrice.toLocaleString('pt-MZ')} MT / ${getSingularUnit(prod.baseUnit || 'Kg')}`;
                         })()}
                       </p>
                     </div>
@@ -2362,11 +2509,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           {item.name}
                         </p>
                         <p className="text-[10px] text-gray-500">
-                          {item.unitPrice.toLocaleString()} MT / {item.unit} • Subtotal: {(item.unitPrice * item.quantity).toLocaleString()} MT
+                          {item.unitPrice.toLocaleString('pt-MZ')} MT / {item.unit} • Subtotal: {(item.unitPrice * item.quantity).toLocaleString('pt-MZ')} MT
                         </p>
                         {getItemDiscount(item) > 0 && (
                           <p className="text-[10px] text-red-600 font-bold">
-                            Desc. Artigo: -{getItemDiscount(item).toLocaleString()} MT
+                            Desc. Artigo: -{getItemDiscount(item).toLocaleString('pt-MZ')} MT
                           </p>
                         )}
                       </div>
@@ -2388,12 +2535,19 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               if (valStr === '') {
                                 updateCartQty(item.productId, '', item.sellingUnit);
                               } else {
-                                updateCartQty(item.productId, Number(valStr), item.sellingUnit);
+                                const parsed = Number(valStr);
+                                if (Number.isFinite(parsed) && parsed > 0) {
+                                  lastValidQtyRef.current[item.productId] = parsed;
+                                }
+                                updateCartQty(item.productId, parsed, item.sellingUnit);
                               }
                             }}
                             onBlur={() => {
-                              if (item.quantity === '' || item.quantity <= 0) {
-                                updateCartQty(item.productId, 1, item.sellingUnit);
+                              // K-05: apagar o campo e sair repunha 1, mudando o
+                              // total sem o operador perceber. Repõe-se o último
+                              // valor válido dessa linha.
+                              if (item.quantity === '' || Number(item.quantity) <= 0) {
+                                updateCartQty(item.productId, lastValidQtyRef.current[item.productId] ?? 1, item.sellingUnit);
                               }
                             }}
                             className="w-10 text-center text-xs font-bold font-mono bg-white focus:outline-none border-l border-r border-gray-200 py-0.5"
@@ -2524,17 +2678,17 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <span className="text-[9px] font-black uppercase text-emerald-800 tracking-tight">Total Final</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1 text-center font-mono font-black text-xs">
-                  <span className="text-gray-700">{getSubtotal().toLocaleString()} MT</span>
+                  <span className="text-gray-700">{getSubtotal().toLocaleString('pt-MZ')} MT</span>
                   <span className={getDiscount() === 0 ? 'text-gray-400' : 'text-rose-600'}>
-                    -{getDiscount().toLocaleString()} MT
+                    -{getDiscount().toLocaleString('pt-MZ')} MT
                   </span>
                   <span className="text-gray-700">
                     {includeIva
-                      ? `${Math.round((getSubtotal() - getDiscount()) * 0.16).toLocaleString()} MT`
+                      ? `${Math.round((getSubtotal() - getDiscount()) * 0.16).toLocaleString('pt-MZ')} MT`
                       : 'Isento'
                     }
                   </span>
-                  <span className="text-emerald-600 font-extrabold">{getTotal().toLocaleString()} MT</span>
+                  <span className="text-emerald-600 font-extrabold">{getTotal().toLocaleString('pt-MZ')} MT</span>
                 </div>
               </div>
 
@@ -2603,7 +2757,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       const diff = targetTotal - currentTotal;
                       return (
                         <div className="pt-1 border-t border-slate-200 flex justify-between items-center text-[9px] font-black">
-                          <span>Digitado: <strong className="font-mono">{currentTotal.toLocaleString()} MT</strong></span>
+                          <span>Digitado: <strong className="font-mono">{currentTotal.toLocaleString('pt-MZ')} MT</strong></span>
                           <span className={diff === 0 ? 'text-emerald-600' : diff > 0 ? 'text-orange-600' : 'text-red-600'}>
                             {diff === 0 ? '✓ Ok' : diff > 0 ? `Falta: ${diff} MT` : `Excesso: ${Math.abs(diff)} MT`}
                           </span>
@@ -2649,7 +2803,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <div className="flex items-center gap-1 text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-100 rounded px-2 py-0.5 animate-fade-in shrink-0">
                         <span>Troco:</span>
                         <span className="font-mono text-emerald-600">
-                          {(amountReceived - getTotal()).toLocaleString()} MT
+                          {(amountReceived - getTotal()).toLocaleString('pt-MZ')} MT
                         </span>
                       </div>
                     )}
@@ -2685,7 +2839,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
             <div className="flex flex-col">
               <span className="text-[9px] font-black uppercase text-gray-400 tracking-wider">Total a Pagar</span>
               <span className="text-lg sm:text-xl font-black font-mono text-emerald-700 leading-none">
-                {getTotal().toLocaleString()} <span className="text-xs font-black">MT</span>
+                {getTotal().toLocaleString('pt-MZ')} <span className="text-xs font-black">MT</span>
               </span>
             </div>
 
@@ -2727,7 +2881,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
               setReportPreset(preset);
             }}
             onExportPDF={async () => {
-              const s = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: '401976590' } as any;
+              const s = settings || { companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
               showToast('A compilar e descarregar relatório em formato PDF...', 'success');
               await downloadPeriodSalesReportPDF(reportStartDate, reportEndDate, sales, s);
             }}
@@ -3109,7 +3263,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   VENDA REGISTADA - EMISSÃO DE DOCUMENTO
                 </span>
                 <p className="text-[10px] text-gray-500 font-bold font-mono uppercase">
-                  Doc: {invoiceToPrint.invoiceNumber} | Total: {invoiceToPrint.total.toLocaleString()} MT
+                  Doc: {invoiceToPrint.invoiceNumber} | Total: {invoiceToPrint.total.toLocaleString('pt-MZ')} MT
                 </p>
               </div>
 
@@ -3151,7 +3305,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 {/* Primary Action to actually print/download */}
                 <button
                   onClick={() => {
-                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as any;
+                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
                     if (printType === 'Thermal') {
                       downloadThermalReceipt(invoiceToPrint, s);
                       // Trigger native print dialog too
@@ -3220,7 +3374,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   ) : null}
                                   <h2 className="text-xl font-black text-primary uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold mt-1">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                                   <div className="text-[10px] text-gray-600 space-y-0.5 mt-1.5 border-t border-gray-100 pt-1.5">
                                     {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                                     
@@ -3290,12 +3444,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className="hover:bg-gray-50">
+                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                                     <td className="p-2.5 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-2.5 text-right font-mono">{item.quantity}</td>
                                     <td className="p-2.5 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-2.5 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                                    <td className="p-2.5 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString()}</td>
+                                    <td className="p-2.5 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-2.5 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -3319,15 +3473,15 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   <div className="col-span-4 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-primary font-mono">{invoiceToPrint.total.toLocaleString()} MT</span>
+                                      <span className="text-primary font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between text-[10px] font-bold text-gray-700 bg-gray-50 p-1.5 rounded border border-gray-150 mt-2">
                                       <span>Forma de Pagamento:</span>
@@ -3389,7 +3543,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                   <h2 className="text-xl font-black text-primary uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   
                                   <p className="text-gray-600 font-semibold text-[11px]">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
                                   </p>
                                   
                                   <p className="text-gray-500 text-[10px]">
@@ -3456,12 +3610,12 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className="hover:bg-gray-50">
+                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                                     <td className="p-3 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-3 text-right font-mono">{item.quantity}</td>
                                     <td className="p-3 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                                    <td className="p-3 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString()}</td>
+                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-3 text-right font-bold font-mono text-primary">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -3473,20 +3627,20 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               <>
                                 <div className="flex justify-between items-center border-t border-gray-200 pt-6 mb-8">
                                   <div className="text-[11px] text-gray-500 italic max-w-lg leading-relaxed">
-                                    *Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.
+                                    {settlementDisclaimer(invoiceToPrint)}
                                   </div>
                                   <div className="w-64 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-primary font-mono text-base">{invoiceToPrint.total.toLocaleString()} MT</span>
+                                      <span className="text-primary font-mono text-base">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                   </div>
                                 </div>
@@ -3496,7 +3650,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
                                   </p>
                                   <p className="text-[9px] text-gray-400">
                                     Email: {settings?.email || 'agroxicomo1@gmail.com'} • Tel: {[settings?.vodacom1, settings?.movitel1].filter(Boolean).join(' / ') || '+258 84 123 4567'}
@@ -3527,7 +3681,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <img src={settings.logoUrl} alt="Logo" className="max-h-10 object-contain bg-white mx-auto mb-1 block" />
                     ) : null}
                     <h3 className="text-[11px] font-black uppercase tracking-wide">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h3>
-                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                     <div className="text-[8px] text-gray-600 space-y-0.5">
                       {settings?.email && <p>Email: {settings.email}</p>}
                       <p>Vodacom: {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
@@ -3575,8 +3729,8 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <div key={idx} className="space-y-0.5">
                           <div className="font-bold text-gray-900 uppercase text-[8.5px] leading-tight">{item.name}</div>
                           <div className="flex justify-between text-[8px] text-gray-600 font-mono">
-                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
-                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                           </div>
                         </div>
                       ))}
@@ -3590,13 +3744,13 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <div className="space-y-1 text-[8.5px]">
                     <div className="flex justify-between">
                       <span>SUBTOTAL:</span>
-                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
                     
                     {invoiceToPrint.discount > 0 && (
                       <div className="flex justify-between text-red-600">
                         <span>DESCONTO:</span>
-                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
@@ -3609,7 +3763,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
 
                     <div className="flex justify-between font-black text-[11px] border-t border-dashed border-gray-400 pt-1.5 mt-1 text-black">
                       <span>TOTAL PAGO:</span>
-                      <span className="font-mono">{invoiceToPrint.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
 
                     <div className="flex justify-between text-[8px] text-gray-700 pt-0.5 border-t border-dotted border-gray-300 mt-1">
@@ -3621,11 +3775,11 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                       <div className="space-y-0.5 pt-0.5 font-mono text-[8px]">
                         <div className="flex justify-between text-gray-600">
                           <span>VALOR ENTREGUE:</span>
-                          <span>{Number(amountReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                          <span>{Number(amountReceived).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                         </div>
                         <div className="flex justify-between text-emerald-800 font-bold">
                           <span>TROCO:</span>
-                          <span>{(Number(amountReceived) - invoiceToPrint.total).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                          <span>{(Number(amountReceived) - invoiceToPrint.total).toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                         </div>
                       </div>
                     )}
@@ -3660,7 +3814,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         ) : null}
                         <h4 className="font-black text-gray-800 text-sm">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h4>
                         <div className="text-[8px] text-gray-500 space-y-0.5">
-                          <p>Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p>Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                           {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                           <p><strong>Vodacom:</strong> {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
                           <p><strong>Movitel:</strong> {[settings?.movitel1, settings?.movitel2, settings?.movitel3].filter(Boolean).join(' / ') || '+258 86 123 4567'}</p>
@@ -3688,7 +3842,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                             <td className="p-1 font-semibold">{item.name}</td>
                             <td className="p-1 text-right font-mono">{item.quantity}</td>
                             <td className="p-1 text-gray-500">{item.unit}</td>
-                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -3699,7 +3853,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <span className="font-bold italic">"Esta fatura tem validade até à reposição de stock"</span>
                         <span className="mt-0.5">Forma de Pagamento: <strong className="uppercase text-emerald-700 font-black">{invoiceToPrint.paymentMethod || 'Dinheiro'}</strong></span>
                       </div>
-                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString()} MT</span></p>
+                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span></p>
                     </div>
                   </div>
 
@@ -3717,7 +3871,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         ) : null}
                         <h4 className="font-black text-gray-800 text-sm">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h4>
                         <div className="text-[8px] text-gray-500 space-y-0.5">
-                          <p>Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p>Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                           {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                           <p><strong>Vodacom:</strong> {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
                           <p><strong>Movitel:</strong> {[settings?.movitel1, settings?.movitel2, settings?.movitel3].filter(Boolean).join(' / ') || '+258 86 123 4567'}</p>
@@ -3745,7 +3899,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                             <td className="p-1 font-semibold">{item.name}</td>
                             <td className="p-1 text-right font-mono">{item.quantity}</td>
                             <td className="p-1 text-gray-500">{item.unit}</td>
-                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                            <td className="p-1 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -3756,7 +3910,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                         <span className="font-bold italic">"Esta fatura tem validade até à reposição de stock"</span>
                         <span className="mt-0.5">Forma de Pagamento: <strong className="uppercase text-emerald-700 font-black">{invoiceToPrint.paymentMethod || 'Dinheiro'}</strong></span>
                       </div>
-                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString()} MT</span></p>
+                      <p className="font-black text-gray-800">TOTAL: <span className="text-primary text-xs font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span></p>
                     </div>
                   </div>
                 </div>
@@ -3835,7 +3989,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                     )
                     .map(p => (
                       <option key={p.id} value={p.id}>
-                        [{p.code}] {p.name} - {p.sellingPrice.toLocaleString()} MT
+                        [{p.code}] {p.name} - {p.sellingPrice.toLocaleString('pt-MZ')} MT
                       </option>
                     ))
                   }
@@ -3929,7 +4083,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, EI'}
               </h1>
               <div className="text-[11px] mt-1">
-                <p>NUIT: {settings?.companyNuit || '401976590'}</p>
+                <p>NUIT: {companyNuit(settings?.companyNuit)}</p>
                 <p>Cel: {settings?.vodacom1 || '845197072'}</p>
                 <p>Maputo, Moçambique</p>
               </div>
@@ -3959,7 +4113,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                   <tr key={idx} className="border-b border-gray-100 border-dotted">
                     <td className="py-1 leading-tight">{item.name}</td>
                     <td className="py-1 text-center whitespace-nowrap">{item.quantity} {item.unit}</td>
-                    <td className="py-1 text-right whitespace-nowrap">{item.totalPrice.toLocaleString()}</td>
+                    <td className="py-1 text-right whitespace-nowrap">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3971,15 +4125,15 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
             <div className="text-[13px] space-y-1">
               <div className="flex justify-between w-full">
                 <span className="font-bold">Subtotal:</span>
-                <span className="text-right">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                <span className="text-right">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
               </div>
               <div className="flex justify-between w-full">
                 <span className="font-bold">Desconto:</span>
-                <span className="text-right">-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                <span className="text-right">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
               </div>
               <div className="flex justify-between w-full font-bold text-[16px] border-t border-dashed border-black pt-2">
                 <span>TOTAL:</span>
-                <span className="text-right">{invoiceToPrint.total.toLocaleString()} MT</span>
+                <span className="text-right">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
               </div>
             </div>
 
@@ -4207,7 +4361,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                                 </div>
                               </td>
                               <td className="p-3 text-right font-black font-mono text-emerald-700 whitespace-nowrap">
-                                {total.toLocaleString()} MT
+                                {total.toLocaleString('pt-MZ')} MT
                               </td>
                               <td className="p-3">
                                 <div className="flex items-center justify-center gap-2">
@@ -4533,7 +4687,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                           </div>
                           <div className="text-right shrink-0 ml-3">
                             <p className="font-black text-[11px] text-indigo-700 font-mono">
-                              {p.sellingPrice.toLocaleString('pt-PT')} MT
+                              {p.sellingPrice.toLocaleString('pt-MZ')} MT
                             </p>
                             <p className={`text-[9px] font-bold ${p.stockQty > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
                               {p.isService ? 'Serviço' : `${p.stockQty} stock`}
@@ -4596,7 +4750,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               <p className="font-bold text-gray-900">{item.name}</p>
                             </td>
                             <td className="p-2.5 text-center font-mono font-semibold text-[10px]">
-                              {item.unitPrice.toLocaleString('pt-PT')} MT
+                              {item.unitPrice.toLocaleString('pt-MZ')} MT
                             </td>
                             <td className="p-2.5 text-center">
                               <div className="inline-flex items-center border border-gray-300 rounded-lg overflow-hidden bg-slate-50 shadow-2xs">
@@ -4620,7 +4774,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                               </div>
                             </td>
                             <td className="p-2.5 text-right font-black font-mono text-indigo-700 text-[11px]">
-                              {(item.unitPrice * item.quantity).toLocaleString('pt-PT')} MT
+                              {(item.unitPrice * item.quantity).toLocaleString('pt-MZ')} MT
                             </td>
                             <td className="p-2.5 text-center">
                               <button
@@ -4658,7 +4812,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 <div className="text-right sm:text-left">
                   <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Total Final da Venda</p>
                   <p className="text-lg sm:text-2xl font-black font-mono text-indigo-900">
-                    {getRetroactiveCartTotal().toLocaleString('pt-PT')} MT
+                    {getRetroactiveCartTotal().toLocaleString('pt-MZ')} MT
                   </p>
                 </div>
               </div>
@@ -4674,7 +4828,7 @@ function newSaleId(prefixo: 'sale' | 'sale-retro' = 'sale'): string {
                 }`}
               >
                 <span className="material-symbols-outlined text-[20px]">check_circle</span>
-                Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-PT')} MT)
+                Finalizar Registo Retroativo ({getRetroactiveCartTotal().toLocaleString('pt-MZ')} MT)
               </button>
             </div>
 

@@ -61,22 +61,33 @@ export function numeroParaExtenso(valor: number): string {
 
   if (milhares > 0) {
     const txtMilhares = converterGrupo(milhares);
-    partesInteiro.push(milhares === 1 ? 'Um Mil' : `${txtMilhares} Mil`);
+    partesInteiro.push(milhares === 1 ? 'Mil' : `${txtMilhares} Mil`);
   }
 
   if (unidades > 0) {
     partesInteiro.push(converterGrupo(unidades));
   }
 
-  let extensaoInteiro = partesInteiro.join(unidades > 0 && (milhares > 0 || milhoes > 0) && unidades < 100 ? ' e ' : ', ');
-
-  // Normalização de pontuação
-  extensaoInteiro = extensaoInteiro.replace(/, e /g, ' e ');
+  // O-03: em português os grupos separam-se por espaço — "mil duzentos e
+  // cinquenta", não "mil, duzentos e cinquenta". O "e" só entra quando o
+  // último grupo é inferior a 100 ("mil e cinquenta").
+  const separadorFinal = unidades > 0 && unidades < 100 && (milhares > 0 || milhoes > 0) ? ' e ' : ' ';
+  let extensaoInteiro: string;
+  if (partesInteiro.length === 0) {
+    extensaoInteiro = '';
+  } else if (milhoes > 0 && partesInteiro.length > 1) {
+    // "dois milhões e quinhentos mil meticais"
+    extensaoInteiro = `${partesInteiro[0]} e ${partesInteiro.slice(1).join(separadorFinal)}`;
+  } else {
+    extensaoInteiro = partesInteiro.join(separadorFinal);
+  }
 
   let resultado = '';
 
   if (inteiro > 0) {
-    resultado = `${extensaoInteiro} ${inteiro === 1 ? 'Metical' : 'Meticais'}`;
+    // "um milhão DE meticais"; "mil meticais" (sem "de").
+    const ligacaoMoeda = milhoes > 0 && milhares === 0 && unidades === 0 ? ' de ' : ' ';
+    resultado = `${extensaoInteiro}${ligacaoMoeda}${inteiro === 1 ? 'Metical' : 'Meticais'}`;
   }
 
   if (centavos > 0) {

@@ -22,6 +22,8 @@ export interface Product {
   expiryDate?: string; // ISO date YYYY-MM-DD
   imageUrl?: string;
   isService?: boolean;
+  /** Taxa de IVA aplicável, em percentagem (omissão: 16%). */
+  taxRate?: number;
 }
 
 export interface SaleItem {
@@ -39,6 +41,16 @@ export interface SaleItem {
   discountType?: 'per_unit' | 'line_total' | 'percent_unit' | 'percent_total';
   discountValue?: number;
   sellingUnit?: 'Bulk' | 'Retail'; // 'Bulk' for wholesale/sacks, 'Retail' for kilograms/units
+  /** Taxa de IVA aplicada à linha, em percentagem (omissão: 16%). */
+  taxRate?: number;
+  /**
+   * Factor de conversão do produto no momento da venda.
+   *
+   * D-04: a anulação repunha o stock com o factor ACTUAL do catálogo. Se a
+   * conversão tivesse mudado (1 saco = 50 kg → 25 kg), o estorno devolvia a
+   * quantidade errada. Fica gravada a conversão usada.
+   */
+  conversionRate?: number;
 }
 
 export interface PaymentBreakdown {
@@ -68,11 +80,17 @@ export interface Sale {
   changeGiven?: number;
   /** Estado anterior ao cancelamento, para que o restauro seja fiel. */
   previousStatus?: 'Paga' | 'Pendente' | 'Crédito';
+  /** Número da nota de crédito emitida aquando da anulação (E-06). */
+  creditNoteNumber?: string;
+  /** Momento da anulação, para rasto documental. */
+  cancelledAt?: string;
   /** 'Proforma' = documento comercial sem efeito fiscal nem financeiro. */
   status: 'Paga' | 'Pendente' | 'Cancelada' | 'Crédito' | 'Proforma';
   documentType?: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';
   operatorId: string;
   operatorName: string;
+  /** Posto/caixa que emitiu a venda (B-05). */
+  terminalId?: string;
   synced: boolean; // For Online/Local dual mode syncing tracking
   includeIva?: boolean;
   ivaAmount?: number;
@@ -102,6 +120,11 @@ export interface PausedSale {
   documentType: 'FaturaDefinitiva' | 'FaturaProforma' | 'Cotacao';
   includeIva: boolean;
   customSubtotalDiscount: number;
+  /** Quem pausou a venda (G-02: a pausa não tinha autor). */
+  operatorId?: string;
+  operatorName?: string;
+  /** Posto onde a venda foi pausada. */
+  terminalId?: string;
 }
 
 export interface LossRecord {
@@ -347,4 +370,29 @@ export interface UserCredentials {
   mustChangePassword?: boolean;
   /** Version of the credential reset already applied to this account (idempotency guard). */
   passwordResetVersion?: number;
+}
+
+
+/**
+ * Movimento de stock (F-05).
+ *
+ * O sistema alterava `stockQty` sem deixar rasto da razão: quando o saldo
+ * divergia, não havia forma de saber o que o moveu. Cada alteração passa a
+ * gravar aqui uma linha com o delta em unidades base.
+ */
+export interface StockMovement {
+  id: string;
+  date: string;
+  productId: string;
+  productName: string;
+  /** Venda | Estorno | Quebra | Ajuste | Transformação | Entrada */
+  type: 'Venda' | 'Estorno' | 'Quebra' | 'Ajuste' | 'Transformação' | 'Entrada';
+  /** Delta em unidades base, com sinal (negativo = saída). */
+  qtyDelta: number;
+  unit: string;
+  /** Documento que originou o movimento (fatura, quebra, transformação). */
+  reference?: string;
+  operatorName?: string;
+  terminalId?: string;
+  note?: string;
 }

@@ -1064,35 +1064,53 @@ Registo do que já foi corrigido no código, fase a fase. Cada fase foi verifica
 | 14 | Balancete e gráficos deixam de ser inventados | `FinanceModule.tsx` | N‑01, N‑03 | ✔ |
 | 15 | Fim das confirmações invisíveis | `confirmDialog.ts`, `DialogHost.tsx` (novos), 6 módulos | K‑01 | ✔ |
 | 16 | IP real nos registos de auditoria | `clientInfo.ts` (novo), `server.ts`, `LoginPanel.tsx`, `StockModule.tsx` | L‑05 | ✔ |
+| 17 | Fiscal: NUIT obrigatório, IVA por produto, texto por estado, nota de crédito | `companyInfo.ts`, `taxHelper.ts`, `pdfGenerator.ts`, 4 módulos | E‑02, E‑03, E‑04, E‑06, J‑06 | ✔ |
+| 18 | PDV: limite de desconto, erros persistentes, quantidade, rede, relógio | `PDVModule.tsx` | K‑03, K‑04, K‑05, K‑07, C‑03 | ✔ |
+| 19 | Segurança de contas: política, salários, restauro, sessões | `securityHelper.ts`, `InlineHeaderSearch.tsx`, `TechnicalModule.tsx`, `App.tsx` | L‑06, L‑08, L‑11, L‑12 | ✔ |
+| 20 | Servidor: backups duráveis, limpeza de limites, CSP, erros | `server.ts` | M‑03, M‑04, M‑05, M‑06 | ✔ |
+| 21 | Financeiro: gráfico real, meios de pagamento, CSV para Excel | `FinanceModule.tsx` | N‑02, N‑04, N‑07 | ✔ |
+| 22 | Livro de movimentos de stock | `types.ts`, `firebaseDB.ts`, `StockModule.tsx` | F‑05 | ✔ |
+| 23 | Numeração fiscal: controlo de lacunas, série/posto | `numberingAudit.ts` (novo), `TechnicalModule.tsx`, `PDVModule.tsx` | B‑04, B‑05 | ✔ |
+| 24 | Rascunho por separador; autor da pausa; conversão da venda | `firebaseDB.ts`, `PDVModule.tsx`, `types.ts`, `FaturasModule.tsx` | I‑02, G‑02, D‑04 | ✔ |
+| 25 | Numeração e formatação: locale único, extenso correcto | 8 módulos, `numberToWords.ts` | O‑01, O‑02, O‑03, C‑04 | ✔ |
+| 26 | Estrutura de escrita: transacção com limite, cache de leitura | `firebaseDB.ts`, `PDVModule.tsx` | A‑07, A‑06, A‑08 | ✔ |
 
 ### Correções a este anexo
 
-- **G‑01/G‑02 (duplicação do rascunho)** — a descrição original exagerava: as vendas em pausa são
-  uma coleção (`paused_sales`), não uma chave única, portanto uma segunda pausa não apaga a
-  primeira. O risco real era o **rascunho de auto‑save**: sobrevivia ao commit até ao efeito
-  seguinte e reaparecia como "venda anterior". Foi fechado com limpeza explícita no commit e na
-  recuperação, expiração às 12 horas e revalidação de preços/stock ao restaurar.
-- **L‑03 (regras do Firestore)** — o ficheiro seguro está escrito, mas **não publicado**. Publicar
-  antes de ativar o login anónimo no Firebase interrompe a sincronização. Ver `docs/seguranca.md`.
-- **Teste de datas** — o teste "Date range includes plain dates…" fixava o comportamento
-  defeituoso (limites em meia‑noite UTC). Foi reescrito para os limites do dia de Maputo
-  (`2026-09-30T22:00:00.000Z` … `2026-10-07T21:59:59.999Z`) e acrescentado o caso 21:30Z/22:30Z.
+- **G‑01/G‑02** — a descrição original exagerava: as vendas em pausa são uma coleção, não uma chave única.
+  O risco real era o rascunho de auto‑save; fechado na Fase 7, e a pausa passou a registar o autor (Fase 24).
+- **L‑03** — o ficheiro seguro está escrito, mas **não publicado**. Publicar antes de ativar o login anónimo
+  no Firebase pára a sincronização. Ver `docs/seguranca.md`.
+- **Teste de datas** — o teste fixava o comportamento defeituoso (limites em meia‑noite UTC) e foi reescrito.
+- **Achados que não se confirmaram** ao reler o código: **I‑01** (existe bloqueio por inactividade de 5 min),
+  **K‑02** (a quantidade vazia é tratada no submit) e **L‑09** (não existe alias de conta). Ficam registados
+  como *não procede* em vez de "corrigidos".
 
-### Ainda por corrigir
+### Estado final
 
-- **Fase 12** — `M‑01`/`M‑02`: o canal SSE passou a existir no servidor (com *broadcast* em cada
-  escrita) e a rota `/api/gemini/technician-ai` responde com um erro claro quando não há
-  `GEMINI_API_KEY`; com chave, faz ponte para o Gemini (só texto — anexos devolvem 501).
-- **Fase 13** — vendas retroactivas: por omissão já não descontam stock actual, recibo manuscrito
-  duplicado é recusado, datas futuras bloqueadas e o estado segue o método de pagamento.
-- **Fase 14** — o "Balancete" era fabricado (40/60 caixa-banco, fornecedores e capital social
-  inventados a partir do stock). Passou a **Mapa de Conferência** com valores reais; os gráficos
-  deixaram de desenhar barras fictícias quando não há vendas.
-- **Fase 15** — `window.confirm/prompt/alert` substituídos por `appConfirm/appPrompt/appAlert`
-  com `DialogHost` (funcionam dentro de iframes).
-- **Fase 16** — IP aleatório substituído pelo IP real do posto (`/api/client-info`).
+- **Fechados:** 82 de 97.
+- **Parciais:** 3 (G‑02, F2‑03, K‑08).
+- **Não procedem:** 3 (I‑01, K‑02, L‑09).
+- **Abertos:** 9 — `L‑03` (publicação das regras), `L‑07` e `L‑10` (autenticação server‑side e credenciais
+  de arranque no bundle), `N‑06` (módulo de despesas), `H‑04`, `J‑04`, `J‑05`, `F‑07`, `F‑08`.
+  As razões estão em §18.
 
-**Continua aberto:** I‑01/I‑02 (sessão e rascunho por aba), K‑03 (desconto ilimitado), K‑04
-(erros escondidos em toasts), L‑06…L‑12 (política de palavras‑passe, permissões, validação no
-servidor), M‑03…M‑06, N‑02/N‑04/N‑06/N‑07, E‑02/E‑03/E‑04/E‑06, F‑05 (livro de movimentos),
-F‑07/F‑08, O‑01…O‑03, e a publicação das regras do Firestore.
+---
+
+## 18. O que continua aberto, e porquê
+
+| ID | Assunto | Porque não está fechado |
+|---|---|---|
+| L‑03 | Regras do Firestore | Escritas e prontas; a publicação exige ativar o login anónimo no Firebase Console — decisão e acção do dono, não do código. |
+| L‑07 | Autorização feita no cliente | Fechar isto exige um serviço de autenticação (sessão em servidor, tokens assinados) e mover a verificação para lá. Com o modelo atual (dados no Firestore, app estática) qualquer "fecho" seria cosmético. Continua mitigado: palavras‑passe em hash, regras com autenticação, API local protegida. |
+| L‑10 | Credenciais de arranque no bundle | São hashes (não palavras‑passe) e existem para permitir login sem rede. Removê‑los tira o arranque offline; substituí‑los exige o mesmo serviço de L‑07. |
+| N‑06 | Módulo de despesas | Não é uma correção: é uma funcionalidade em falta (o lucro não desconta custos operacionais). Precisa de desenho de dados e de ecrãs próprios. |
+| H‑04 | Auditoria das vendas retroactivas | O registo existe (data, total, recibo, operador); falta anexar o comprovativo digitalizado e o autorizador. Requer armazenamento de ficheiros. |
+| J‑04 | Reimpressão a partir do estado atual | A reimpressão usa o registo da venda (não o carrinho), mas não guarda um instantâneo do documento emitido. Para fechar, é preciso arquivar o PDF/imagem no momento da emissão. |
+| J‑05 | Pré‑visualizar descarrega | Separar pré‑visualização de gravação obriga a rever o fluxo de impressão em todos os perfis de impressora; fazer isso sem hardware para testar é arriscado. |
+| F‑07 | `saveProducts` em massa | A escrita por campo em todo o catálogo é um refactor do módulo de stock (cada ecrã que grava produtos). Fica identificado como dívida técnica com plano claro. |
+| F‑08 | Migração de stock por browser | Migração de dados que corre no cliente; deve passar a script único no servidor. Envolve dados reais — não se faz sem cópia de segurança e validação. |
+
+**Nota final:** tudo o que está marcado como fechado foi verificado por compilação (`tsc`), testes (44/44) e
+revisão do código; **nada foi validado numa caixa real, com impressora e dinheiro**. A checklist de §13
+continua a ser obrigatória antes de produção.

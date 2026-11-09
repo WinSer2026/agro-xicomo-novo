@@ -203,6 +203,31 @@ export default function App() {
         if (savedUserJson) {
           try {
             const userObj = JSON.parse(savedUserJson);
+
+            // L-12: uma sessão encerrada no módulo técnico (ou noutro posto)
+            // continuava a funcionar neste separador porque o utilizador estava
+            // guardado no sessionStorage. Valida-se contra `active_sessions`
+            // quando a base responde; sem base, mantém-se a sessão local.
+            const sessionId = safeSessionStorage.getItem('agro_session_id');
+            if (sessionId) {
+              try {
+                const sessions = await dbService.getActiveSessions();
+                if (
+                  Array.isArray(sessions) &&
+                  sessions.length > 0 &&
+                  !sessions.some(sessao => String(sessao.id) === sessionId)
+                ) {
+                  safeSessionStorage.removeItem('agro_current_user');
+                  safeSessionStorage.removeItem('agro_session_active');
+                  safeSessionStorage.removeItem('agro_session_id');
+                  setCurrentUser(null);
+                  return;
+                }
+              } catch {
+                // Base inacessível: não se derruba a sessão por causa da rede.
+              }
+            }
+
             setCurrentUser(userObj);
 
             const userRoles = getUserRoles(userObj);
@@ -656,7 +681,15 @@ export default function App() {
           {/* Operator Section */}
           <div className="flex items-center gap-2 sm:gap-3 md:gap-4 shrink-0">
             {activeModule !== 'stock' && (
-              <InlineHeaderSearch onNavigateModule={(mod) => selectModule(mod)} />
+              <InlineHeaderSearch
+                onNavigateModule={(mod) => selectModule(mod)}
+                canSeeRestrictedData={Boolean(
+                  currentUser &&
+                  (getUserRoles(currentUser).includes('Técnico') ||
+                    getUserRoles(currentUser).includes('Gestor Geral') ||
+                    getUserRoles(currentUser).includes('Gestor de RH'))
+                )}
+              />
             )}
 
             {/* Critical Stock Alerts Bell */}

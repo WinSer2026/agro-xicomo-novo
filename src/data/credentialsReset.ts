@@ -7,7 +7,7 @@ import { AppRole } from '../types';
  * Estas são as ÚNICAS credenciais válidas após o reset (versão definida abaixo).
  * As palavras-passe são TEMPORÁRIAS e estão guardadas apenas em hash SHA-256 (nunca em
  * texto simples): no primeiro login o sistema obriga cada operador a definir uma nova
- * palavra-passe com 4 a 6 caracteres (letras e/ou números), sem símbolos obrigatórios e
+ * palavra-passe com pelo menos 8 caracteres (letras e números),
  * podendo repetir uma palavra-passe antiga.
  *
  * Lista de contas abrangidas pelo reset (versão atual):

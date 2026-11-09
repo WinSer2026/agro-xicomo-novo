@@ -87,7 +87,7 @@ export async function runCredentialsReset(): Promise<void> {
 }
 
 /**
- * Aplica a nova palavra-passe escolhida pelo operador (4 a 6 caracteres, letras/números),
+ * Aplica a nova palavra-passe escolhida pelo operador (mínimo 8 caracteres, letras e números),
  * libertando o acesso normal ao sistema. Não há restrição de reutilização de palavras-passe.
  */
 export async function applyNewPassword(

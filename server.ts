@@ -8,7 +8,12 @@ dotenv.config();
 
 // Ensure local data & backup directories exist
 const DATA_DIR = path.join(process.cwd(), "data");
-const BACKUP_DIR = path.join(DATA_DIR, "backups");
+// M-03: os backups iam sempre para `data/backups`, que em muitos ambientes é
+// disco efémero (perdido a cada deploy). Pode apontar-se para um volume
+// durável com BACKUP_DIR.
+const BACKUP_DIR = process.env.BACKUP_DIR
+  ? path.resolve(process.env.BACKUP_DIR)
+  : path.join(DATA_DIR, "backups");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
@@ -71,6 +76,15 @@ function rateLimiter(limit: number, windowMs: number) {
 
     rateLimitMap.set(ip, entry);
 
+    // M-04: o mapa crescia indefinidamente. Limpeza periódica das entradas
+    // fora da janela (a limitação continua a ser por instância: com vários
+    // processos, o limite efectivo é N × limit).
+    if (rateLimitMap.size > 5000) {
+      for (const [key, value] of rateLimitMap.entries()) {
+        if (now - value.firstReq > windowMs) rateLimitMap.delete(key);
+      }
+    }
+
     if (entry.count > limit) {
       return res.status(429).json({
         error: "Muitos pedidos enviados. Por favor tente novamente mais tarde.",
@@ -86,17 +100,46 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   // Security Headers Middleware (Parte 6 - 6.3.5)
+  const isProduction = process.env.NODE_ENV === "production";
+  // M-06: a CSP era igual em produção e em desenvolvimento, com
+  // 'unsafe-eval' e `https: http:` para qualquer origem. Em produção tira-se
+  // o 'unsafe-eval' e restringe-se as origens; em desenvolvimento mantém-se
+  // permissiva para o Vite (HMR, eval do React Refresh).
+  const frameAncestors = process.env.ALLOWED_FRAME_ANCESTORS || "'self' https: http:";
+
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-XSS-Protection", "1; mode=block");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("Permissions-Policy", "camera=(self), microphone=(), geolocation=()");
-    // Content-Security-Policy accommodating Firebase, Google Fonts, Arena preview iframe, and Vite hot reload
-    res.setHeader(
-      "Content-Security-Policy",
-      "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; connect-src 'self' ws: wss: https: http:; img-src 'self' data: blob: https: http:; font-src 'self' data: https: http:; frame-ancestors 'self' https: http:;"
-    );
+
+    const scriptSrc = isProduction
+      ? "script-src 'self' 'unsafe-inline' https://www.gstatic.com https://apis.google.com"
+      : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
+    const connectSrc = isProduction
+      ? "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com"
+      : "connect-src 'self' ws: wss: https: http:";
+    const policy = [
+      isProduction ? "default-src 'self'" : "default-src 'self' data: blob: https: http:",
+      scriptSrc,
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' data: https://fonts.gstatic.com",
+      "img-src 'self' data: blob: https:",
+      connectSrc,
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      `frame-ancestors ${frameAncestors}`
+    ].join("; ");
+    res.setHeader("Content-Security-Policy", policy);
     next();
+  });
+
+  // M-05: nenhuma resposta de erro devolve stack traces ao cliente.
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error(`[Erro] ${req.method} ${req.originalUrl}:`, err);
+    if (res.headersSent) return next(err);
+    return res.status(500).json({ error: "Erro interno do servidor." });
   });
 
   // ---------------------------------------------------------------------------
@@ -307,7 +350,7 @@ async function startServer() {
   app.get("/api/client-info", (req: Request, res: Response) => {
     const forwarded = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim();
     const ip = (req.ip || forwarded || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-    res.json({ ip: ip || "desconhecido" });
+    res.json({ ip: ip || "desconhecido", serverTime: new Date().toISOString() });
   });
 
   // --- Canal de eventos em tempo real (SSE) ---

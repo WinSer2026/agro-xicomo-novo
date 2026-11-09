@@ -1,3 +1,4 @@
+import { companyNuit, companyName } from '../utils/companyInfo';
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { getUnitCost, getBaseUnitQuantity } from '../utils/priceHelper';
@@ -179,8 +180,8 @@ export default function FinanceModule() {
     // Sheet 1: POS Overview
     const summaryData = [
       { Métrica: 'Período do Relatório', Valor: compiledPeriod },
-      { Métrica: 'Faturação Bruta', Valor: `${reportGrossSales.toLocaleString()} MT` },
-      { Métrica: 'Lucro Estimado', Valor: `${reportProfit.toLocaleString()} MT` },
+      { Métrica: 'Faturação Bruta', Valor: `${reportGrossSales.toLocaleString('pt-MZ')} MT` },
+      { Métrica: 'Lucro Estimado', Valor: `${reportProfit.toLocaleString('pt-MZ')} MT` },
       { Métrica: 'Total de Transações', Valor: reportTransCount },
       { Métrica: 'Margem Operacional', Valor: `${reportMargin.toFixed(1)}%` },
       { Métrica: 'Data de Emissão', Valor: new Date().toLocaleString('pt-MZ') }
@@ -233,29 +234,55 @@ export default function FinanceModule() {
   };
 
   const handleExportReportCSV = () => {
-    let csv = `RELATORIO_POS_PERIODO_${compiledPeriod.toUpperCase()}\n`;
-    csv += `Faturacao Bruta,Lucro Estimado,Transacoes Feitas,Margem Operacional\n`;
-    csv += `${reportGrossSales},${reportProfit},${reportTransCount},${reportMargin.toFixed(1)}%\n\n`;
+    // N-07: o CSV saía com vírgula decimal e vírgula separadora — o Excel em
+    // português abria tudo numa única coluna. Passa a usar ';' e vírgula
+    // decimal, com BOM para os acentos, e exclui vendas a crédito do
+    // detalhamento por meio de pagamento (N-04: não houve recebimento).
+    const SEP = ';';
+    const num = (valor: number) => (Number(valor) || 0).toFixed(2).replace('.', ',');
+    const txt = (valor: unknown) => `"${String(valor ?? '').replace(/"/g, '""')}"`;
 
-    const salesForPeriod = reportSales;
-    const totalMpesa = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('m-pesa') || s.paymentMethod.toLowerCase().includes('mpesa')).reduce((acc, s) => acc + s.total, 0);
-    const totalEmola = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('e-mola') || s.paymentMethod.toLowerCase().includes('emola')).reduce((acc, s) => acc + s.total, 0);
-    const totalBank = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('transfer') || s.paymentMethod.toLowerCase().includes('banco') || s.paymentMethod.toLowerCase().includes('iban')).reduce((acc, s) => acc + s.total, 0);
-    const totalCash = salesForPeriod.filter(s => s.paymentMethod.toLowerCase().includes('num') || s.paymentMethod.toLowerCase().includes('dinheiro') || s.paymentMethod.toLowerCase().includes('caixa') || s.paymentMethod.toLowerCase() === 'dinheiro' || s.paymentMethod.toLowerCase() === 'numerário').reduce((acc, s) => acc + s.total, 0);
+    let csv = '\uFEFF';
+    csv += `RELATORIO_POS_PERIODO_${compiledPeriod.toUpperCase()}\n`;
+    csv += ['Faturacao Bruta', 'Lucro Estimado', 'Transacoes Feitas', 'Margem Operacional'].join(SEP) + '\n';
+    csv += [num(reportGrossSales), num(reportProfit), String(reportTransCount), `${num(reportMargin)}%`].join(SEP) + '\n\n';
 
-    csv += `DETALHAMENTO DE MEIOS DE PAGAMENTO\n`;
-    csv += `M-Pesa,E-Mola,Transferencia Bancaria,Numerario (Dinheiro Vivo)\n`;
-    csv += `${totalMpesa},${totalEmola},${totalBank},${totalCash}\n\n`;
-    
-    csv += `DESEMPENHO INDIVIDUAL DE PRODUTOS\n`;
-    csv += `PRODUTO/SERVICO,STOCK ANTERIOR,PRECO COMPRA,PRECO VENDA,VENDIDO,FATURADO,LUCRO EST.\n`;
-    products.forEach(p => {
-      const soldQty = reportSales.reduce((sum, sale) => {
-        const item = sale.items.find(it => it.productId === p.id);
-        return sum + (item ? item.quantity : 0);
+    // Só vendas efectivamente recebidas entram no detalhamento por meio.
+    const recebidas = reportSales.filter(venda => !isDebtSale(venda));
+    const somaPor = (predicado: (metodo: string) => boolean) =>
+      recebidas
+        .filter(venda => predicado(String(venda.paymentMethod || '').toLowerCase()))
+        .reduce((acc, venda) => acc + (Number(venda.total) || 0), 0);
+
+    const totalMpesa = somaPor(m => m.includes('m-pesa') || m.includes('mpesa'));
+    const totalEmola = somaPor(m => m.includes('e-mola') || m.includes('emola'));
+    const totalBank = somaPor(m => m.includes('transfer') || m.includes('banco') || m.includes('iban'));
+    const totalCash = somaPor(m => m.includes('num') || m.includes('dinheiro') || m.includes('caixa'));
+
+    csv += 'DETALHAMENTO DE MEIOS DE PAGAMENTO\n';
+    csv += ['M-Pesa', 'E-Mola', 'Transferencia Bancaria', 'Numerario (Dinheiro Vivo)'].join(SEP) + '\n';
+    csv += [num(totalMpesa), num(totalEmola), num(totalBank), num(totalCash)].join(SEP) + '\n';
+
+    const totalCredito = reportSales.filter(venda => isDebtSale(venda)).reduce((acc, venda) => acc + (Number(venda.total) || 0), 0);
+    csv += ['Vendas a credito (por receber)', num(totalCredito)].join(SEP) + '\n\n';
+
+    csv += 'DESEMPENHO INDIVIDUAL DE PRODUTOS\n';
+    csv += ['PRODUTO/SERVICO', 'STOCK ANTERIOR', 'PRECO COMPRA', 'PRECO VENDA', 'VENDIDO', 'FATURADO', 'LUCRO EST.'].join(SEP) + '\n';
+    products.forEach(produto => {
+      const vendido = reportSales.reduce((soma, venda) => {
+        const item = (venda.items || []).find(it => String(it.productId) === String(produto.id));
+        return soma + (item ? Number(item.quantity) || 0 : 0);
       }, 0);
-      const stockAnterior = p.stockQty + soldQty;
-      csv += `"${p.name}",${stockAnterior},${p.buyingPrice},${p.sellingPrice},${soldQty},${soldQty * p.sellingPrice},${soldQty * (p.sellingPrice - p.buyingPrice)}\n`;
+      const stockAnterior = (Number(produto.stockQty) || 0) + vendido;
+      csv += [
+        txt(produto.name),
+        String(stockAnterior),
+        num(produto.buyingPrice),
+        num(produto.sellingPrice),
+        String(vendido),
+        num(vendido * (Number(produto.sellingPrice) || 0)),
+        num(vendido * ((Number(produto.sellingPrice) || 0) - (Number(produto.buyingPrice) || 0)))
+      ].join(SEP) + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -282,7 +309,7 @@ export default function FinanceModule() {
     });
 
     const cName = settings?.companyName || 'AGRO - XICOMO & SERVI\u00c7OS, LDA';
-    const nuit = settings?.companyNuit || '401976590';
+    const nuit = companyNuit(settings?.companyNuit);
 
     // Header
     doc.setFont('helvetica', 'bold');
@@ -584,9 +611,9 @@ export default function FinanceModule() {
       rows: sales.map(s => ({
         ...s,
         date: new Date(s.date).toLocaleDateString(),
-        subtotal: s.subtotal.toLocaleString(),
-        discount: s.discount.toLocaleString(),
-        total: s.total.toLocaleString()
+        subtotal: s.subtotal.toLocaleString('pt-MZ'),
+        discount: s.discount.toLocaleString('pt-MZ'),
+        total: s.total.toLocaleString('pt-MZ')
       }))
     };
     exportToExcel(data);
@@ -608,7 +635,7 @@ export default function FinanceModule() {
       rows: sales.map(s => ({
         ...s,
         date: new Date(s.date).toLocaleDateString(),
-        total: s.total.toLocaleString()
+        total: s.total.toLocaleString('pt-MZ')
       }))
     };
     await exportToPDF(data, settings);
@@ -635,7 +662,7 @@ export default function FinanceModule() {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text('AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590', 15, 25);
+    doc.text(`${companyName(settings?.companyName)} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(185, 28, 28);
@@ -763,7 +790,7 @@ export default function FinanceModule() {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text('AGRO - XICOMO & SERVIÇOS, LDA • NUIT: 401976590', 15, 25);
+    doc.text(`${companyName(settings?.companyName)} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(220, 38, 38);
@@ -875,53 +902,94 @@ export default function FinanceModule() {
     showToast('Alertas de Stock Críticos PDF Descarregado!');
   };
 
-  // 2. Generate Chart Data depending on Selected Time Range
+  // 2. Dados do gráfico — calculados a partir das vendas e perdas reais.
+  //
+  // N-02/N-03: antes, cada barra era uma fracção fixa do total (0,1 · 0,25 ·
+  // 0,3…) e o horizonte de 3/5/10 anos incluía "projecções". O gráfico mostrava
+  // uma distribuição que não correspondia a nada. Agora agrega os registos.
   const generateChartData = () => {
+    const vendas = filteredSales;
+    const perdas = filteredLosses;
+
+    const agregar = (
+      lista: Array<{ quando: Date; valor: number }>,
+      chave: (data: Date) => string,
+      ordem: string[]
+    ) => {
+      const mapa = new Map<string, number>();
+      lista.forEach(({ quando, valor }) => {
+        if (Number.isNaN(quando.getTime())) return;
+        const k = chave(quando);
+        mapa.set(k, (mapa.get(k) || 0) + valor);
+      });
+      return ordem.map(nome => ({ nome, valor: mapa.get(nome) || 0 }));
+    };
+
+    const vendasComoLista = vendas.map(venda => ({
+      quando: new Date(venda.date),
+      valor: Number(venda.total) || 0
+    }));
+    const perdasComoLista = perdas.map(perda => ({
+      quando: new Date(perda.date),
+      valor: Number(perda.costValue) || 0
+    }));
+
+    const construir = (ordemVendas: Array<{ nome: string; valor: number }>, ordemPerdas: Array<{ nome: string; valor: number }>) =>
+      ordemVendas.map(item => ({
+        name: item.nome,
+        Vendas: item.valor,
+        Perdas: ordemPerdas.find(p => p.nome === item.nome)?.valor || 0
+      }));
+
+    const diasSemana = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+    const diaSemana = (data: Date) => diasSemana[(data.getDay() + 6) % 7];
+
     switch (selectedRange) {
-      case 'Day':
-        return [
-          { name: '08h00', Vendas: totalGrossSales * 0.1, Perdas: totalLossesVal * 0.05 },
-          { name: '10h00', Vendas: totalGrossSales * 0.25, Perdas: 0 },
-          { name: '12h00', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
-          { name: '14h00', Vendas: totalGrossSales * 0.15, Perdas: 0 },
-          { name: '16h00', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.1 }
-        ];
+      case 'Day': {
+        const horas = ['00h', '02h', '04h', '06h', '08h', '10h', '12h', '14h', '16h', '18h', '20h', '22h'];
+        const horaBucket = (data: Date) => `${String(Math.floor(data.getHours() / 2) * 2).padStart(2, '0')}h`;
+        return construir(
+          agregar(vendasComoLista, horaBucket, horas),
+          agregar(perdasComoLista, horaBucket, horas)
+        );
+      }
       case 'Week':
-        return [
-          { name: 'Seg', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.1 },
-          { name: 'Ter', Vendas: totalGrossSales * 0.18, Perdas: 0 },
-          { name: 'Qua', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.3 },
-          { name: 'Qui', Vendas: totalGrossSales * 0.12, Perdas: 0 },
-          { name: 'Sex', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.2 },
-          { name: 'Sáb', Vendas: totalGrossSales * 0.13, Perdas: totalLossesVal * 0.4 }
-        ];
-      case 'Month':
-        return [
-          { name: 'Semana 1', Vendas: totalGrossSales * 0.22, Perdas: totalLossesVal * 0.15 },
-          { name: 'Semana 2', Vendas: totalGrossSales * 0.28, Perdas: totalLossesVal * 0.2 },
-          { name: 'Semana 3', Vendas: totalGrossSales * 0.32, Perdas: totalLossesVal * 0.35 },
-          { name: 'Semana 4', Vendas: totalGrossSales * 0.18, Perdas: totalLossesVal * 0.3 }
-        ];
-      case 'Year':
-        return [
-          { name: 'Trimestre 1', Vendas: totalGrossSales * 0.2, Perdas: totalLossesVal * 0.25 },
-          { name: 'Trimestre 2', Vendas: totalGrossSales * 0.3, Perdas: totalLossesVal * 0.2 },
-          { name: 'Trimestre 3', Vendas: totalGrossSales * 0.35, Perdas: totalLossesVal * 0.35 },
-          { name: 'Trimestre 4', Vendas: totalGrossSales * 0.15, Perdas: totalLossesVal * 0.2 }
-        ];
-      case '3Y':
-        return [
-          { name: 'Ano Ant.', Vendas: totalGrossSales * 0.85, Perdas: totalLossesVal * 0.9 },
-          { name: 'Ano Corrente', Vendas: totalGrossSales, Perdas: totalLossesVal },
-          { name: 'Ano Seg. (Proj.)', Vendas: totalGrossSales * 1.25, Perdas: totalLossesVal * 0.75 }
-        ];
-      default:
-        // 5Y and 10Y long horizons
-        return [
-          { name: 'Histórico', Vendas: totalGrossSales * 0.5, Perdas: totalLossesVal * 1.5 },
-          { name: 'Atual', Vendas: totalGrossSales, Perdas: totalLossesVal },
-          { name: 'Projetado', Vendas: totalGrossSales * 1.8, Perdas: totalLossesVal * 0.5 }
-        ];
+        return construir(
+          agregar(vendasComoLista, diaSemana, diasSemana),
+          agregar(perdasComoLista, diaSemana, diasSemana)
+        );
+      case 'Month': {
+        const semanas = ['Semana 1', 'Semana 2', 'Semana 3', 'Semana 4', 'Semana 5'];
+        const semana = (data: Date) => semanas[Math.min(4, Math.floor((data.getDate() - 1) / 7))];
+        return construir(
+          agregar(vendasComoLista, semana, semanas),
+          agregar(perdasComoLista, semana, semanas)
+        );
+      }
+      case 'Year': {
+        const trimestres = ['1.º Trim.', '2.º Trim.', '3.º Trim.', '4.º Trim.'];
+        const trimestre = (data: Date) => trimestres[Math.floor(data.getMonth() / 3)];
+        return construir(
+          agregar(vendasComoLista, trimestre, trimestres),
+          agregar(perdasComoLista, trimestre, trimestres)
+        );
+      }
+      default: {
+        // 3Y / 5Y / 10Y: agregado por ano civil com dados reais.
+        const anos = Array.from(new Set([
+          ...vendas.map(v => new Date(v.date).getFullYear()),
+          ...perdas.map(l => new Date(l.date).getFullYear())
+        ].filter(ano => Number.isFinite(ano)))).sort((a, b) => a - b);
+
+        if (anos.length === 0) return [];
+
+        const rotulos = anos.map(String);
+        const porAno = (data: Date) => String(data.getFullYear());
+        return construir(
+          agregar(vendasComoLista, porAno, rotulos),
+          agregar(perdasComoLista, porAno, rotulos)
+        );
+      }
     }
   };
 
@@ -964,7 +1032,7 @@ export default function FinanceModule() {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Emitido em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(0, 106, 78);
@@ -1843,12 +1911,12 @@ export default function FinanceModule() {
                         return (
                           <tr key={p.id} className="hover:bg-slate-50">
                             <td className="p-2 font-bold text-slate-800 max-w-[120px] truncate" title={p.name}>{p.name}</td>
-                            <td className="p-2 text-right font-mono text-gray-500">{p.buyingPrice.toLocaleString()} MT</td>
-                            <td className="p-2 text-right font-mono text-gray-800 font-bold">{p.sellingPrice.toLocaleString()} MT</td>
+                            <td className="p-2 text-right font-mono text-gray-500">{p.buyingPrice.toLocaleString('pt-MZ')} MT</td>
+                            <td className="p-2 text-right font-mono text-gray-800 font-bold">{p.sellingPrice.toLocaleString('pt-MZ')} MT</td>
                             <td className="p-2 text-center font-mono">{totalComprado}</td>
                             <td className="p-2 text-center font-mono font-extrabold text-[#006A4E]">{soldQty}</td>
-                            <td className="p-2 text-right font-mono text-slate-900 font-bold">{faturado.toLocaleString()} MT</td>
-                            <td className="p-2 text-right font-mono text-blue-700 font-bold">{lucro.toLocaleString()} MT</td>
+                            <td className="p-2 text-right font-mono text-slate-900 font-bold">{faturado.toLocaleString('pt-MZ')} MT</td>
+                            <td className="p-2 text-right font-mono text-blue-700 font-bold">{lucro.toLocaleString('pt-MZ')} MT</td>
                           </tr>
                         );
                       })
@@ -1951,7 +2019,7 @@ export default function FinanceModule() {
                           <td className="p-2 text-gray-500">{new Date(s.date).toLocaleDateString('pt-MZ')}</td>
                           <td className="p-2 text-slate-700">{s.customerName || 'Consumidor Final'}</td>
                           <td className="p-2 uppercase text-[9px] font-bold">{s.paymentMethod}</td>
-                          <td className="p-2 text-right font-mono font-bold text-slate-900">{s.total.toLocaleString()} MT</td>
+                          <td className="p-2 text-right font-mono font-bold text-slate-900">{s.total.toLocaleString('pt-MZ')} MT</td>
                         </tr>
                       ))
                     )}
@@ -1971,7 +2039,7 @@ export default function FinanceModule() {
             <div className="bg-white p-5 border border-slate-200 rounded-2xl shadow-sm space-y-1">
               <span className="text-[10px] uppercase font-black text-slate-500 tracking-wider">Custo Original Consumido</span>
               <p className="text-xl font-black text-slate-900 font-mono mt-1">
-                {trfOriginalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                {trfOriginalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
               </p>
               <p className="text-[10px] text-slate-400">Saída de stock original</p>
             </div>
@@ -1979,7 +2047,7 @@ export default function FinanceModule() {
             <div className="bg-white p-5 border border-emerald-200 rounded-2xl shadow-sm space-y-1">
               <span className="text-[10px] uppercase font-black text-emerald-700 tracking-wider">Valor em Pacotes Criados</span>
               <p className="text-xl font-black text-emerald-800 font-mono mt-1">
-                {trfResultingCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                {trfResultingCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
               </p>
               <p className="text-[10px] text-emerald-600">Entrada de stock fracionado</p>
             </div>
@@ -1987,7 +2055,7 @@ export default function FinanceModule() {
             <div className="bg-white p-5 border border-amber-200 rounded-2xl shadow-sm space-y-1">
               <span className="text-[10px] uppercase font-black text-amber-800 tracking-wider">Perdas em Transformação</span>
               <p className="text-xl font-black text-amber-900 font-mono mt-1">
-                {trfLossesVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                {trfLossesVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
               </p>
               <p className="text-[10px] text-amber-700">Custos operacionais de quebra</p>
             </div>
@@ -2051,16 +2119,16 @@ export default function FinanceModule() {
                           <td className="p-3 font-bold text-slate-900">{t.originalProductName}</td>
                           <td className="p-3 text-right font-mono font-bold">{t.originalQuantity} {t.originalUnit}</td>
                           <td className="p-3 text-right font-mono font-black text-slate-900">
-                            {t.originalTotalCost.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                            {t.originalTotalCost.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                           </td>
                           <td className="p-3 text-center font-bold text-emerald-800">
                             {t.items.reduce((s, it) => s + it.quantity, 0)} unidades
                           </td>
                           <td className="p-3 text-right font-mono font-black text-emerald-900">
-                            {createdVal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT
+                            {createdVal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
                           </td>
                           <td className="p-3 text-right font-mono font-bold text-amber-900">
-                            {t.lossValue > 0 ? `${t.lossValue.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT` : '-'}
+                            {t.lossValue > 0 ? `${t.lossValue.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT` : '-'}
                           </td>
                           <td className="p-3 text-center">
                             <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${
@@ -2087,13 +2155,13 @@ export default function FinanceModule() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
               <span className="text-[10px] uppercase font-black text-gray-400">Faturação Total</span>
-              <p className="text-xl font-black text-emerald-600 font-mono">{(totalGrossSales || 0).toLocaleString()} MT</p>
+              <p className="text-xl font-black text-emerald-600 font-mono">{(totalGrossSales || 0).toLocaleString('pt-MZ')} MT</p>
               <div className="text-[9px] text-gray-400">Total acumulado em caixa</div>
             </div>
 
             <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
               <span className="text-[10px] uppercase font-black text-gray-400">Lucro Estimado</span>
-              <p className="text-xl font-black text-blue-600 font-mono">{(totalProfit || 0).toLocaleString()} MT</p>
+              <p className="text-xl font-black text-blue-600 font-mono">{(totalProfit || 0).toLocaleString('pt-MZ')} MT</p>
               <div className="text-[9px] text-gray-400">Faturação menos custos</div>
             </div>
 
@@ -2105,7 +2173,7 @@ export default function FinanceModule() {
 
             <div className="bg-white p-5 border border-gray-200 rounded-xl shadow-sm space-y-1.5">
               <span className="text-[10px] uppercase font-black text-gray-400">Total Prejuízo</span>
-              <p className="text-xl font-black text-red-600 font-mono">-{totalLossesVal.toLocaleString()} MT</p>
+              <p className="text-xl font-black text-red-600 font-mono">-{totalLossesVal.toLocaleString('pt-MZ')} MT</p>
               <div className="text-[9px] text-gray-400">Quebras e vencidos</div>
             </div>
 
@@ -2126,7 +2194,7 @@ export default function FinanceModule() {
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
                     <XAxis dataKey="name" stroke="#9CA3AF" fontSize={11} tickLine={false} />
                     <YAxis stroke="#9CA3AF" fontSize={11} tickLine={false} />
-                    <Tooltip formatter={(value) => `${Number(value).toLocaleString()} MT`} />
+                    <Tooltip formatter={(value) => `${Number(value).toLocaleString('pt-MZ')} MT`} />
                     <Line type="monotone" dataKey="Vendas" stroke="#006A4E" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
                   </LineChart>
                 </ResponsiveContainer>
@@ -2141,7 +2209,7 @@ export default function FinanceModule() {
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
                     <XAxis dataKey="name" stroke="#9CA3AF" fontSize={11} tickLine={false} />
                     <YAxis stroke="#9CA3AF" fontSize={11} tickLine={false} />
-                    <Tooltip formatter={(value) => `${Number(value).toLocaleString()} MT`} />
+                    <Tooltip formatter={(value) => `${Number(value).toLocaleString('pt-MZ')} MT`} />
                     <Legend />
                     <Bar dataKey="Vendas" fill="#006A4E" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="Perdas" fill="#DC2626" radius={[4, 4, 0, 0]} />
@@ -2174,7 +2242,7 @@ export default function FinanceModule() {
                 const percent = Math.min(100, (m.amount / (totalGrossSales || 1)) * 300);
                 return (
                   <div key={m.month} className="flex-1 flex flex-col items-center gap-2">
-                    <div className="text-[10px] font-mono font-bold text-gray-400">{Math.round(m.amount).toLocaleString()} MT</div>
+                    <div className="text-[10px] font-mono font-bold text-gray-400">{Math.round(m.amount).toLocaleString('pt-MZ')} MT</div>
                     <div
                       className="w-full bg-[#006A4E] rounded-t-lg transition-all duration-700"
                       style={{ height: `${m.amount > 0 ? Math.max(10, percent) : 0}px` }}
@@ -2234,13 +2302,13 @@ export default function FinanceModule() {
                   ) : (
                     [...sales].reverse().map(s => (
                       <tr key={s.id} className="hover:bg-gray-50">
-                        <td className="p-3 font-mono text-[11px]">{new Date(s.date).toLocaleString()}</td>
+                        <td className="p-3 font-mono text-[11px]">{new Date(s.date).toLocaleString('pt-MZ')}</td>
                         <td className="p-3 font-bold font-mono text-[#006A4E]">{s.invoiceNumber}</td>
                         <td className="p-3 font-semibold text-gray-800">{s.customerName}</td>
                         <td className="p-3 uppercase font-black text-gray-600">{s.paymentMethod}</td>
-                        <td className="p-3 text-right font-mono">{s.subtotal.toLocaleString()} MT</td>
-                        <td className="p-3 text-right font-mono text-red-500">-{s.discount.toLocaleString()} MT</td>
-                        <td className="p-3 text-right font-bold font-mono text-[#006A4E]">{s.total.toLocaleString()} MT</td>
+                        <td className="p-3 text-right font-mono">{s.subtotal.toLocaleString('pt-MZ')} MT</td>
+                        <td className="p-3 text-right font-mono text-red-500">-{s.discount.toLocaleString('pt-MZ')} MT</td>
+                        <td className="p-3 text-right font-bold font-mono text-[#006A4E]">{s.total.toLocaleString('pt-MZ')} MT</td>
                         <td className="p-3 text-center">
                           {s.synced ? (
                             <span className="bg-green-100 text-green-800 font-bold px-2 py-0.5 rounded text-[10px] uppercase">Online</span>
@@ -2293,7 +2361,7 @@ export default function FinanceModule() {
                   <div>
                     <p className="font-black text-gray-800">{p.name}</p>
                     <p className="text-[10px] text-gray-400">SKU / Cód: {p.code}</p>
-                    <p className="text-[9px] font-mono text-gray-500">Custo de Reposição: {p.buyingPrice.toLocaleString()} MT</p>
+                    <p className="text-[9px] font-mono text-gray-500">Custo de Reposição: {p.buyingPrice.toLocaleString('pt-MZ')} MT</p>
                   </div>
                   <div className="text-right">
                     <span className="font-black bg-red-200 text-red-900 px-2 py-1 rounded text-[10px] block">

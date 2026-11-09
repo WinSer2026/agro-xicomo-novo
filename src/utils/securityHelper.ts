@@ -90,7 +90,7 @@ export function sanitizeNumber(input: any, defaultValue: number = 0): number {
 
 /**
  * Password Strength Policy
- * Política oficial: 4 a 6 caracteres, podendo ser apenas números, apenas letras ou mistos.
+ * Política oficial: mínimo 8 caracteres, com letras e números.
  * Não é obrigatório usar símbolos e é permitido repetir uma palavra-passe antiga.
  */
 export function isPasswordStrong(password: string): { strong: boolean; message?: string } {
@@ -103,8 +103,16 @@ export function validateAccessPassword(password: string): { strong: boolean; mes
   if (!value) {
     return { strong: false, message: 'A palavra-passe é obrigatória.' };
   }
-  if (value.length < 4 || value.length > 6) {
-    return { strong: false, message: 'A palavra-passe deve ter entre 4 e 6 caracteres.' };
+  // L-08: 4 caracteres com 10 tentativas por segundo caem em minutos. Passa a
+  // exigir 8 caracteres, com pelo menos uma letra e um número.
+  if (value.length < 8) {
+    return { strong: false, message: 'A palavra-passe deve ter pelo menos 8 caracteres.' };
+  }
+  if (value.length > 64) {
+    return { strong: false, message: 'A palavra-passe não pode exceder 64 caracteres.' };
+  }
+  if (!/[A-Za-zÀ-ÿ]/.test(value) || !/[0-9]/.test(value)) {
+    return { strong: false, message: 'A palavra-passe deve incluir letras e números.' };
   }
   if (/\s/.test(value)) {
     return { strong: false, message: 'A palavra-passe não pode conter espaços.' };

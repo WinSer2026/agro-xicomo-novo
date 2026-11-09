@@ -1,7 +1,8 @@
+import { companyNuit, MISSING_NUIT_LABEL } from '../utils/companyInfo';
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor, type SalesSummary } from '../utils/firebaseDB';
-import { isFinancialSale, saleStatusLabel } from '../utils/saleStatus';
+import { isFinancialSale, saleStatusLabel, settlementDisclaimer } from '../utils/saleStatus';
 import { verifyAuthorizationPassword } from '../utils/authorization';
 import { Sale, SystemSettings } from '../types';
 import { downloadInvoiceA4, downloadDuplicatedInvoiceA4, downloadThermalReceipt, downloadReceiptA4 } from '../utils/pdfGenerator';
@@ -204,7 +205,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
     if (isProcessing) return;
     askConfirmation(
       'Liquidar Fatura',
-      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString()} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
+      `Deseja realmente registar o pagamento da fatura ${sale.invoiceNumber} no valor de ${sale.total.toLocaleString('pt-MZ')} MT? Esta ação irá alterar o estado do documento para "Paga" e emitir o recibo.`,
       async () => {
         if (isProcessing) return;
         setIsProcessing(true);
@@ -289,6 +290,19 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
     try {
       if (securityModal.action === 'cancel') {
+        // E-06: a anulação de uma fatura exige documento de rectificação. A
+        // nota de crédito passa a ser numerada pelo contador e guardada na
+        // venda, em vez de a anulação ser só uma mudança de estado sem papel.
+        const creditNoteNumber = await dbService.nextDocumentNumber(
+          'NotaCredito',
+          new Date(sale.date || Date.now()).getFullYear(),
+          0
+        );
+        const cancellationMeta = {
+          creditNoteNumber,
+          cancelledAt: new Date().toISOString()
+        };
+
         if (sale.status !== 'Cancelada' && (!sale.documentType || sale.documentType === 'FaturaDefinitiva')) {
           const products = await dbService.getProducts();
           const restockItems: any[] = [];
@@ -297,7 +311,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             const prod = products.find(p => String(p.id) === String(item.productId));
             if (!prod || prod.isService) continue;
 
-            const hasConversion = Boolean(prod.parentUnit && prod.conversionRate && Number(prod.conversionRate) > 1);
+            // D-04: usa-se a conversão registada na linha da venda; só se ela
+            // não existir (vendas antigas) se recorre ao catálogo actual.
+            const conversaoDaVenda = Number(item.conversionRate) > 1 ? Number(item.conversionRate) : undefined;
+            const conversaoProduto = Number(prod.conversionRate) > 1 ? Number(prod.conversionRate) : undefined;
+            const conversaoEfetiva = conversaoDaVenda ?? conversaoProduto;
+            const hasConversion = conversaoEfetiva !== undefined;
             const qtyToAdd = Number(item.quantity) || 0;
             if (qtyToAdd <= 0) continue;
             if (hasConversion && item.sellingUnit === 'Bulk') {
@@ -306,7 +325,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                 hasConversion: true,
                 sellingUnit: 'Bulk',
                 qtyToAdd,
-                equivalentBaseQty: qtyToAdd * (Number(prod.conversionRate) || 1)
+                equivalentBaseQty: qtyToAdd * conversaoEfetiva
               });
             } else if (hasConversion) {
               restockItems.push({ productId: String(prod.id), hasConversion: true, sellingUnit: 'Retail', qtyToAdd });
@@ -315,12 +334,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
             }
           }
           await dbService.cancelSaleWithStockRestoration(
-            { ...sale, previousStatus: sale.status as Sale['previousStatus'] },
+            { ...sale, ...cancellationMeta, previousStatus: sale.status as Sale['previousStatus'] },
             restockItems
           );
         } else {
           await dbService.addSale({
             ...sale,
+            ...cancellationMeta,
             id: String(sale.id || Date.now()),
             status: 'Cancelada',
             previousStatus: sale.status as Sale['previousStatus']
@@ -336,7 +356,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           ipAddress: '127.0.0.1',
           action: 'Anulação de Venda (Autorizada)',
           status: 'Sucesso',
-          details: `Venda ${sale.invoiceNumber} anulada com palavra-passe de autorização.`
+          details: `Venda ${sale.invoiceNumber} anulada com palavra-passe de autorização. Nota de crédito emitida: ${creditNoteNumber}.`
         });
         void runPostCommitTask({
           label: 'atualizar as faturas depois da anulação',
@@ -418,7 +438,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
   };
 
   const downloadInvoicePDF = (sale: Sale, format: 'A4' | 'Thermal' | 'DoubleA5' | 'ReciboA4') => {
-    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as SystemSettings;
+    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as SystemSettings;
     if (format === 'Thermal') {
       downloadThermalReceipt(sale, s);
     } else if (format === 'DoubleA5') {
@@ -551,7 +571,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         .reduce((sum, sale) => sum + sale.total, 0);
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-      const nuit = settings?.companyNuit || '401976590';
+      const nuit = companyNuit(settings?.companyNuit);
 
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
@@ -562,7 +582,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
       doc.setFontSize(9);
       doc.setTextColor(100, 116, 139);
       doc.text(`${cName} • NUIT: ${nuit}`, 15, 25);
-      doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${exportTotal.toLocaleString('pt-PT', { minimumFractionDigits: 2 })} MT`, 15, 29);
+      doc.text(`Período: ${formatDatePT(startDate)} até ${formatDatePT(endDate)} • Total Facturado: ${exportTotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT`, 15, 29);
 
       doc.setDrawColor(0, 106, 78);
       doc.line(15, 33, 195, 33);
@@ -585,7 +605,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
         doc.text(formatDatePT(sale.date), 45, y);
         doc.text((sale.customerName || 'Consumidor Final').substring(0, 25), 75, y);
         doc.text((sale.paymentMethod || '').substring(0, 12), 130, y);
-        doc.text(sale.total.toLocaleString('pt-PT', { minimumFractionDigits: 2 }), 160, y);
+        doc.text(sale.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2 }), 160, y);
         doc.text(sale.status || '', 185, y);
         y += 6;
       });
@@ -649,7 +669,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <div className="min-w-0">
             <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Facturado</p>
             <p className="text-lg font-black text-slate-800 truncate font-mono mt-0.5">
-              {totalInvoiced.toLocaleString()} MT
+              {totalInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
@@ -661,7 +681,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <div className="min-w-0">
             <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Total Pago (Liquidado)</p>
             <p className="text-lg font-black text-emerald-700 truncate font-mono mt-0.5">
-              {paidInvoiced.toLocaleString()} MT
+              {paidInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
@@ -673,7 +693,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <div className="min-w-0">
             <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Em dívida (Pendente + Crédito)</p>
             <p className="text-lg font-black text-amber-700 truncate font-mono mt-0.5">
-              {debtInvoiced.toLocaleString()} MT
+              {debtInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
@@ -685,7 +705,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
           <div className="min-w-0">
             <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Cancelado</p>
             <p className="text-lg font-black text-red-700 truncate font-mono mt-0.5">
-              {canceledInvoiced.toLocaleString()} MT
+              {canceledInvoiced.toLocaleString('pt-MZ')} MT
             </p>
           </div>
         </div>
@@ -799,7 +819,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                       {/* Total Price */}
                       <td className="p-2 text-right font-black text-slate-900 font-mono text-[11px]">
-                        {sale.total.toLocaleString()} MT
+                        {sale.total.toLocaleString('pt-MZ')} MT
                       </td>
 
                       {/* Status Badges */}
@@ -814,9 +834,21 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                 : sale.status === 'Proforma'
                                   ? 'bg-slate-100 text-slate-600 border-slate-200'
                                   : 'bg-rose-50 text-rose-700 border-rose-150'
-                        }`}>
+                        }`}
+                          title={
+                            sale.status === 'Paga' ? 'Venda paga: o dinheiro entrou.'
+                            : sale.status === 'Pendente' ? 'Documento emitido sem pagamento registado (legado).'
+                            : sale.status === 'Crédito' ? 'Venda a crédito: dívida do cliente, ainda por receber.'
+                            : sale.status === 'Proforma' ? 'Proforma/cotação: não conta como receita nem como dívida.'
+                            : 'Venda cancelada: anulada com nota de crédito.'
+                          }>
                           {saleStatusLabel(sale)}
                         </span>
+                        {sale.creditNoteNumber && (
+                          <p className="text-[9px] text-rose-600 font-mono mt-0.5" title="Nota de crédito emitida na anulação">
+                            {sale.creditNoteNumber}
+                          </p>
+                        )}
                       </td>
 
                       {/* Operations */}
@@ -942,7 +974,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: '401976590' } as any;
+                    const s = settings || { companyName: 'AGRO - XICOMO & SERVI\u00c7OS, LDA', companyNuit: MISSING_NUIT_LABEL } as any;
                     if (printType === 'Thermal') {
                       downloadThermalReceipt(invoiceToPrint, s);
                     } else if (printType === 'A4') {
@@ -1002,7 +1034,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                   )}
                                   <h2 className="text-lg font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS,EI'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600 text-[10px]">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                                  <p className="text-gray-600 text-[10px]">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                                   <div className="text-[10px] text-gray-600 space-y-0.5 mt-1 border-t border-gray-100 pt-1">
                                     {settings?.email && <p><strong>Email:</strong> {settings.email}</p>}
                                     <p><strong>Contacto:</strong> {[settings?.vodacom1, settings?.movitel1].filter(Boolean).join(' / ') || '84 94 23 241'}</p>
@@ -1059,7 +1091,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className={idx % 2 === 1 ? "bg-slate-50/50" : "bg-white"}>
+                                  <tr key={item.productId || item.name || idx} className={idx % 2 === 1 ? "bg-slate-50/50" : "bg-white"}>
                                     <td className="p-2.5 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-2.5 text-right font-mono text-blue-700 font-bold">{item.quantity}</td>
                                     <td className="p-2.5 text-gray-600">{item.unit || 'UN'}</td>
@@ -1110,7 +1142,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS,EI'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'} • Email: {settings?.email || 'agroxicomo1@gmail.com'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)} • Email: {settings?.email || 'agroxicomo1@gmail.com'}
                                   </p>
                                   <p className="text-[8px] text-gray-400 uppercase tracking-widest pt-1">
                                     Processado por Computador • Impresso via AgroGestão ERP
@@ -1158,7 +1190,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                   )}
                                   <h2 className="text-xl font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
                                   <p className="text-[10px] text-gray-500 font-semibold mt-1">SISTEMA INTEGRADO DE FATURAÇÃO COMERCIAL</p>
-                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                                  <p className="text-gray-600">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                                 </div>
                                 
                                 <div className="text-right space-y-1.5">
@@ -1211,12 +1243,12 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               </thead>
                               <tbody className="divide-y divide-gray-200">
                                 {chunk.map((item, idx) => (
-                                  <tr key={idx} className="hover:bg-gray-50">
+                                  <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                                     <td className="p-3 font-semibold text-gray-800">{item.name}</td>
                                     <td className="p-3 text-right font-mono">{item.quantity}</td>
                                     <td className="p-3 text-gray-600">{item.unit || 'UN'}</td>
-                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                                    <td className="p-3 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                                    <td className="p-3 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                                    <td className="p-3 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -1228,20 +1260,20 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                               <>
                                 <div className="flex justify-between items-center border-t border-gray-200 pt-6 mb-8">
                                   <div className="text-[11px] text-gray-500 italic max-w-lg leading-relaxed">
-                                    *Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.
+                                    {settlementDisclaimer(invoiceToPrint)}
                                   </div>
                                   <div className="w-64 text-right space-y-1.5 text-xs text-gray-600">
                                     <div className="flex justify-between">
                                       <span>Subtotal:</span>
-                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Desconto:</span>
-                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                                      <span className="font-bold font-mono text-red-500">-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-black text-gray-900 border-t border-gray-200 pt-2">
                                       <span>Total Pago:</span>
-                                      <span className="text-emerald-700 font-mono text-base">{invoiceToPrint.total.toLocaleString()} MT</span>
+                                      <span className="text-emerald-700 font-mono text-base">{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                                     </div>
                                   </div>
                                 </div>
@@ -1251,7 +1283,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                                     {settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}
                                   </p>
                                   <p className="text-[9px] text-gray-500">
-                                    Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}
+                                    Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}
                                   </p>
                                 </div>
                               </>
@@ -1278,7 +1310,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <img src={settings.logoUrl} alt="Logo" className="max-h-10 object-contain bg-white mx-auto mb-1 block" />
                     ) : null}
                     <h3 className="text-[11px] font-black uppercase tracking-wide">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h3>
-                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                    <p className="text-[8px] text-gray-700">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                     <div className="text-[8px] text-gray-600 space-y-0.5">
                       {settings?.email && <p>Email: {settings.email}</p>}
                       <p>Vodacom: {[settings?.vodacom1, settings?.vodacom2, settings?.vodacom3].filter(Boolean).join(' / ') || '+258 84 123 4567'}</p>
@@ -1326,8 +1358,8 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                         <div key={idx} className="space-y-0.5">
                           <div className="font-bold text-gray-900 uppercase text-[8.5px] leading-tight">{item.name}</div>
                           <div className="flex justify-between text-[8px] text-gray-600 font-mono">
-                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
-                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span>{item.quantity} {item.unit} x {item.unitPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                            <span className="font-bold font-mono text-gray-900">{item.totalPrice.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                           </div>
                         </div>
                       ))}
@@ -1341,13 +1373,13 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   <div className="space-y-1 text-[8.5px]">
                     <div className="flex justify-between">
                       <span>SUBTOTAL:</span>
-                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.subtotal.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
                     
                     {invoiceToPrint.discount > 0 && (
                       <div className="flex justify-between text-red-600">
                         <span>DESCONTO:</span>
-                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                        <span className="font-mono">-{invoiceToPrint.discount.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                       </div>
                     )}
 
@@ -1360,7 +1392,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
 
                     <div className="flex justify-between font-black text-[11px] border-t border-dashed border-gray-400 pt-1.5 mt-1 text-black">
                       <span>TOTAL PAGO:</span>
-                      <span className="font-mono">{invoiceToPrint.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
+                      <span className="font-mono">{invoiceToPrint.total.toLocaleString('pt-MZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MT</span>
                     </div>
 
                     <div className="flex justify-between text-[8px] text-gray-700 pt-0.5 border-t border-dotted border-gray-300 mt-1">
@@ -1391,7 +1423,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="flex justify-between items-start pb-4 mb-4 border-b border-gray-200">
                         <div className="space-y-0.5">
                           <h2 className="text-sm font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
-                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                         </div>
                         <div className="text-right">
                           <div className="bg-slate-100 text-slate-800 px-3 py-1 rounded text-xs font-black uppercase">
@@ -1425,11 +1457,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {invoiceToPrint.items.map((item, idx) => (
-                            <tr key={idx} className="hover:bg-gray-50">
+                            <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                               <td className="p-2 font-semibold text-gray-800">{item.name}</td>
                               <td className="p-2 text-right font-mono">{item.quantity}</td>
-                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1441,15 +1473,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="w-48 text-right font-mono text-[9px] space-y-0.5">
                         <div className="flex justify-between">
                           <span>SUBTOTAL:</span>
-                          <span>{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between text-red-500">
                           <span>DESCONTO:</span>
-                          <span>-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                          <span>-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between font-black text-xs text-slate-800 border-t border-gray-200 pt-1">
                           <span>TOTAL GERAL:</span>
-                          <span>{invoiceToPrint.total.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                         </div>
                       </div>
                     </div>
@@ -1462,7 +1494,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="flex justify-between items-start pb-4 mb-4 border-b border-gray-200">
                         <div className="space-y-0.5">
                           <h2 className="text-sm font-black text-emerald-800 uppercase">{settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA'}</h2>
-                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {settings?.companyNuit || '401976590'}</p>
+                          <p className="text-[8px] text-gray-500">Maputo, Moçambique • NUIT: {companyNuit(settings?.companyNuit)}</p>
                         </div>
                         <div className="text-right">
                           <div className="bg-slate-100 text-slate-800 px-3 py-1 rounded text-xs font-black uppercase">
@@ -1496,11 +1528,11 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {invoiceToPrint.items.map((item, idx) => (
-                            <tr key={idx} className="hover:bg-gray-50">
+                            <tr key={item.productId || item.name || idx} className="hover:bg-gray-50">
                               <td className="p-2 font-semibold text-gray-800">{item.name}</td>
                               <td className="p-2 text-right font-mono">{item.quantity}</td>
-                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString()}</td>
-                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono">{item.unitPrice.toLocaleString('pt-MZ')}</td>
+                              <td className="p-2 text-right font-bold font-mono">{item.totalPrice.toLocaleString('pt-MZ')}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1512,15 +1544,15 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                       <div className="w-48 text-right font-mono text-[9px] space-y-0.5">
                         <div className="flex justify-between">
                           <span>SUBTOTAL:</span>
-                          <span>{invoiceToPrint.subtotal.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.subtotal.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between text-red-500">
                           <span>DESCONTO:</span>
-                          <span>-{invoiceToPrint.discount.toLocaleString()} MT</span>
+                          <span>-{invoiceToPrint.discount.toLocaleString('pt-MZ')} MT</span>
                         </div>
                         <div className="flex justify-between font-black text-xs text-slate-800 border-t border-gray-200 pt-1">
                           <span>TOTAL GERAL:</span>
-                          <span>{invoiceToPrint.total.toLocaleString()} MT</span>
+                          <span>{invoiceToPrint.total.toLocaleString('pt-MZ')} MT</span>
                         </div>
                       </div>
                     </div>
@@ -1594,7 +1626,7 @@ export default function FaturasModule({ currentUser }: FaturasModuleProps) {
                   {securityModal.sale.invoiceNumber} • {securityModal.sale.customerName || 'Cliente Geral'}
                 </p>
                 <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
-                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString()} MT</strong>
+                  Valor: <strong className="font-bold text-slate-800">{securityModal.sale.total.toLocaleString('pt-MZ')} MT</strong>
                 </p>
                 {securityModal.action === 'cancel' && (
                   <p className="text-[10px] text-red-700 mt-1">

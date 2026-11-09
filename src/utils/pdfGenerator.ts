@@ -1,7 +1,8 @@
+import { companyNuit, companyName } from './companyInfo';
 import { jsPDF } from 'jspdf';
 import { Sale, SystemSettings } from '../types';
 import { numeroParaExtenso } from './numberToWords';
-import { isFinancialSale } from './saleStatus';
+import { isFinancialSale, settlementDisclaimer } from './saleStatus';
 
 /**
  * Gerador de PDFs profissionais para AGRO - XICOMO & SERVIÇOS, LDA.
@@ -57,7 +58,7 @@ async function getLogoBase64(url: string): Promise<string | null> {
 function getCompanyDefaults(settings: SystemSettings) {
   return {
     name: settings.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA',
-    nuit: settings.companyNuit || '401976590',
+    nuit: companyNuit(settings.companyNuit),
     address: settings.companyAddress || 'Maputo, Bairro do Zimpeto, Av. de Moçambique, Parcela: 654 R/C',
     email: settings.email || 'agroxicomo1@gmail.com',
     phone1: settings.vodacom1 || '84 94 23 241',
@@ -625,7 +626,7 @@ export async function downloadReceiptA4(invoice: Sale, settings: SystemSettings)
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(8.5);
       doc.setTextColor(100, 100, 100);
-      doc.text('*Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.', 15, footerStartY + 6, { maxWidth: 105 });
+      doc.text(settlementDisclaimer(invoice as any), 15, footerStartY + 6, { maxWidth: 105 });
 
       // Right Column: Summary Totals
       const totalsY = footerStartY + 6;

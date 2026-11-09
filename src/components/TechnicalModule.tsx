@@ -1,8 +1,11 @@
+import { companyNuit } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
-import { appConfirm } from '../utils/confirmDialog';
+import { appConfirm, appPrompt } from '../utils/confirmDialog';
+import { findNumberingGaps, describeGaps, type NumberingKind } from '../utils/numberingAudit';
+import { verifyAuthorizationPassword } from '../utils/authorization';
 import { SystemSettings, AuditLog, UserCredentials, Product, AppRole, ActiveSession } from '../types';
 import { AVAILABLE_ROLES, getUserRoles } from '../utils/roleHelper';
 import DatabaseSchemaViewer from './DatabaseSchemaViewer';
@@ -213,7 +216,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       setFixo1(config.fixo1 || '');
       setFixo2(config.fixo2 || '');
       setEmail(config.email || '');
-      setCompanyNuit(config.companyNuit || '401976590');
+      setCompanyNuit(config.companyNuit || '');
       setCriticalStockLevel(config.criticalStockLevel || 10);
       setPrinterA4(config.printerA4 || 'Microsoft Print to PDF');
       setPrinterThermal(config.printerThermal || 'Xprinter XP-80');
@@ -291,6 +294,41 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
     setTimeout(() => setToastMessage(''), 3000);
   };
 
+  // B-04: controlo de lacunas na numeração fiscal.
+  const [showNumberingModal, setShowNumberingModal] = useState(false);
+  const [numberingReport, setNumberingReport] = useState<Array<{ label: string; descricao: string; buraco: boolean }>>([]);
+  const [loadingNumbering, setLoadingNumbering] = useState(false);
+
+  const handleCheckNumbering = async () => {
+    setShowNumberingModal(true);
+    setLoadingNumbering(true);
+    try {
+      const vendas = await dbService.getSales();
+      const ano = new Date().getFullYear();
+      const tipos: Array<{ kind: NumberingKind; label: string }> = [
+        { kind: 'FaturaDefinitiva', label: `Faturas definitivas (FAC-${ano})` },
+        { kind: 'FaturaProforma', label: `Proformas (FP-${ano})` },
+        { kind: 'Recibo', label: `Recibos (REC-${ano})` },
+        { kind: 'NotaCredito', label: `Notas de crédito (NC-${ano})` }
+      ];
+      setNumberingReport(
+        tipos.map(tipo => {
+          const gap = findNumberingGaps(vendas, tipo.kind, ano);
+          return {
+            label: tipo.label,
+            descricao: describeGaps(gap),
+            buraco: gap.missing.length > 0
+          };
+        })
+      );
+    } catch {
+      setNumberingReport([]);
+      showToast('Não foi possível verificar a numeração.');
+    } finally {
+      setLoadingNumbering(false);
+    }
+  };
+
   const handleArchiveAuditLogs = async () => {
     if (isArchivingAuditLogs) return;
     const confirmation = await appConfirm(
@@ -337,7 +375,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
       const exportLogs = await dbService.getAuditLogsForPeriod(getCurrentAuditQuery());
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const cName = settings?.companyName || 'AGRO - XICOMO & SERVIÇOS, LDA';
-      const nuit = settings?.companyNuit || '401976590';
+      const nuit = companyNuit(settings?.companyNuit);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
       doc.setTextColor(30, 41, 59);
@@ -435,7 +473,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
     const isExistingHash = usrPassword.trim().startsWith('sha256:');
     if (!isExistingHash) {
-      // Política oficial: 4 a 6 caracteres (apenas números, apenas letras ou mistos)
+      // Política oficial: mínimo 8 caracteres, com letras e números
       const policy = validateAccessPassword(usrPassword);
       if (!policy.strong) {
         showToast(policy.message || 'Palavra-passe inválida.');
@@ -1276,7 +1314,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         type="text"
                         value={companyNuit}
                         onChange={(e) => setCompanyNuit(e.target.value)}
-                        placeholder="401976590"
+                        placeholder="Ex: 123456789"
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-primary font-mono focus:ring-1 focus:ring-primary"
                       />
                     </div>
@@ -1815,13 +1853,13 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                             <span className="font-bold text-gray-800 text-[11px]">Ponto #{autoBackupsList.length - idx}</span>
                             <p className="text-[10px] text-gray-500 flex items-center gap-1 font-mono">
                               <span className="material-symbols-outlined text-[12px]">schedule</span>
-                              {new Date(ts).toLocaleString()}
+                              {new Date(ts).toLocaleString('pt-MZ')}
                             </p>
                           </div>
                           <button
                             type="button"
                             onClick={async () => {
-                              const conf = await appConfirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString()}? Os dados atuais serão substituídos.`);
+                              const conf = await appConfirm(`Deseja restaurar as bases de dados para o estado de ${new Date(ts).toLocaleString('pt-MZ')}? Os dados atuais serão substituídos.`);
                               if (!conf) return;
                               try {
                                 const backupData = safeStorage.getItem(`agro_erp_backup_${ts}`);
@@ -1868,6 +1906,15 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                         const file = e.target.files?.[0];
                         if (!file) return;
                         
+                        const autorizacao = await appPrompt(
+                          'Restaurar um ficheiro de backup substitui TODOS os dados actuais.\nIntroduza a palavra-passe de autorização para continuar.'
+                        );
+                        if (autorizacao === null) return;
+                        if (!(await verifyAuthorizationPassword(autorizacao, settings))) {
+                          showToast('Autorização recusada: palavra-passe incorrecta.');
+                          return;
+                        }
+
                         const reader = new FileReader();
                         reader.onload = async (event) => {
                           try {
@@ -2095,12 +2142,12 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   data-lpignore="true"
                   value={usrPassword}
                   onChange={(e) => setUsrPassword(e.target.value)}
-                  placeholder="4 a 6 caracteres (letras ou números)"
+                  placeholder="Mínimo 8 caracteres, com letras e números"
                   maxLength={6}
                   className="w-full border border-gray-300 rounded px-3 py-2 text-xs focus:outline-none focus:border-primary"
                 />
                 <p className="text-[10px] text-gray-500 mt-1">
-                  A palavra-passe deve ter 4 a 6 caracteres (apenas números, apenas letras ou mistos). Símbolos não são obrigatórios.
+                  A palavra-passe deve ter pelo menos 8 caracteres e combinar letras com números.
                 </p>
               </div>
 
@@ -2265,6 +2312,15 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                 <span className={`material-symbols-outlined text-[16px] ${isArchivingAuditLogs ? 'animate-spin' : ''}`}>inventory_2</span>
                 {isArchivingAuditLogs ? 'A arquivar…' : 'Arquivar lote seguro'}
               </button>
+              <button
+                type="button"
+                onClick={() => void handleCheckNumbering()}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-md text-xs font-black transition-colors"
+                title="Verifica se falta algum número na sequência fiscal do ano corrente"
+              >
+                <span className="material-symbols-outlined text-[16px]">tag</span>
+                Verificar numeração
+              </button>
             </div>
           </div>
 
@@ -2315,7 +2371,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                   ) : (
                     auditLogs.map(log => (
                       <tr key={log.id} className="hover:bg-gray-50">
-                        <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString()}</td>
+                        <td className="p-3 font-mono text-[11px] text-gray-500">{new Date(log.timestamp).toLocaleString('pt-MZ')}</td>
                         <td className="p-3 font-bold text-gray-800">{log.username}</td>
                         <td className="p-3 font-mono text-gray-600">{log.ipAddress}</td>
                         <td className="p-3 font-semibold">{log.action}</td>
@@ -2410,7 +2466,7 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
                           {sess.role}
                         </span>
                       </td>
-                      <td className="p-3 font-mono text-gray-500">{new Date(sess.loginTime).toLocaleString()}</td>
+                      <td className="p-3 font-mono text-gray-500">{new Date(sess.loginTime).toLocaleString('pt-MZ')}</td>
                       <td className="p-3 font-mono text-gray-600">{sess.ipAddress}</td>
                       <td className="p-3 text-right">
                         <button
@@ -2648,6 +2704,37 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
           </div>
         </div>
       )}
+      {showNumberingModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-black text-slate-800">Controlo de Numeração Fiscal</h3>
+              <button onClick={() => setShowNumberingModal(false)} className="text-slate-400 hover:text-slate-700">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            {loadingNumbering ? (
+              <p className="text-sm text-slate-500">A verificar…</p>
+            ) : numberingReport.length === 0 ? (
+              <p className="text-sm text-slate-500">Sem dados.</p>
+            ) : (
+              <ul className="space-y-2">
+                {numberingReport.map(item => (
+                  <li key={item.label} className={`rounded-lg border p-2.5 ${item.buraco ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+                    <p className="text-xs font-black text-slate-800">{item.label}</p>
+                    <p className={`text-[11px] ${item.buraco ? 'text-amber-800' : 'text-emerald-800'}`}>{item.descricao}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[10px] text-slate-500 leading-relaxed">
+              Uma lacuna não é necessariamente um erro: pode ser um documento anulado ou uma emissão falhada.
+              O importante é conseguir justificar cada número em falta.
+            </p>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

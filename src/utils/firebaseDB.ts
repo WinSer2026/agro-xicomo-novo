@@ -39,10 +39,11 @@ import {
   PayrollPayment, 
   Customer, 
   PausedSale,
-  ProductTransformation
+  ProductTransformation,
+  StockMovement
 } from '../types';
 import { INITIAL_PRODUCTS } from '../data/initialProducts';
-import { safeStorage } from './safeStorage';
+import { safeStorage, safeSessionStorage } from './safeStorage';
 import { getUnitCost } from './priceHelper';
 import {
   getArchiveCutoffTimestamp,
@@ -817,7 +818,7 @@ export class FirebaseDBService {
    * numeração antiga) sem nunca permitir reutilizar um número existente.
    */
   public async nextDocumentNumber(
-    kind: 'FaturaDefinitiva' | 'FaturaProforma' | 'ReciboPOS' | 'ReciboA4',
+    kind: 'FaturaDefinitiva' | 'FaturaProforma' | 'ReciboPOS' | 'ReciboA4' | 'NotaCredito',
     year: number,
     fallbackMax = 0
   ): Promise<string> {
@@ -825,7 +826,8 @@ export class FirebaseDBService {
       FaturaDefinitiva: `FAC-${year}-`,
       FaturaProforma: `FP-${year}-`,
       ReciboPOS: `REC-POS-${year}-`,
-      ReciboA4: `REC-A4-${year}-`
+      ReciboA4: `REC-A4-${year}-`,
+      NotaCredito: `NC-${year}-`
     };
     const prefix = prefixByKind[kind];
     const counterRef = doc(db, 'counters', 'document_numbers');
@@ -903,6 +905,9 @@ export class FirebaseDBService {
       status: sale.status || 'Pendente'
     });
 
+    // Del tas reais aplicados, para o livro de movimentos (F-05).
+    const movementDeltas: Array<{ productId: string; productName: string; unit: string; base: number }> = [];
+
     await runTransaction(db, async transaction => {
       const grouped = new Map<string, {
         bulk: number;
@@ -942,6 +947,14 @@ export class FirebaseDBService {
         snapshots.set(id, snap);
       }
 
+      // A-07: uma transacção do Firestore aceita no máximo 500 escritas. Com
+      // demasiadas linhas distintas a venda falharia no meio; recusa-se cedo.
+      if (grouped.size > 400) {
+        throw new Error(
+          `Venda com ${grouped.size} produtos distintos excede o limite de uma operação atómica (400). Divida a venda em duas.`
+        );
+      }
+
       // 2. Validar disponibilidade real.
       for (const [id, entry] of grouped.entries()) {
         const snap = snapshots.get(id);
@@ -975,6 +988,13 @@ export class FirebaseDBService {
         if (entry.base > 0) updates.stockQty = increment(-entry.base);
         if (Object.keys(updates).length > 0) {
           transaction.set(doc(db, 'products', id), updates, { merge: true });
+          const dados = snap.data() as Record<string, any>;
+          movementDeltas.push({
+            productId: id,
+            productName: String(dados.name || id),
+            unit: String(dados.baseUnit || 'un'),
+            base: entry.base
+          });
         }
       }
 
@@ -988,6 +1008,23 @@ export class FirebaseDBService {
     this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-deduct' } }));
+
+    // F-05: rasto de cada saída de stock. A venda já está confirmada; uma
+    // falha aqui fica em fila local e não desfaz a venda.
+    await this.recordStockMovements(
+      movementDeltas.map(delta => ({
+        id: `mov-${saleId}-${delta.productId}`,
+        date: new Date().toISOString(),
+        productId: delta.productId,
+        productName: delta.productName,
+        type: 'Venda' as const,
+        qtyDelta: -Math.abs(delta.base),
+        unit: delta.unit,
+        reference: String(sanitizedSale.invoiceNumber || saleId),
+        operatorName: sanitizedSale.operatorName,
+        terminalId: (sanitizedSale as any).terminalId
+      }))
+    );
   }
 
   public async cancelSaleWithStockRestoration(sale: Sale, restockItems: any[]): Promise<void> {
@@ -1022,6 +1059,20 @@ export class FirebaseDBService {
     this.salesCache = null;
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'sales', id: saleId } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'stock-restore' } }));
+
+    await this.recordStockMovements(
+      restockItems.map(item => ({
+        id: `mov-estorno-${saleId}-${item.productId}-${Date.now()}`,
+        date: new Date().toISOString(),
+        productId: String(item.productId),
+        productName: String(item.productName || item.productId),
+        type: 'Estorno' as const,
+        qtyDelta: Math.abs(Number(item.equivalentBaseQty || item.qtyToAdd) || 0),
+        unit: String(item.unit || 'un'),
+        reference: String(sale.creditNoteNumber || sanitizedSale.invoiceNumber || saleId),
+        operatorName: sanitizedSale.operatorName
+      }))
+    );
   }
 
   // --- Losses ---
@@ -1034,10 +1085,76 @@ export class FirebaseDBService {
     return this.lossesCache;
   }
 
+  // --- Livro de movimentos de stock (F-05) ---
+  /**
+   * Regista movimentos de stock. É deliberadamente "best effort": a venda já
+   * foi confirmada e não pode ser posta em causa por uma falha de auditoria.
+   * Os movimentos são gravados em lote e ficam em fila local se a rede cair.
+   */
+  public async recordStockMovements(movements: StockMovement[]): Promise<void> {
+    const validos = (movements || []).filter(m => m && m.productId && Number.isFinite(m.qtyDelta) && m.qtyDelta !== 0);
+    if (validos.length === 0) return;
+
+    try {
+      for (let i = 0; i < validos.length; i += 400) {
+        const lote = validos.slice(i, i + 400);
+        const batch = writeBatch(db);
+        lote.forEach(movimento => {
+          batch.set(doc(db, 'stock_movements', movimento.id), this.sanitizeData(movimento));
+        });
+        await batch.commit();
+      }
+    } catch (err) {
+      console.warn('[F-05] Não foi possível gravar o livro de movimentos agora.', err);
+      try {
+        const fila = JSON.parse(safeStorage.getItem('agro_stock_movements_queue') || '[]');
+        safeStorage.setItem('agro_stock_movements_queue', JSON.stringify([...fila, ...validos].slice(-2000)));
+      } catch {
+        /* sem armazenamento */
+      }
+    }
+  }
+
+  /** Reenvia os movimentos que ficaram em fila. */
+  public async flushStockMovementsQueue(): Promise<void> {
+    try {
+      const fila = JSON.parse(safeStorage.getItem('agro_stock_movements_queue') || '[]') as StockMovement[];
+      if (!Array.isArray(fila) || fila.length === 0) return;
+      await this.recordStockMovements(fila);
+      safeStorage.removeItem('agro_stock_movements_queue');
+    } catch {
+      /* ignora */
+    }
+  }
+
+  /** Movimentos de um produto (mais recentes primeiro). */
+  public async getStockMovements(productId?: string, limit = 200): Promise<StockMovement[]> {
+    const lista = await this.getAll<StockMovement>('stock_movements');
+    const filtrada = productId
+      ? lista.filter(movimento => String(movimento.productId) === String(productId))
+      : lista;
+    return filtrada
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .slice(0, limit);
+  }
+
   public async addLoss(l: LossRecord): Promise<void> {
     console.log(`[FirebaseDBService] addLoss() ID: ${l.id}`);
     await this.upsert('losses', l.id, l);
     this.lossesCache = null;
+
+    // F-05: a quebra também é movimento de stock.
+    await this.recordStockMovements([{
+      id: `mov-quebra-${l.id}`,
+      date: l.date || new Date().toISOString(),
+      productId: String((l as any).productId || ''),
+      productName: String((l as any).productName || (l as any).productId || ''),
+      type: 'Quebra' as const,
+      qtyDelta: -Math.abs(Number((l as any).quantity) || 0),
+      unit: String((l as any).unit || 'un'),
+      reference: String(l.id),
+      note: (l as any).reason || (l as any).motivo
+    }]);
   }
 
   // --- Product Transformations (Parte 4) ---
@@ -1858,14 +1975,33 @@ export class FirebaseDBService {
   public getLastSyncTime(): string { return new Date().toLocaleTimeString(); }
 
   // --- Active Cart ---
+  /**
+   * I-02: o rascunho do PDV era uma chave única no armazenamento partilhado.
+   * Duas abas (ou dois postos no mesmo browser) escreviam no mesmo sítio e o
+   * carrinho de um aparecia no outro. A chave passa a incluir o separador.
+   */
+  private activeCartKey(): string {
+    let tabId = '';
+    try {
+      tabId = safeSessionStorage.getItem('agro_tab_id') || '';
+      if (!tabId) {
+        tabId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        safeSessionStorage.setItem('agro_tab_id', tabId);
+      }
+    } catch {
+      tabId = 'tab-default';
+    }
+    return `agro_active_cart_${tabId}`;
+  }
+
   public async saveActiveCart(cartData: any): Promise<void> {
     try {
-      safeStorage.setItem('agro_active_cart', JSON.stringify(cartData));
+      safeStorage.setItem(this.activeCartKey(), JSON.stringify(cartData));
     } catch (e) {}
   }
   public async getActiveCart(): Promise<any | null> {
     try {
-      const saved = safeStorage.getItem('agro_active_cart');
+      const saved = safeStorage.getItem(this.activeCartKey());
       return saved ? JSON.parse(saved) : null;
     } catch {
       return null;
@@ -1873,6 +2009,8 @@ export class FirebaseDBService {
   }
   public async clearActiveCart(): Promise<void> {
     try {
+      safeStorage.removeItem(this.activeCartKey());
+      // Limpa também a chave antiga (rascunhos criados antes de I-02).
       safeStorage.removeItem('agro_active_cart');
     } catch (e) {}
   }

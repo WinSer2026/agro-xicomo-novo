@@ -39,3 +39,18 @@ export const saleStatusLabel = (sale: Pick<Sale, 'status'>): string => {
     default: return 'CANCELADA';
   }
 };
+
+/**
+ * Venda efectivamente liquidada: é receita recebida, não dívida.
+ *
+ * Usado nos documentos: um recibo só pode afirmar "liquidação total" se a
+ * venda estiver paga. Antes o texto era fixo e afirmava o falso (E-04/J-06).
+ */
+export const isSettledSale = (sale: Pick<Sale, 'status' | 'documentType'>): boolean =>
+  isFinancialSale(sale) && sale.status === 'Paga';
+
+/** Texto de rodapé dos recibos, coerente com o estado real da venda. */
+export const settlementDisclaimer = (sale: Pick<Sale, 'status' | 'documentType'>): string =>
+  isSettledSale(sale)
+    ? '*Este recibo serve como prova oficial de liquidação total da fatura acima referenciada.'
+    : '*Documento emitido sem liquidação total: o valor em dívida mantém-se até confirmação do pagamento.';

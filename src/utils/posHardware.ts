@@ -1,3 +1,4 @@
+import { companyNuit, companyName } from './companyInfo';
 import { safeStorage, safeSessionStorage } from "./safeStorage";
 ﻿import { Sale, SystemSettings } from '../types';
 
@@ -204,7 +205,7 @@ export async function printDirectThermalESC_POS(sale: Sale, settings: SystemSett
     
     // Regular text (GS ! 0), Bold OFF
     list.push(new Uint8Array([29, 33, 0, 27, 69, 0]));
-    list.push(encoder.encode(`NUIT: ${settings.companyNuit || '401976590'}\n`));
+    list.push(encoder.encode(`NUIT: ${companyNuit(settings.companyNuit)}\n`));
     list.push(encoder.encode('Maputo, Mocambique\n'));
     list.push(encoder.encode('--------------------------------\n'));
 
@@ -233,11 +234,11 @@ export async function printDirectThermalESC_POS(sale: Sale, settings: SystemSett
 
     // Align right (ESC a 2)
     list.push(new Uint8Array([27, 97, 2]));
-    list.push(encoder.encode(`Subtotal: ${sale.subtotal.toLocaleString()} MT\n`));
+    list.push(encoder.encode(`Subtotal: ${sale.subtotal.toLocaleString('pt-MZ')} MT\n`));
     if (sale.discount > 0) {
-      list.push(encoder.encode(`Desconto: -${sale.discount.toLocaleString()} MT\n`));
+      list.push(encoder.encode(`Desconto: -${sale.discount.toLocaleString('pt-MZ')} MT\n`));
     }
-    list.push(encoder.encode(`Total: ${sale.total.toLocaleString()} MT\n`));
+    list.push(encoder.encode(`Total: ${sale.total.toLocaleString('pt-MZ')} MT\n`));
     list.push(encoder.encode(`Forma Pag.: ${sale.paymentMethod || 'Dinheiro'}\n`));
     list.push(encoder.encode('--------------------------------\n'));
 

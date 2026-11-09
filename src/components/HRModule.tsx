@@ -1,3 +1,4 @@
+import { companyNuit, companyName } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect } from 'react';
 import { exportToPDF, exportToExcel, ReportData } from '../utils/reportExporter';
@@ -696,7 +697,7 @@ export default function HRModule() {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`${cName} • NUIT: 401976590`, 15, 25);
+    doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Mês de Referência: ${selectedMonth} • Emissão: ${new Date().toLocaleDateString('pt-MZ')}`, 15, 29);
 
     doc.setDrawColor(0, 106, 78);
@@ -924,10 +925,10 @@ export default function HRModule() {
         return {
           name: emp.name,
           inss: emp.inssNumber || 'N/A',
-          gross: `${gross.toLocaleString()} MT`,
-          w3: `${w3.toLocaleString()} MT`,
-          e4: `${e4.toLocaleString()} MT`,
-          t7: `${(w3 + e4).toLocaleString()} MT`
+          gross: `${gross.toLocaleString('pt-MZ')} MT`,
+          w3: `${w3.toLocaleString('pt-MZ')} MT`,
+          e4: `${e4.toLocaleString('pt-MZ')} MT`,
+          t7: `${(w3 + e4).toLocaleString('pt-MZ')} MT`
         };
       })
     };
@@ -952,8 +953,8 @@ export default function HRModule() {
         return {
           name: emp.name,
           nuit: emp.nuit,
-          annual: (emp.baseSalary * 12).toLocaleString(),
-          irps: (totals.irps * 12).toLocaleString()
+          annual: (emp.baseSalary * 12).toLocaleString('pt-MZ'),
+          irps: (totals.irps * 12).toLocaleString('pt-MZ')
         };
       })
     };
