@@ -46,6 +46,12 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 | **ES-05** | P2 | Comparação de datas por texto (`expiryDate <= 'AAAA-MM-DD'`): uma data com hora (`2026-11-09T00:00`) nunca é considerada vencida nesse dia. |
 | **ES-06** | P2 | Geração automática de código de barras dentro do mesmo ciclo, também gravada sem auditoria. |
 
+> **Decisão do proprietário (2026-11-09):** a gestão de validade (listar vencidos e dar baixa com
+> senha) **sai do módulo de stock** e passa para o futuro módulo de gestão do armazém. Aqui ficou
+> apenas uma coisa: **nada é apagado automaticamente**. A baixa de um lote vencido continua possível
+> hoje pelo registo de quebra manual, com motivo «Fora de Prazo». O método
+> `dbService.expireProductBatch` fica pronto para o módulo do armazém.
+
 ### 2.2 Novo produto
 
 | ID | Nív. | Achado |
@@ -192,6 +198,8 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 |---|---|---|
 | 8 | Movimento de stock em **todas** as variações: `Ajuste`, `Entrada`, `Transformação`. O livro passa a explicar o saldo. | ES-08, ES-16, ES-25, ES-34, ES-43, ES-47 |
 | 9 | Auditoria com **utilizador real e IP real** em todos os blocos. | ES-17, ES-22, ES-26, ES-30, ES-36, ES-48, ES-49 |
+
+*(8 e 9 executadas em 2026-11-09 — ver secção 7.)*
 | 10 | Ajuste + movimento + auditoria **numa só transacção**. | ES-04, ES-32 |
 | 11 | Data em **dia de Maputo** em quebras, contagem e expurgo. | ES-05, ES-29, ES-36 |
 
@@ -220,14 +228,15 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 ## 6. Verificação disponível
 
 ```
-npm run test:all     → 247 asserções, 0 falhas
+npm run test:all     → 257 asserções, 0 falhas
 npx tsc --noEmit     → sem erros
 npx vite build       → sem erros
 ```
 
 A aritmética do inventário (conversão saco↔base, derivação de sacos/retalho, travão do saldo negativo,
 diferença de contagem, valor do prejuízo) vive agora em `src/utils/stockMath.ts` e é testada sem
-Firestore: 25 asserções novas em `test/stock_debts_test.ts`. O que **não** é testável daqui é o
+Firestore: 35 asserções novas em `test/stock_debts_test.ts` (25 de aritmética de stock, 10 de
+correspondência de artigo). O que **não** é testável daqui é o
 comportamento transaccional real (dois postos a ajustar ao mesmo tempo) — isso exige dois caixas.
 
 **O que não se pode provar daqui:** comportamentos com dois postos reais, impressão, e o efeito de
@@ -242,13 +251,33 @@ verificação preparada no fim de cada fase.
 
 | # | Acção | Estado | Onde |
 |---|---|---|---|
-| 1 | Expurgo de validade deixa de ser automático | **feito** | `StockModule.loadInventoryData` só lista; banner «lotes vencidos» com botão por lote, senha de gestor e `expireProductBatch` |
+| 1 | Expurgo de validade deixa de ser automático | **feito** | `StockModule.loadInventoryData` já não apaga nada; a baixa de um vencido faz-se pelo registo de quebra (motivo «Fora de Prazo»). A lista de vencidos com botão por lote foi retirada deste módulo a pedido do proprietário — passa para o módulo do armazém, com `dbService.expireProductBatch` já pronto |
 | 2 | Zerar as três quantidades | **feito** | `expireProductBatch` grava `stockQty = stockQtyBulk = stockQtyRetail = 0` na mesma transacção; `adjustStock`, `registerLossAtomic` e `applyPhysicalCount` derivam sempre sacos+retalho do total (ES-02, ES-33, ES-45) |
 | 3 | Código único ao criar e editar | **feito** | verificação sem distinção de maiúsculas/ espaços em novo produto e no formulário de ajuste; recusa com o nome do artigo dono (ES-07, ES-20) |
 | 4 | Ajustes por diferença, dentro de transacção | **feito** | `dbService.adjustStock` (`deltaBase` / `deltaBulk` / `absoluteBase` lido no `runTransaction`); usado pelo ajuste inline, pelo formulário do artigo e pelo stock inicial do novo produto (ES-04, ES-14, ES-21, ES-31, ES-32, ES-34, ES-45) |
 | 5 | Quebras com conversão de unidade | **feito** | `registerLossAtomic`: selector saco/base no modal, `1 saco = N kg`, recusa acima do saldo; perda + movimento + auditoria no mesmo commit (ES-27, ES-28, ES-32) |
-| 6 | Transformação verifica stock | **em aberto** | Fase 3 — `addTransformationWithStockUpdate` continua a poder deixar saldo negativo (ES-39) |
-| 7 | Entrada por IA com correspondência exacta | **em aberto** | Fase 3 — `StockAIEntry` ainda procura por substring e não pede senha (ES-44, ES-46) |
+| 6 | Transformação verifica stock | **feito** | `addTransformationWithStockUpdate` passou de `writeBatch` (não lê nada) a `runTransaction`: lê o saldo, recusa transformar mais do que existe, sincroniza as três quantidades e grava saída/entradas/perda/guia/auditoria no mesmo commit (ES-39, ES-43, ES-47) |
+| 7 | Entrada por IA com correspondência exacta | **feito** | `src/utils/productMatch.ts`: só igualdade de código ou de nome (sem acentos, sem maiúsculas); nome repetido fica «ambíguo» e não é gravado. Pré-visualização mostra o artigo real e «120 → 170 kg», e a gravação exige senha de gestor (ES-44, ES-45, ES-46) |
+
+### Fase 2 — executada · 2026-11-09
+
+| # | Acção | Estado | Onde |
+|---|---|---|---|
+| 8 | Movimento de stock em todas as variações | **feito** | `Entrada` (stock inicial e IA), `Ajuste` (inline, formulário, contagem física), `Quebra`, `Transformação` (uma saída + uma entrada por artigo) e requisição de sacos (movimento com delta 0, para o livro explicar a abertura) |
+| 9 | Utilizador real e IP real na auditoria | **feito** | requisição de sacos, eliminação de produto, transformação, anulação de transformação, regeneração de código de barras e entrada por IA deixaram de escrever `'127.0.0.1'` e nomes fixos |
+| 10 | Ajuste + movimento + auditoria na mesma transacção | **feito** | `adjustStock`, `registerLossAtomic`, `expireProductBatch`, `applyPhysicalCount`, `requisitionSacks`, `addTransformationWithStockUpdate`, `updateProductPrices` |
+| 11 | Data em dia de Maputo | **feito** | quebras e contagem gravam o instante ISO (a hora local é derivada na leitura); a guia de transformação passou a usar `toLocalDateKey` em vez de UTC |
+
+**Dois assuntos que ficam para o proprietário decidir (não são bugs a corrigir sozinho):**
+
+1. **Duas gavetas ou uma?** O stock de um artigo híbrido tem três números: total, sacos e retalho.
+   Desde a Fase 1, sacos e retalho são **derivados** do total (`sacos = total ÷ conversão`), o que
+   garante que nunca divergem. A «Requisição de sacos» move sacos de revenda para retalho mantendo o
+   total — o que só faz sentido se as duas gavetas forem independentes. Enquanto a decisão não vier,
+   a requisição está transaccional e auditada, mas o próximo ajuste volta a derivar do total.
+2. **A entrada por IA não está ligada a nenhum ecrã.** O componente `StockAIEntry` não é importado em
+   parte alguma: o risco ES-44 estava latente, não activo. Ficou corrigido (correspondência exacta,
+   pré-visualização e senha) para o dia em que for ligado.
 
 **Também fechado nesta fase, embora estivesse atribuído a outras:**
 
@@ -263,8 +292,9 @@ verificação preparada no fim de cada fase.
 - O *toast* do módulo passou a distinguir sucesso / erro / aviso — antes um «palavra-passe errada»
   aparecia a verde.
 
-**Prova local que continua pendente** (não se prova num sandbox): dar baixa de um lote vencido num
-posto e confirmar que o outro deixa de vender; ajustar o mesmo artigo em dois postos ao mesmo tempo;
-contar 12,5 kg e ver o saldo ficar em 12,5; quebrar 1 saco e ver o relatório em kg.
+**Prova local que continua pendente** (não se prova num sandbox): ajustar o mesmo artigo em dois
+postos ao mesmo tempo e ver um dos dois recusado (saldo insuficiente) em vez de ficar negativo;
+contar 12,5 kg e ver o saldo ficar em 12,5; quebrar 1 saco e ver 50 kg no relatório; transformar 100 kg
+de um artigo que só tem 40 e ser recusado; dar duas transformações simultâneas do mesmo saco.
 
-### Fases 2–4 — por executar
+### Fases 3–4 — por executar

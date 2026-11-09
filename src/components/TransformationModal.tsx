@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react';
 import { Product, ProductTransformation, TransformationItem, SystemSettings } from '../types';
 import { dbService } from '../utils/firebaseDB';
 import { getSingularUnit } from '../utils/unitHelper';
+import { getClientIp } from '../utils/clientInfo';
+import { toLocalDateKey } from '../utils/dateRangeHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -273,7 +275,7 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
         items: createdItems,
         lossQuantity: lossQty,
         lossValue: lossValue,
-        date: new Date().toISOString().split('T')[0],
+        date: toLocalDateKey(new Date().toISOString()),
         operatorId: currentUser.username,
         operatorName: currentUser.username,
         notes: notes.trim(),
@@ -315,19 +317,17 @@ export const TransformationModal: React.FC<TransformationModalProps> = ({
         equivalentBaseQty: originalBaseQty
       };
 
-      // Execute atomic transaction
-      await dbService.addTransformationWithStockUpdate(transformationRecord, itemsToCredit, originalDeduction);
-
-      // Log audit
-      void dbService.addAuditLog({
-        id: 'log-' + Date.now(),
-        timestamp: new Date().toISOString(),
-        username: currentUser.username,
-        ipAddress: '127.0.0.1',
-        action: 'Transformação de Produto Realizada',
-        status: 'Sucesso',
-        details: `Transformado ${originalBaseQty} ${originalProduct.baseUnit} de "${originalProduct.name}" em ${createdItems.length} artigos resultantes (Perda: ${lossQty} ${originalProduct.baseUnit}).`
-      });
+      // Executa a transacção: saldo verificado no servidor, movimentos e
+      // auditoria com o utilizador real são gravados no mesmo commit.
+      await dbService.addTransformationWithStockUpdate(
+        transformationRecord,
+        itemsToCredit,
+        originalDeduction,
+        {
+          operator: currentUser.username,
+          ipAddress: await getClientIp().catch(() => 'desconhecido')
+        }
+      );
 
       setSuccessTransformation(transformationRecord);
       if (onTransformationComplete) onTransformationComplete();

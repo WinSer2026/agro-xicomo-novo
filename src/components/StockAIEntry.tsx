@@ -1,7 +1,10 @@
-import { appAlert } from '../utils/confirmDialog';
+import { appAlert, appPrompt } from '../utils/confirmDialog';
 import React, { useState, useRef, useEffect } from 'react';
 import { dbService } from '../utils/firebaseDB';
 import { validateStandardPrices, validateHybridPrices, isHybridProduct } from '../utils/priceHelper';
+import { verifyAuthorizationPassword } from '../utils/authorization';
+import { getClientIp } from '../utils/clientInfo';
+import { matchProduct, describeMatchStatus, ProductMatch } from '../utils/productMatch';
 import { Product } from '../types';
 
 interface StockUpdate {
@@ -21,13 +24,22 @@ interface AIResponse {
 interface StockAIEntryProps {
   onClose: () => void;
   onSuccess: () => void;
+  /** Quem está a dar a entrada — vai para a auditoria. */
+  currentUser?: { username: string } | null;
 }
 
-export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }) => {
+interface ResolvedUpdate {
+  update: StockUpdate;
+  match: ProductMatch;
+}
+
+export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess, currentUser }) => {
   const [prompt, setPrompt] = useState('');
   const [files, setFiles] = useState<{ name: string; base64: string; mime: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [aiResponse, setAiResponse] = useState<AIResponse | null>(null);
+  /** Correspondência exacta de cada linha sugerida pela IA (ES-44). */
+  const [resolved, setResolved] = useState<ResolvedUpdate[]>([]);
   const [error, setError] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -141,10 +153,22 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
 
       // O servidor devolve texto livre; a pré-visualização estruturada só
       // existe quando vierem alterações de stock.
+      let resposta: AIResponse;
       if (data?.result && !data?.changes) {
-        setAiResponse({ explanation: data.result, changes: {} } as AIResponse);
+        resposta = { explanation: data.result, changes: {} } as AIResponse;
       } else {
-        setAiResponse(data as AIResponse);
+        resposta = data as AIResponse;
+      }
+      setAiResponse(resposta);
+
+      // ES-44: a correspondência faz-se agora, não no momento de gravar, para
+      // o utilizador ver exactamente qual artigo vai receber a mercadoria.
+      const sugestoes = resposta?.changes?.stockUpdates || [];
+      if (sugestoes.length > 0) {
+        const catalogo = await dbService.getProducts().catch(() => [] as Product[]);
+        setResolved(sugestoes.map(update => ({ update, match: matchProduct(catalogo, update.productSearch) })));
+      } else {
+        setResolved([]);
       }
     } catch (err: any) {
       console.error('Erro IA:', err);
@@ -155,75 +179,114 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
   };
 
   const applyChanges = async () => {
-    if (!aiResponse || !aiResponse.changes.stockUpdates) return;
+    if (!aiResponse || !resolved.length) return;
+
+    const validos = resolved.filter(r => r.match.status === 'exact' && r.match.product);
+    if (validos.length === 0) {
+      void appAlert(
+        'Nenhuma das linhas corresponde exactamente a um artigo do catálogo. ' +
+          'Nada foi gravado — corrija o nome ou o código e repita.'
+      );
+      return;
+    }
+
+    // V-04: entrada de stock é dinheiro a entrar no armazém; exige gestor.
+    const pw = await appPrompt(
+      `Vão ser actualizados ${validos.length} artigo(s) no stock.\n\n` +
+        'Esta operação soma mercadoria ao inventário e fica registada em auditoria. ' +
+        'Introduza a palavra-passe de gestor.'
+    );
+    if (pw === null) return;
 
     setLoading(true);
     try {
-      await dbService.init();
-      const allProducts = await dbService.getProducts();
-      let updatedCount = 0;
+      const config = await dbService.getSettings().catch(() => null);
+      if (!(await verifyAuthorizationPassword(pw, config))) {
+        void appAlert('Palavra-passe incorrecta: nada foi gravado.');
+        return;
+      }
 
-      for (const update of aiResponse.changes.stockUpdates) {
-        const search = update.productSearch.toLowerCase();
-        const target = allProducts.find(p => 
-          p.name.toLowerCase().includes(search) || 
-          p.code.toLowerCase().includes(search)
-        );
+      const operador = currentUser?.username || 'Gestor de Stock';
+      const ip = await getClientIp().catch(() => 'desconhecido');
 
-        if (target) {
-          target.stockQty += Number(update.quantityToAdd) || 0;
+      let stockGravado = 0;
+      let precosGravados = 0;
+      const ignorados: string[] = [];
 
-          // Regra de preços: só aplica alterações que mantenham a compra abaixo da venda
-          const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : target.buyingPrice;
-          const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : target.sellingPrice;
-          const priceError = isHybridProduct(target)
-            ? validateHybridPrices(
-                target.buyingPriceBulk ?? target.buyingPrice,
-                target.sellingPriceBulk || proposedSell * (target.conversionRate || 1),
-                proposedSell,
-                Number(target.conversionRate) || 1
-              )
-            : validateStandardPrices(proposedBuy, proposedSell, target.isService);
+      for (const { update, match } of resolved) {
+        const produto = match.product;
+        if (match.status !== 'exact' || !produto) {
+          ignorados.push(`${update.productSearch} (${describeMatchStatus(match)})`);
+          continue;
+        }
 
-          if (!priceError) {
-            if (update.newBuyingPrice) target.buyingPrice = Number(update.newBuyingPrice);
-            if (update.newSellingPrice) target.sellingPrice = Number(update.newSellingPrice);
-          } else {
-            console.warn('[AI Stock Entry] Preços não alterados (regra de preços):', priceError);
-          }
-          
-          // Re-calculate bulk/retail if applicable
-          if (target.parentUnit && target.conversionRate && target.conversionRate > 1) {
-            const rate = target.conversionRate;
-            target.stockQtyBulk = Math.floor(target.stockQty / rate);
-            target.stockQtyRetail = target.stockQty % rate;
-          }
+        // 1. Preços primeiro, e só se respeitarem a regra compra < venda.
+        const proposedBuy = update.newBuyingPrice ? Number(update.newBuyingPrice) : produto.buyingPrice;
+        const proposedSell = update.newSellingPrice ? Number(update.newSellingPrice) : produto.sellingPrice;
+        const priceError = isHybridProduct(produto)
+          ? validateHybridPrices(
+              produto.buyingPriceBulk ?? produto.buyingPrice,
+              produto.sellingPriceBulk || proposedSell * (produto.conversionRate || 1),
+              proposedSell,
+              Number(produto.conversionRate) || 1
+            )
+          : validateStandardPrices(proposedBuy, proposedSell, produto.isService);
 
-          await dbService.saveProduct(target);
-          updatedCount++;
+        if ((update.newBuyingPrice || update.newSellingPrice) && !priceError) {
+          await dbService.updateProductPrices({
+            productId: String(produto.id),
+            buyingPrice: update.newBuyingPrice ? Number(update.newBuyingPrice) : undefined,
+            sellingPrice: update.newSellingPrice ? Number(update.newSellingPrice) : undefined,
+            operator: operador,
+            ipAddress: ip,
+            reason: 'Entrada de stock por IA'
+          });
+          precosGravados++;
+        } else if ((update.newBuyingPrice || update.newSellingPrice) && priceError) {
+          ignorados.push(`${produto.name}: preço não alterado (${priceError})`);
+        }
+
+        // 2. Stock por diferença, dentro de transacção, com movimento e auditoria.
+        const qty = Number(update.quantityToAdd) || 0;
+        if (qty !== 0) {
+          await dbService.adjustStock({
+            productId: String(produto.id),
+            deltaBase: qty,
+            reason: `Entrada por IA: «${update.productSearch}»`,
+            operator: operador,
+            source: 'Entrada IA',
+            ipAddress: ip,
+            allowNegative: qty > 0
+          });
+          stockGravado++;
         }
       }
 
-      if (updatedCount > 0) {
-        void dbService.addAuditLog({
-          id: 'log-' + Date.now(),
-          timestamp: new Date().toISOString(),
-          username: 'Gestor de Stock (IA)',
-          ipAddress: '127.0.0.1',
-          action: 'Entrada de Stock via IA',
-          status: 'Sucesso',
-          details: `Atualizado stock de ${updatedCount} produtos via processamento inteligente.`
-        });
+      void dbService.addAuditLog({
+        id: 'log-ia-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        username: operador,
+        ipAddress: ip,
+        action: 'Entrada de Stock via IA',
+        status: 'Sucesso',
+        level: 'WARNING',
+        entity: 'products',
+        details:
+          `${stockGravado} artigo(s) com stock actualizado e ${precosGravados} com preço alterado.` +
+          (ignorados.length ? ` Ignorados: ${ignorados.join('; ')}.` : '')
+      });
 
-        void appAlert(`${updatedCount} produtos atualizados com sucesso!`);
-        onSuccess();
-        onClose();
-      } else {
-        void appAlert('Nenhum produto correspondente foi encontrado no sistema para as atualizações sugeridas.');
-      }
-    } catch (err) {
+      await appAlert(
+        `${stockGravado} artigo(s) actualizados no stock` +
+          (precosGravados ? `, ${precosGravados} preço(s) alterados` : '') +
+          '.' +
+          (ignorados.length ? `\n\nNada foi gravado em: ${ignorados.join('; ')}.` : '')
+      );
+      onSuccess();
+      onClose();
+    } catch (err: any) {
       console.error('Erro ao aplicar alterações:', err);
-      void appAlert('Erro ao salvar alterações no banco de dados.');
+      void appAlert(err?.message || 'Erro ao salvar alterações no banco de dados.');
     } finally {
       setLoading(false);
     }
@@ -359,30 +422,61 @@ export const StockAIEntry: React.FC<StockAIEntryProps> = ({ onClose, onSuccess }
                     Entradas Detectadas:
                   </h3>
                   <div className="space-y-2">
-                    {aiResponse.changes.stockUpdates.map((item, idx) => (
-                      <div key={idx} className="bg-white p-3 rounded-lg border border-indigo-100 shadow-sm flex justify-between items-center">
-                        <div>
-                          <p className="text-sm font-bold text-gray-900">{item.productSearch}</p>
-                          <div className="flex gap-3 mt-1">
-                            {item.newBuyingPrice && (
-                              <span className="text-[10px] text-gray-500">P. Compra: {item.newBuyingPrice} MT</span>
-                            )}
-                            {item.newSellingPrice && (
-                              <span className="text-[10px] text-gray-500">P. Venda: {item.newSellingPrice} MT</span>
-                            )}
+                    {resolved.map(({ update, match }, idx) => {
+                      const produto = match.product;
+                      const exacto = match.status === 'exact' && produto;
+                      const antes = produto ? Number(produto.stockQty) || 0 : 0;
+                      const depois = antes + (Number(update.quantityToAdd) || 0);
+
+                      return (
+                        <div
+                          key={idx}
+                          className={`p-3 rounded-lg border shadow-sm flex justify-between items-center ${
+                            exacto ? 'bg-white border-indigo-100' : 'bg-red-50 border-red-200'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-gray-900 truncate">
+                              {exacto ? produto!.name : update.productSearch}
+                            </p>
+                            <p className={`text-[10px] ${exacto ? 'text-gray-500' : 'text-red-700 font-bold'}`}>
+                              {exacto
+                                ? `${antes.toLocaleString('pt-MZ')} → ${depois.toLocaleString('pt-MZ')} ${produto!.baseUnit || 'un'}`
+                                : describeMatchStatus(match)}
+                            </p>
+                            <div className="flex gap-3 mt-1">
+                              {update.newBuyingPrice && (
+                                <span className="text-[10px] text-gray-500">P. Compra: {update.newBuyingPrice} MT</span>
+                              )}
+                              {update.newSellingPrice && (
+                                <span className="text-[10px] text-gray-500">P. Venda: {update.newSellingPrice} MT</span>
+                              )}
+                            </div>
+                          </div>
+                          <div
+                            className={`px-3 py-1 rounded-full font-bold text-xs shrink-0 ${
+                              exacto ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700 line-through'
+                            }`}
+                          >
+                            +{update.quantityToAdd}
                           </div>
                         </div>
-                        <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full font-bold text-xs">
-                          +{item.quantityToAdd}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
+
+                    {resolved.some(r => r.match.status !== 'exact') && (
+                      <p className="text-[10px] text-red-700 font-semibold">
+                        Só são gravadas as linhas com artigo identificado por nome ou código exacto. As restantes
+                        ficam de fora — corrija o texto e repita.
+                      </p>
+                    )}
                   </div>
 
                   <div className="mt-6 flex gap-3">
                     <button
                       onClick={applyChanges}
-                      className="flex-1 py-3 bg-green-600 text-white rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-green-700 transition-all shadow-md"
+                      disabled={loading || !resolved.some(r => r.match.status === 'exact')}
+                      className="flex-1 py-3 bg-green-600 text-white rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-green-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <span className="material-symbols-outlined">done_all</span>
                       Confirmar e Atualizar Stock

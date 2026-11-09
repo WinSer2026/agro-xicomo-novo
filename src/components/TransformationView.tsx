@@ -4,6 +4,7 @@ import { ProductTransformation, Product, SystemSettings } from '../types';
 import { appConfirm, appAlert } from '../utils/confirmDialog';
 import { dbService } from '../utils/firebaseDB';
 import { DateRangeFilter } from './DateRangeFilter';
+import { getClientIp } from '../utils/clientInfo';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT } from '../utils/dateRangeHelper';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -300,7 +301,7 @@ export const TransformationView: React.FC<TransformationViewProps> = ({
         id: 'log-' + Date.now(),
         timestamp: new Date().toISOString(),
         username: currentUser.username,
-        ipAddress: '127.0.0.1',
+        ipAddress: await getClientIp().catch(() => 'desconhecido'),
         action: 'Transformação de Produto Anulada',
         status: 'Alerta',
         details: `Anulação da transformação ${trf.code}. Stock original restaurado com sucesso.`

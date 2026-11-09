@@ -12,6 +12,7 @@ import {
   stockLossValue,
   toBaseQty
 } from '../src/utils/stockMath';
+import { matchProduct, normalizeTerm } from '../src/utils/productMatch';
 import type { Debt } from '../src/types';
 
 let passou = 0, falhou = 0;
@@ -117,6 +118,27 @@ ok('contagem com pó de saco não inventa milésimos', physicalDelta(100, 100.00
 // Valor do prejuízo.
 ok('50 kg a 20 MT valem 1000 MT', stockLossValue(50, 20) === 1000);
 ok('prejuízo arredonda a cêntimos', stockLossValue(3, 33.333) === 100);
+
+// ------------------------------------------- correspondência de artigo (IA)
+// ES-44: a IA devolve texto livre; adivinhar por pedaço de nome punha
+// mercadoria no artigo errado. Só vale igualdade exacta de código ou nome.
+const catalogo: any[] = [
+  { id: 'a1', name: 'ADUBO NPK', code: '9610000000011' },
+  { id: 'a2', name: 'ADUBO NPK 12-24-12', code: '9610000000028' },
+  { id: 'a3', name: 'Semente de Milho', code: '9610000000035' },
+  { id: 'a4', name: 'Semente de Milho', code: '9610000000042' }
+];
+
+ok('nome exacto encontra o artigo certo', matchProduct(catalogo, 'ADUBO NPK').product?.id === 'a1');
+ok('nome maior não é confundido com o curto', matchProduct(catalogo, 'ADUBO NPK 12-24-12').product?.id === 'a2');
+ok('pedaço de nome não encontra nada', matchProduct(catalogo, 'ADUBO').status === 'none');
+ok('código exacto encontra', matchProduct(catalogo, '9610000000028').product?.id === 'a2');
+ok('código parcial não encontra', matchProduct(catalogo, '961000').status === 'none');
+ok('maiúsculas e acentos não contam', matchProduct(catalogo, '  semente de milho ').status === 'ambiguous');
+ok('nome repetido é ambíguo, não chute', matchProduct(catalogo, 'Semente de Milho').matches.length === 2);
+ok('texto vazio não corresponde', matchProduct(catalogo, '   ').status === 'none');
+ok('normalização tira acentos', normalizeTerm('  Adúbo   NPK ') === 'adubo npk');
+ok('catálogo vazio não rebenta', matchProduct([], 'ADUBO NPK').status === 'none');
 
 console.log(`\n--- RESULTADO: ${passou} testes passaram, ${falhou} falharam ---`);
 if (falhou > 0) process.exit(1);

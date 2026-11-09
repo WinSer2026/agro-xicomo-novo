@@ -1968,6 +1968,167 @@ export class FirebaseDBService {
     return resultado;
   }
 
+  /**
+   * Alteração de preços isolada, com merge — nunca toca no stock.
+   *
+   * A entrada por IA somava stock e depois gravava o artigo inteiro a partir da
+   * cópia do ecrã: uma venda feita entretanto era apagada. Preços e stock
+   * passam a ser duas operações distintas, cada uma transaccional.
+   */
+  public async updateProductPrices(input: {
+    productId: string;
+    buyingPrice?: number;
+    sellingPrice?: number;
+    operator: string;
+    ipAddress?: string;
+    reason?: string;
+  }): Promise<void> {
+    await this.ensureAuth();
+
+    const ref = doc(db, 'products', String(input.productId));
+    const auditoriaId = `log-preco-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+
+      const produto = snap.data() as Product;
+      const escritas: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+      const mudancas: string[] = [];
+
+      if (typeof input.buyingPrice === 'number' && Number.isFinite(input.buyingPrice)) {
+        escritas.buyingPrice = input.buyingPrice;
+        mudancas.push(`compra ${Number(produto.buyingPrice) || 0} → ${input.buyingPrice}`);
+      }
+      if (typeof input.sellingPrice === 'number' && Number.isFinite(input.sellingPrice)) {
+        escritas.sellingPrice = input.sellingPrice;
+        mudancas.push(`venda ${Number(produto.sellingPrice) || 0} → ${input.sellingPrice}`);
+      }
+      if (mudancas.length === 0) return;
+
+      transaction.set(ref, escritas, { merge: true });
+      transaction.set(
+        doc(db, 'audit_logs', auditoriaId),
+        this.sanitizeData({
+          id: auditoriaId,
+          timestamp: new Date().toISOString(),
+          username: input.operator,
+          ipAddress: input.ipAddress || 'desconhecido',
+          action: 'Alteração de Preço',
+          status: 'Sucesso',
+          level: 'WARNING',
+          entity: 'products',
+          details: `${produto.name}: ${mudancas.join('; ')}.${input.reason ? ` (${input.reason})` : ''}`
+        } as AuditLog)
+      );
+    });
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'price' } }));
+  }
+
+  /**
+   * Requisição de sacos: abre N sacos da revenda para venda a retalho.
+   *
+   * ES-24/25/26: antes gravava `stockQtyBulk`/`stockQtyRetail` absolutos a
+   * partir do estado do ecrã (dois operadores, uma operação perdida), sem
+   * movimento e com utilizador fixo. Agora lê o saldo dentro da transacção,
+   * recusa abrir mais sacos do que existem e deixa movimento + auditoria.
+   *
+   * Nota de modelo: o total não muda — o saco aberto continua a ser
+   * mercadoria. `stockQtyBulk + stockQtyRetail` mantém-se igual a `stockQty`.
+   */
+  public async requisitionSacks(input: {
+    productId: string;
+    sacks: number;
+    operator: string;
+    ipAddress?: string;
+  }): Promise<{ bulk: number; retail: number; total: number; productName: string }> {
+    await this.ensureAuth();
+
+    const sacks = Number(input.sacks);
+    if (!Number.isFinite(sacks) || sacks <= 0) {
+      throw new Error('A quantidade requisitada deve ser maior que zero.');
+    }
+
+    const productId = String(input.productId);
+    const ref = doc(db, 'products', productId);
+    const auditoriaId = `log-req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const movimentoId = `mov-req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+    const resultado = await runTransaction(db, async transaction => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error('Produto não encontrado.');
+
+      const produto = snap.data() as Product;
+      const { hasConversion, rate } = hybridStock(produto);
+      if (!hasConversion) {
+        throw new Error(`${produto.name} não tem embalagem definida: não há sacos para requisitar.`);
+      }
+
+      const bulkAtual = Number(produto.stockQtyBulk) || 0;
+      const retailAtual = Number(produto.stockQtyRetail) || 0;
+      if (sacks > bulkAtual) {
+        throw new Error(
+          `Só existem ${bulkAtual} ${produto.parentUnit} na revenda de ${produto.name}.`
+        );
+      }
+
+      const novoBulk = roundStock(bulkAtual - sacks);
+      const novoRetail = roundStock(retailAtual + sacks * rate);
+      const total = roundStock(Number(produto.stockQty) || 0);
+
+      transaction.set(
+        ref,
+        { stockQtyBulk: novoBulk, stockQtyRetail: novoRetail, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+
+      // Movimento com delta zero: o total não mudou, mas o livro explica a
+      // abertura do saco (ES-25).
+      transaction.set(
+        doc(db, 'stock_movements', movimentoId),
+        this.sanitizeData({
+          id: movimentoId,
+          date: new Date().toISOString(),
+          productId,
+          productName: produto.name,
+          type: 'Ajuste',
+          qtyDelta: 0,
+          unit: produto.baseUnit || 'un',
+          reference: 'Requisição',
+          operatorName: input.operator,
+          note:
+            `${sacks} ${produto.parentUnit} aberto(s) para retalho: ` +
+            `revenda ${bulkAtual} → ${novoBulk}, retalho ${retailAtual} → ${novoRetail}.`
+        } as StockMovement)
+      );
+
+      transaction.set(
+        doc(db, 'audit_logs', auditoriaId),
+        this.sanitizeData({
+          id: auditoriaId,
+          timestamp: new Date().toISOString(),
+          username: input.operator,
+          ipAddress: input.ipAddress || 'desconhecido',
+          action: 'Requisição de Saco para Venda a Retalho',
+          status: 'Sucesso',
+          level: 'INFO',
+          entity: 'products',
+          details:
+            `${produto.name}: ${sacks} ${produto.parentUnit} transferido(s) para retalho ` +
+            `(${sacks * rate} ${produto.baseUnit}). Revista ${bulkAtual} → ${novoBulk}.`
+        } as AuditLog)
+      );
+
+      return { bulk: novoBulk, retail: novoRetail, total, productName: produto.name };
+    });
+
+    this.productsCache = null;
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'requisition' } }));
+    return resultado;
+  }
+
   // --- Dívidas de clientes (vendas a crédito) ---
 
   /** Lê uma única vez o stock de um artigo. Sem cache: é guarda, não relatório. */
@@ -2313,12 +2474,16 @@ export class FirebaseDBService {
   }
 
   /**
-   * Atomic Transaction for Product Transformation (Parte 4):
-   * 1. Deducts original product stock (both total base unit and bulk/retail).
-   * 2. Adds or updates resulting products with calculated proportional costs.
-   * 3. Records transformation loss if any.
-   * 4. Saves the transformation record.
-   * 5. Emits real-time synchronization events.
+   * Transformação / fraccionamento — tudo numa transacção.
+   *
+   * ES-39: o saldo do produto de origem era deduzido às cegas, em `writeBatch`
+   * (que não lê nada). Duas pessoas a transformar ao mesmo tempo deixavam o
+   * artigo com saldo negativo e o PDV a vender o que não existia. Agora o saldo
+   * é lido dentro da transacção, a operação é recusada se não houver quantidade
+   * suficiente, e as três quantidades (base, sacos, retalho) ficam coerentes.
+   *
+   * ES-43/47: cada lado da transformação deixa movimento de stock
+   * (`Transformação`) e uma linha de auditoria com o utilizador real.
    */
   public async addTransformationWithStockUpdate(
     transformation: ProductTransformation,
@@ -2338,83 +2503,216 @@ export class FirebaseDBService {
       qtyToDeduct: number;
       isBulk?: boolean;
       equivalentBaseQty?: number;
-    }
+    },
+    context?: { operator?: string; ipAddress?: string }
   ): Promise<void> {
-    const batch = writeBatch(db);
+    await this.ensureAuth();
 
-    // 1. Deduct Original Product Stock
-    const origDocRef = doc(db, 'products', originalDeduction.productId);
-    if (originalDeduction.isBulk) {
-      batch.update(origDocRef, {
-        stockQtyBulk: increment(-originalDeduction.qtyToDeduct),
-        stockQty: increment(-(originalDeduction.equivalentBaseQty || originalDeduction.qtyToDeduct))
-      });
-    } else {
-      batch.update(origDocRef, {
-        stockQty: increment(-originalDeduction.qtyToDeduct),
-        stockQtyRetail: increment(-originalDeduction.qtyToDeduct)
-      });
-    }
+    const operator = context?.operator || transformation.operatorName || 'Operador';
+    const ipAddress = context?.ipAddress || 'desconhecido';
+    const agora = new Date().toISOString();
 
-    // 2. Add / Update Resulting Products
-    for (const item of itemsToCredit) {
-      const prodDocRef = doc(db, 'products', item.productId);
-      if (item.productData && !item.productData.id) {
-        // Brand new product being created via transformation
-        const newProd: Product = {
-          id: item.productId,
-          code: item.code || ('TRF-' + Math.floor(1000000000000 + Math.random() * 900000000000).toString()),
+    await runTransaction(db, async transaction => {
+      // --- Leituras (todas antes de qualquer escrita) ---
+      const origRef = doc(db, 'products', originalDeduction.productId);
+      const origSnap = await transaction.get(origRef);
+      if (!origSnap.exists()) {
+        throw new Error('O artigo de origem já não existe. Actualize o ecrã e repita a operação.');
+      }
+      const origem = origSnap.data() as Product;
+
+      // Agrega linhas repetidas do mesmo artigo resultante: somar duas vezes o
+      // mesmo id dentro de uma transacção sobrescreveria a primeira.
+      const creditos = new Map<string, { qtyToAdd: number; item: (typeof itemsToCredit)[number] }>();
+      for (const item of itemsToCredit) {
+        const existente = creditos.get(item.productId);
+        if (existente) {
+          existente.qtyToAdd = roundStock(existente.qtyToAdd + (Number(item.qtyToAdd) || 0));
+        } else {
+          creditos.set(item.productId, { qtyToAdd: Number(item.qtyToAdd) || 0, item });
+        }
+      }
+      if (creditos.size === 0) throw new Error('A transformação não tem artigos resultantes.');
+
+      const creditRefs = Array.from(creditos.keys()).map(id => doc(db, 'products', id));
+      const creditSnaps = await Promise.all(creditRefs.map(ref => transaction.get(ref)));
+
+      for (const [, credito] of creditos) {
+        if (credito.qtyToAdd <= 0) {
+          throw new Error(`A quantidade de "${credito.item.name}" tem de ser maior que zero.`);
+        }
+      }
+
+      // --- Verificação de saldo (ES-39) ---
+      const { hasConversion, rate } = hybridStock(origem);
+      const baseAtual = roundStock(Number(origem.stockQty) || 0);
+      const aDeduzir = roundStock(
+        originalDeduction.equivalentBaseQty ??
+          (originalDeduction.isBulk && hasConversion
+            ? (Number(originalDeduction.qtyToDeduct) || 0) * rate
+            : Number(originalDeduction.qtyToDeduct) || 0)
+      );
+
+      if (aDeduzir <= 0) {
+        throw new Error('A quantidade a transformar tem de ser maior que zero.');
+      }
+      if (aDeduzir > baseAtual + 1e-6) {
+        throw new Error(
+          `Stock insuficiente em ${origem.name}: existem ${baseAtual} ${origem.baseUnit || 'un'} ` +
+            `e a transformação precisa de ${aDeduzir}.`
+        );
+      }
+
+      // --- Escritas ---
+      // Um artigo pode ser, ao mesmo tempo, origem e destino (ex.: 1 saco
+      // aberto em 2 sacos do mesmo artigo). Gravar o mesmo documento duas
+      // vezes na mesma transacção perderia a primeira escrita, por isso as
+      // variações são somadas por artigo antes de escrever.
+      const variacoes = new Map<string, number>();
+      variacoes.set(originalDeduction.productId, -aDeduzir);
+      Array.from(creditos.entries()).forEach(([productId, credito]) => {
+        variacoes.set(productId, roundStock((variacoes.get(productId) || 0) + credito.qtyToAdd));
+      });
+
+      const snapsPorId = new Map<string, any>();
+      snapsPorId.set(originalDeduction.productId, origSnap);
+      Array.from(creditos.keys()).forEach((id, idx) => snapsPorId.set(id, creditSnaps[idx]));
+
+      Array.from(variacoes.entries()).forEach(([productId, delta]) => {
+        if (delta === 0) return;
+
+        const snap = snapsPorId.get(productId);
+        const credito = creditos.get(productId);
+
+        if (snap && snap.exists()) {
+          const atual = snap.data() as Product;
+          const total = roundStock((Number(atual.stockQty) || 0) + delta);
+          const escritas: Record<string, unknown> = {
+            stockQty: increment(delta),
+            updatedAt: agora
+          };
+          const split = splitHybrid(total, atual);
+          if (split.stockQtyBulk !== null) {
+            escritas.stockQtyBulk = split.stockQtyBulk;
+            escritas.stockQtyRetail = split.stockQtyRetail;
+          }
+          transaction.set(doc(db, 'products', productId), escritas, { merge: true });
+          return;
+        }
+
+        // Produto novo criado dentro da transformação.
+        if (!credito) return;
+        const item = credito.item;
+        const novo: Product = {
+          id: productId,
+          code:
+            item.code ||
+            'TRF-' + Math.floor(1000000000000 + Math.random() * 900000000000).toString(),
           name: item.name,
           category: item.category || 'Transformados',
-          stockQty: item.qtyToAdd,
-          stockQtyRetail: item.qtyToAdd,
+          stockQty: delta,
+          stockQtyRetail: delta,
           buyingPrice: item.costPrice,
           sellingPrice: item.unitPrice,
           baseUnit: item.baseUnit || 'Pacotes',
           ...item.productData
         };
-        batch.set(prodDocRef, this.sanitizeData(newProd));
-      } else {
-        // Existing product: increase stock and update unit cost if applicable
-        batch.update(prodDocRef, {
-          stockQty: increment(item.qtyToAdd),
-          stockQtyRetail: increment(item.qtyToAdd)
-        });
+        novo.stockQty = delta;
+        novo.stockQtyRetail = delta;
+        transaction.set(doc(db, 'products', productId), this.sanitizeData(novo));
+      });
+
+      // Movimento da saída do artigo de origem.
+      transaction.set(
+        doc(db, 'stock_movements', `mov-trf-out-${transformation.id}`),
+        this.sanitizeData({
+          id: `mov-trf-out-${transformation.id}`,
+          date: agora,
+          productId: originalDeduction.productId,
+          productName: origem.name,
+          type: 'Transformação',
+          qtyDelta: -aDeduzir,
+          unit: origem.baseUnit || 'un',
+          reference: transformation.code,
+          operatorName: operator,
+          note: `Saída para transformação ${transformation.code}`
+        } as StockMovement)
+      );
+
+      // Movimento de cada entrada.
+      Array.from(creditos.entries()).forEach(([productId, credito], idx) => {
+        transaction.set(
+          doc(db, 'stock_movements', `mov-trf-in-${transformation.id}-${idx}`),
+          this.sanitizeData({
+            id: `mov-trf-in-${transformation.id}-${idx}`,
+            date: agora,
+            productId,
+            productName: credito.item.name,
+            type: 'Transformação',
+            qtyDelta: credito.qtyToAdd,
+            unit: credito.item.baseUnit || 'un',
+            reference: transformation.code,
+            operatorName: operator,
+            note: `Entrada da transformação ${transformation.code}`
+          } as StockMovement)
+        );
+      });
+
+      // Perda do fraccionamento (dentro da mesma transacção)
+      if (transformation.lossQuantity > 0) {
+        const lossId = 'loss-trf-' + transformation.id;
+        transaction.set(
+          doc(db, 'losses', lossId),
+          this.sanitizeData({
+            id: lossId,
+            productId: transformation.originalProductId,
+            productName: transformation.originalProductName,
+            quantity: transformation.lossQuantity,
+            unit: transformation.originalUnit,
+            date: transformation.date,
+            reason: 'Perda em Transformação',
+            responsibleEmployeeId: transformation.operatorId,
+            justification:
+              `Perda no fraccionamento da transformação ${transformation.code}: ` +
+              `${transformation.notes || 'Sem observações'}`,
+            costValue: transformation.lossValue,
+            transformationId: transformation.id
+          } as LossRecord)
+        );
       }
-    }
 
-    // 3. Record Loss in Losses collection if lossQuantity > 0
-    if (transformation.lossQuantity > 0) {
-      const lossId = 'loss-trf-' + transformation.id;
-      const lossRecord: LossRecord = {
-        id: lossId,
-        productId: transformation.originalProductId,
-        productName: transformation.originalProductName,
-        quantity: transformation.lossQuantity,
-        unit: transformation.originalUnit,
-        date: transformation.date,
-        reason: 'Perda em Transformação',
-        responsibleEmployeeId: transformation.operatorId,
-        justification: `Perda no fracionamento da transformação ${transformation.code}: ${transformation.notes || 'Sem observações'}`,
-        costValue: transformation.lossValue,
-        transformationId: transformation.id
-      };
-      batch.set(doc(db, 'losses', lossId), this.sanitizeData(lossRecord));
-    }
+      transaction.set(
+        doc(db, 'transformations', transformation.id),
+        this.sanitizeData(transformation)
+      );
 
-    // 4. Save Transformation Record
-    batch.set(doc(db, 'transformations', transformation.id), this.sanitizeData(transformation));
-
-    // 5. Commit atomic transaction
-    await batch.commit();
+      transaction.set(
+        doc(db, 'audit_logs', `log-trf-${transformation.id}`),
+        this.sanitizeData({
+          id: `log-trf-${transformation.id}`,
+          timestamp: agora,
+          username: operator,
+          ipAddress,
+          action: 'Transformação de Produto Realizada',
+          status: 'Sucesso',
+          level: 'INFO',
+          entity: 'transformations',
+          details:
+            `${origem.name}: ${aDeduzir} ${origem.baseUnit || 'un'} (saldo ${baseAtual} → ${roundStock(baseAtual - aDeduzir)}) ` +
+            `transformados em ${creditos.size} artigo(s). Perda: ${transformation.lossQuantity || 0}. ` +
+            `Guia ${transformation.code}.`
+        } as AuditLog)
+      );
+    });
 
     this.productsCache = null;
     this.transformationsCache = null;
+    this.lossesCache = null;
 
-    // Dispatch update events
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'products', action: 'transformation' } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'transformations', id: transformation.id } }));
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'losses', action: 'transformation-loss' } }));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'stock_movements', action: 'transformation' } }));
   }
 
   /**
