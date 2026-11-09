@@ -143,18 +143,59 @@ const app = initializeApp(firebaseConfig);
  * sessão anónima. Se o fornecedor "Anónimo" não estiver ativo no projeto, isto
  * falha sem bloquear: a aplicação continua a funcionar com os fallbacks locais.
  */
+let anonymousAuthError: string | null = null;
+
 export const authReady: Promise<boolean> = (async () => {
   try {
     const { getAuth, signInAnonymously } = await import('firebase/auth');
     const auth = getAuth(app);
     if (auth.currentUser) return true;
     await signInAnonymously(auth);
+    anonymousAuthError = null;
     return true;
   } catch (err) {
+    // Guardado para o diagnóstico do módulo técnico: sem esta mensagem, o
+    // dono só veria "listas vazias" depois de publicar as regras.
+    anonymousAuthError = (err as { code?: string; message?: string })?.code
+      || (err as { message?: string })?.message
+      || String(err);
     console.warn('[Firebase] Sessão anónima indisponível (modo local):', err);
     return false;
   }
 })();
+
+export interface FirebaseAuthDiagnostics {
+  projectId: string;
+  databaseId: string;
+  signedIn: boolean;
+  uid: string | null;
+  error: string | null;
+}
+
+/**
+ * Diagnóstico da ligação ao Firebase, mostrado no módulo técnico.
+ *
+ * Responde à única pergunta que interessa antes de publicar as regras: existe
+ * sessão autenticada? Sem ela, `request.auth != null` recusa tudo.
+ */
+export async function getFirebaseAuthDiagnostics(): Promise<FirebaseAuthDiagnostics> {
+  const base: FirebaseAuthDiagnostics = {
+    projectId: firebaseConfig.projectId,
+    databaseId: firebaseConfig.firestoreDatabaseId,
+    signedIn: false,
+    uid: null,
+    error: anonymousAuthError,
+  };
+  try {
+    const ready = await authReady;
+    const { getAuth } = await import('firebase/auth');
+    const auth = getAuth(app);
+    const uid = auth.currentUser?.uid ?? null;
+    return { ...base, signedIn: ready && !!uid, uid, error: anonymousAuthError };
+  } catch (err) {
+    return { ...base, error: anonymousAuthError || String(err) };
+  }
+}
 
 let dbInstance;
 try {

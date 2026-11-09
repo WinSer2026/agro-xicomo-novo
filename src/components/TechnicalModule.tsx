@@ -2,7 +2,7 @@ import { companyNuit } from '../utils/companyInfo';
 import { safeStorage, safeSessionStorage } from "../utils/safeStorage";
 import React, { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
-import { dbService, type FirestorePageCursor } from '../utils/firebaseDB';
+import { dbService, getFirebaseAuthDiagnostics, type FirestorePageCursor, type FirebaseAuthDiagnostics } from '../utils/firebaseDB';
 import { appConfirm, appPrompt } from '../utils/confirmDialog';
 import { findNumberingGaps, describeGaps, type NumberingKind } from '../utils/numberingAudit';
 import { verifyAuthorizationPassword } from '../utils/authorization';
@@ -296,6 +296,17 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
 
   // B-04: controlo de lacunas na numeração fiscal.
   const [showNumberingModal, setShowNumberingModal] = useState(false);
+  const [firebaseDiag, setFirebaseDiag] = useState<FirebaseAuthDiagnostics | null>(null);
+  const [checkingFirebaseDiag, setCheckingFirebaseDiag] = useState(false);
+
+  const handleCheckFirebaseConnection = async () => {
+    setCheckingFirebaseDiag(true);
+    try {
+      setFirebaseDiag(await getFirebaseAuthDiagnostics());
+    } finally {
+      setCheckingFirebaseDiag(false);
+    }
+  };
   const [numberingReport, setNumberingReport] = useState<Array<{ label: string; descricao: string; buraco: boolean }>>([]);
   const [loadingNumbering, setLoadingNumbering] = useState(false);
 
@@ -2325,6 +2336,54 @@ export default function TechnicalModule({ onSettingsUpdated }: TechnicalModulePr
           </div>
 
           <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+            <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                  <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">Ligação ao Firebase</h4>
+                  <p className="text-xs text-gray-500">
+                    Antes de publicar as regras do Firestore, esta linha tem de dizer "sessão ativa".
+                    Sem sessão, as regras novas recusam leituras e escritas.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleCheckFirebaseConnection()}
+                  disabled={checkingFirebaseDiag}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-800 disabled:opacity-60 text-white rounded-md text-xs font-black transition-colors"
+                >
+                  <span className={`material-symbols-outlined text-[16px] ${checkingFirebaseDiag ? 'animate-spin' : ''}`}>sync</span>
+                  Verificar ligação
+                </button>
+              </div>
+
+              {firebaseDiag && (
+                <div className="grid gap-2 sm:grid-cols-2 text-xs">
+                  <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2">
+                    <span className="block text-[10px] font-bold uppercase text-gray-500">Projeto</span>
+                    <span className="font-mono text-slate-800 break-all">{firebaseDiag.projectId}</span>
+                  </div>
+                  <div className={`rounded-md border px-3 py-2 ${firebaseDiag.signedIn ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
+                    <span className="block text-[10px] font-bold uppercase text-gray-500">Sessão anónima</span>
+                    <span className={`font-bold ${firebaseDiag.signedIn ? 'text-emerald-800' : 'text-red-800'}`}>
+                      {firebaseDiag.signedIn
+                        ? `ativa (${firebaseDiag.uid ? firebaseDiag.uid.slice(0, 8) + '…' : 'uid oculto'})`
+                        : 'inativa — ative "Anónimo" em Authentication'}
+                    </span>
+                  </div>
+                  <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2 sm:col-span-2">
+                    <span className="block text-[10px] font-bold uppercase text-gray-500">Base de dados</span>
+                    <span className="font-mono text-slate-800 break-all">{firebaseDiag.databaseId}</span>
+                  </div>
+                  {firebaseDiag.error && (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 sm:col-span-2">
+                      <span className="block text-[10px] font-bold uppercase text-gray-500">Erro devolvido</span>
+                      <span className="font-mono text-amber-900 break-all">{firebaseDiag.error}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
               <div>
                 <h4 className="font-headline-md text-headline-md text-gray-800 font-bold">
