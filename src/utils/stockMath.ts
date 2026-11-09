@@ -96,3 +96,24 @@ export function physicalDelta(systemBase: number, countedBase: number): number {
 export function stockLossValue(baseQty: number, buyingPrice: number): number {
   return Math.round(Math.abs(roundStock(baseQty)) * (Number(buyingPrice) || 0) * 100) / 100;
 }
+
+/**
+ * ES-11: quantidade/peso escrito num formulário nunca é negativo.
+ * Vazio, texto ou lixo → 0; negativos → 0. Arredonda a milésimos.
+ */
+export function nonNegative(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  if (value === '' || value === null || value === undefined) return fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return n < 0 ? 0 : roundStock(n);
+}
+
+/**
+ * ES-19: factor de conversão (kg por saco) tem de ser > 1.
+ * Um zero acidental dividia o custo do quilo por zero e gravava `Infinity`.
+ */
+export function safeConversionRate(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return roundStock(n);
+}

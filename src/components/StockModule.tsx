@@ -19,6 +19,7 @@ import {
 import TransformationModal from './TransformationModal';
 import TransformationView from './TransformationView';
 import { DateRangeFilter } from './DateRangeFilter';
+import { nonNegative, safeConversionRate } from '../utils/stockMath';
 import { countedLosses } from '../utils/losses';
 import { collectCategories, canonicalCategory } from '../utils/categories';
 import { DateRangePreset, getDateRangeFromPreset, isDateInRange, formatDatePT, toLocalDateKey } from '../utils/dateRangeHelper';
@@ -42,6 +43,8 @@ interface StockModuleProps {
 
 export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [products, setProducts] = useState<Product[]>([]);
+  /** ES-50: quando é que estes números foram lidos do servidor. */
+  const [dataSnapshotAt, setDataSnapshotAt] = useState<string | null>(null);
   const [losses, setLosses] = useState<LossRecord[]>([]);
   const [categories, setCategories] = useState<string[]>(CATEGORIAS_BASE);
   
@@ -579,6 +582,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     // ES-51: uma lista canónica — «Adubos», «adubos» e «adubos » são a mesma
     // categoria; o rótulo mostrado é o mais usado.
     setCategories(collectCategories(updatedProducts, CATEGORIAS_BASE));
+    setDataSnapshotAt(new Date().toISOString());
   };
 
   /**
@@ -617,6 +621,18 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     }
   };
 
+  /**
+   * ES-50: um relatório de stock tem de dizer de quando são os números.
+   * Sem isto, um PDF impresso às 9h pode ter as quantidades das 8h e ninguém
+   * sabe — nem quem o arquiva, nem quem o lê no município.
+   */
+  const describeSnapshot = () => {
+    const lido = dataSnapshotAt ? new Date(dataSnapshotAt) : new Date();
+    const hora = lido.toLocaleTimeString('pt-MZ', { hour: '2-digit', minute: '2-digit' });
+    const dia = lido.toLocaleDateString('pt-MZ');
+    return `Dados lidos às ${hora} de ${dia} · ${products.length} artigos no catálogo`;
+  };
+
   const triggerToast = (msg: string, tipo: 'success' | 'error' | 'warning' = 'success') => {
     setToastType(tipo);
     setToastMessage(msg);
@@ -652,7 +668,17 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (priceError) {
       setNewProdError(priceError);
-      triggerToast(priceError);
+      triggerToast(priceError, 'error');
+      return;
+    }
+
+    // ES-11: quantidade inicial negativa não é mercadoria.
+    const qtdInicial = isBulkEnabled
+      ? (Number(newProdQtyBulk) * Number(newConversionRate)) + Number(newProdQtyRetail)
+      : Number(newProdQty);
+    if (!Number.isFinite(qtdInicial) || qtdInicial < 0) {
+      setNewProdError('A quantidade inicial não pode ser negativa.');
+      triggerToast('A quantidade inicial não pode ser negativa.', 'error');
       return;
     }
 
@@ -682,6 +708,26 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         return;
       }
       const finalProdName = newProdName.trim().toUpperCase();
+
+      /**
+       * ES-13: nome repetido. Não é proibido (o mesmo produto pode vir de dois
+       * fornecedores), mas tem de ser uma decisão — não um acidente que deixa
+       * dois «MILHO» na lista do PDV.
+       */
+      const nomeNormalizado = finalProdName.replace(/\s+/g, ' ').toLowerCase();
+      const mesmoNome = products.find(
+        p => String(p.name || '').replace(/\s+/g, ' ').trim().toLowerCase() === nomeNormalizado
+      );
+      if (mesmoNome) {
+        const continuar = await appConfirm(
+          `Já existe um artigo chamado "${mesmoNome.name}" (código ${mesmoNome.code || '—'}).\n\n` +
+            'Criar outro com o mesmo nome dificulta a escolha no PDV. Continuar mesmo assim?'
+        );
+        if (!continuar) {
+          setIsSubmitting(false);
+          return;
+        }
+      }
 
       const computedStockQty = isBulkEnabled 
         ? (Number(newProdQtyBulk) * Number(newConversionRate)) + Number(newProdQtyRetail) 
@@ -869,6 +915,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setTextColor(100, 116, 139);
     doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+    doc.text(describeSnapshot(), 15, 33);
 
     doc.setDrawColor(190, 18, 60);
     doc.setLineWidth(1);
@@ -1026,6 +1073,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setTextColor(100, 116, 139);
     doc.text(`${cName} • NUIT: ${companyNuit(settings?.companyNuit)}`, 15, 25);
     doc.text(`Gerado em: ${new Date().toLocaleString('pt-MZ')}`, 15, 29);
+    doc.text(describeSnapshot(), 15, 33);
 
     doc.setDrawColor(0, 106, 78);
     doc.setLineWidth(1);
@@ -1167,10 +1215,11 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
     doc.setTextColor(100, 116, 139);
     doc.text(`${cName} • NUIT: ${cNuit}`, 15, 23);
     doc.text(`Emissão: ${new Date().toLocaleString('pt-MZ')} • Total de Categorias: ${sortedCategories.length}`, 15, 27);
+    doc.text(describeSnapshot(), 15, 31);
 
     doc.setDrawColor(0, 106, 78);
     doc.setLineWidth(1);
-    doc.line(15, 30, 195, 30);
+    doc.line(15, 34, 195, 34);
 
     // Summary Box
     doc.saveGraphicsState();
@@ -1707,15 +1756,24 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
     if (priceError) {
       setAdjustError(priceError);
-      triggerToast(priceError);
+      triggerToast(priceError, 'error');
+      return;
+    }
+
+    // ES-11/ES-19: nem quantidade negativa, nem conversão que divida por zero.
+    const conversaoSegura = safeConversionRate(editConversionRate);
+    const computedStockQty = isBulkEnabled
+      ? nonNegative(editStockQtyBulk) * conversaoSegura + nonNegative(editStockQtyRetail)
+      : nonNegative(editStockQty);
+
+    if (!Number.isFinite(computedStockQty) || computedStockQty < 0) {
+      setAdjustError('A quantidade em stock não pode ser negativa.');
+      triggerToast('A quantidade em stock não pode ser negativa.', 'error');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const computedStockQty = isBulkEnabled
-        ? (Number(editStockQtyBulk) * Number(editConversionRate)) + Number(editStockQtyRetail)
-        : Number(editStockQty);
 
       const prevQty = selectedProduct.stockQty;
 
@@ -1744,10 +1802,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         category: canonicalCategory(editCategory, categories),
         baseUnit: editBaseUnit,
         parentUnit: editParentUnit || undefined,
-        conversionRate: editConversionRate > 1 ? Number(editConversionRate) : undefined,
+        conversionRate: conversaoSegura > 1 ? conversaoSegura : undefined,
         buyingPriceBulk: isBulkEnabled ? Number(editBuyingPriceBulk) : undefined,
         buyingPrice: isBulkEnabled
-          ? Number(editBuyingPriceBulk) / Number(editConversionRate)
+          ? Number(editBuyingPriceBulk) / conversaoSegura
           : Number(editBuyingPrice),
         sellingPrice: Number(editSellingPrice),
         sellingPriceBulk: isBulkEnabled ? Number(editSellingPriceBulk) : undefined,
@@ -3615,7 +3673,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newConversionRate}
-                          onChange={(e) => setNewConversionRate(Number(e.target.value))}
+                          onChange={(e) => setNewConversionRate(safeConversionRate(e.target.value))}
                           className="w-full border border-gray-300 rounded px-1.5 py-1 text-[10.5px] bg-white focus:outline-none font-bold text-center"
                         />
                       </div>
@@ -3701,7 +3759,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       <input
                         type="number"
                         value={newProdQty}
-                        onChange={(e) => setNewProdQty(Number(e.target.value))}
+                        onChange={(e) => setNewProdQty(nonNegative(e.target.value))}
                         className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-bold text-slate-800"
                       />
                     </div>
@@ -3742,7 +3800,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={newProdSellPriceBulk || ''}
-                            onChange={(e) => setNewProdSellPriceBulk(Number(e.target.value))}
+                            onChange={(e) => setNewProdSellPriceBulk(nonNegative(e.target.value))}
                             className="w-full border border-emerald-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-emerald-500 font-bold bg-emerald-50 text-emerald-800"
                             placeholder="Ex: 4500"
                           />
@@ -3755,7 +3813,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={newProdSellPrice || ''}
-                            onChange={(e) => setNewProdSellPrice(Number(e.target.value))}
+                            onChange={(e) => setNewProdSellPrice(nonNegative(e.target.value))}
                             className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-primary bg-white font-bold"
                             placeholder="Ex: 100"
                           />
@@ -3771,7 +3829,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newProdBuyPrice || ''}
-                          onChange={(e) => setNewProdBuyPrice(Number(e.target.value))}
+                          onChange={(e) => setNewProdBuyPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-semibold"
                         />
                       </div>
@@ -3783,7 +3841,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={newProdSellPrice || ''}
-                          onChange={(e) => setNewProdSellPrice(Number(e.target.value))}
+                          onChange={(e) => setNewProdSellPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] focus:outline-none focus:border-primary bg-white font-semibold"
                         />
                       </div>
@@ -4089,7 +4147,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editConversionRate}
-                          onChange={(e) => setEditConversionRate(Number(e.target.value))}
+                          onChange={(e) => setEditConversionRate(safeConversionRate(e.target.value))}
                           className="w-full border border-gray-300 rounded px-1.5 py-1 text-[10.5px] bg-white focus:outline-none text-center font-bold"
                         />
                       </div>
@@ -4263,7 +4321,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={editSellingPriceBulk || ''}
-                            onChange={(e) => setEditSellingPriceBulk(Number(e.target.value))}
+                            onChange={(e) => setEditSellingPriceBulk(nonNegative(e.target.value))}
                             className="w-full border border-emerald-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-emerald-500 font-bold bg-emerald-50 text-emerald-800"
                           />
                         </div>
@@ -4275,7 +4333,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                           <input
                             type="number"
                             value={editSellingPrice || ''}
-                            onChange={(e) => setEditSellingPrice(Number(e.target.value))}
+                            onChange={(e) => setEditSellingPrice(nonNegative(e.target.value))}
                             className="w-full border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-primary bg-white font-bold"
                           />
                         </div>
@@ -4288,7 +4346,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editBuyingPrice || ''}
-                          onChange={(e) => setEditBuyingPrice(Number(e.target.value))}
+                          onChange={(e) => setEditBuyingPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] font-bold text-center focus:outline-none bg-white"
                         />
                       </div>
@@ -4298,7 +4356,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                         <input
                           type="number"
                           value={editSellingPrice || ''}
-                          onChange={(e) => setEditSellingPrice(Number(e.target.value))}
+                          onChange={(e) => setEditSellingPrice(nonNegative(e.target.value))}
                           className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-[11px] font-bold text-center focus:outline-none bg-white"
                         />
                       </div>
@@ -4347,8 +4405,10 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                 <div className="flex gap-2">
                   <input
                     type="number"
+                    min="0"
+                    step="0.001"
                     value={lossQty}
-                    onChange={(e) => setLossQty(Number(e.target.value))}
+                    onChange={(e) => setLossQty(nonNegative(e.target.value))}
                     className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm text-center font-bold"
                   />
                   {lossProduct?.parentUnit && Number(lossProduct.conversionRate) > 1 ? (

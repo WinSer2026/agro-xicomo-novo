@@ -222,6 +222,8 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 | 18 | Exportações mostram a hora e a origem dos dados. | ES-50 |
 | 19 | Testes automáticos por bloco (novo produto, ajuste, quebra, contagem, transformação, IA). | todos |
 
+*(15 a 19 executadas em 2026-11-09 — ver secção 7.)*
+
 **Total estimado:** 3 dias de trabalho, dos quais 1 dia para os sete P0.
 
 ---
@@ -229,15 +231,15 @@ saldo é posto a zero — sem autorização, sem confirmação, a cada carregame
 ## 6. Verificação disponível
 
 ```
-npm run test:all     → 272 asserções, 0 falhas
+npm run test:all     → 281 asserções, 0 falhas
 npx tsc --noEmit     → sem erros
 npx vite build       → sem erros
 ```
 
 A aritmética do inventário (conversão saco↔base, derivação de sacos/retalho, travão do saldo negativo,
 diferença de contagem, valor do prejuízo) vive agora em `src/utils/stockMath.ts` e é testada sem
-Firestore: 50 asserções novas em `test/stock_debts_test.ts` (25 de aritmética de stock, 10 de
-correspondência de artigo, 7 de perdas anuladas, 8 de categorias). O que **não** é testável daqui é o
+Firestore: 59 asserções novas em `test/stock_debts_test.ts` (25 de aritmética de stock, 10 de
+correspondência de artigo, 7 de perdas anuladas, 8 de categorias, 9 de validação de quantidades). O que **não** é testável daqui é o
 comportamento transaccional real (dois postos a ajustar ao mesmo tempo) — isso exige dois caixas.
 
 **O que não se pode provar daqui:** comportamentos com dois postos reais, impressão, e o efeito de
@@ -317,4 +319,22 @@ antiga continua legível; anular uma transformação depois de já ter vendido u
 (deve ser recusado, não deixar stock negativo); anular uma transformação intacta e ver a perda
 riscada em «Quebras» sem alterar o prejuízo total.
 
-### Fase 4 — por executar
+### Fase 4 — executada · 2026-11-09
+
+| # | Acção | Estado | Onde |
+|---|---|---|---|
+| 15 | Quantidades negativas recusadas | **feito** | `nonNegative()` e `safeConversionRate()` em `stockMath.ts`, aplicados em todos os campos de quantidade, preço e conversão do novo produto, do formulário de ajuste e do modal de quebra; a gravação voltou a validar antes de escrever (ES-11, ES-19) |
+| 16 | Campos mortos do formulário de novo produto | **não procede** | Verifiquei linha a linha: `newReceivedSacks`, `newSacksForWholesale` e `newSacksForRetail` alimentam `newProdQtyBulk`/`newProdQtyRetail`, que entram no stock inicial. O achado da auditoria estava errado — os campos funcionam |
+| 17 | Aviso de nome repetido | **feito** | antes de gravar, procura o mesmo nome (sem maiúsculas nem espaços a mais) e pede confirmação com o código do artigo existente (ES-13). A auditoria da criação já estava feita na Fase 1 (ES-09) |
+| 18 | Relatórios dizem de quando são os números | **feito** | carimbo `Dados lidos às HH:MM de DD/MM/AAAA · N artigos` nos três PDFs de stock (baixo stock, alterados, por categorias), ao lado da hora de emissão (ES-50) |
+| 19 | Testes automáticos por bloco | **parcial** | 281 asserções, todas verdes. Cobre o que é aritmética pura: conversão, derivação de sacos/retalho, travão do saldo negativo, contagem, valor do prejuízo, correspondência de artigo, perdas anuladas, categorias e validação de quantidades. O que depende de Firestore (transacções, dois postos) continua a exigir prova num caixa |
+
+**O que a Fase 4 não prova:** nada do que precisa de servidor. Um `runTransaction` mal escrito compila
+e passa nos testes puros — só se vê com dois postos a mexer no mesmo artigo ao mesmo tempo.
+
+#### Achados que a auditoria apontou e que **não se confirmaram**
+
+| ID | O que dizia | Verificação |
+|---|---|---|
+| **ES-12** | Campos de sacos do formulário de novo produto «nunca usados» | Usados: alimentam o stock inicial (ver linha 16) |
+| **ES-18** | Auditoria do ajuste regista um número e grava outro | Deixou de ser possível: o `adjustStock` lê o saldo dentro da transacção e escreve na auditoria o que realmente mudou |

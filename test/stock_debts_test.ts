@@ -10,7 +10,9 @@ import {
   roundStock,
   splitHybrid,
   stockLossValue,
-  toBaseQty
+  toBaseQty,
+  nonNegative,
+  safeConversionRate
 } from '../src/utils/stockMath';
 import { matchProduct, normalizeTerm } from '../src/utils/productMatch';
 import { isCountedLoss, countedLosses, totalLossValue, lossQuantityByProduct } from '../src/utils/losses';
@@ -167,6 +169,17 @@ ok('categorias base sem artigos aparecem', collectCategories([], ['Sementes'])[0
 ok('categoria vazia é ignorada', collectCategories([{ category: '  ' }, { category: '' }]).length === 0);
 ok('escrita livre reaproveita a existente', canonicalCategory(' adubos', ['Adubos', 'Sementes']) === 'Adubos');
 ok('categoria nova mantém-se', canonicalCategory(' Irrigação ', ['Adubos']) === 'Irrigação');
+
+// ------------------------------------ quantidades escritas no formulário (ES-11)
+ok('quantidade negativa vira zero', nonNegative(-5) === 0);
+ok('campo vazio vira zero', nonNegative('') === 0);
+ok('texto vira zero', nonNegative('abc') === 0);
+ok('decimal é aceite', nonNegative('12.5') === 12.5);
+ok('positivo passa tal e qual', nonNegative(7) === 7);
+ok('conversão zero não divide por zero', safeConversionRate(0) === 1);
+ok('conversão em texto é aceite', safeConversionRate('50') === 50);
+ok('conversão negativa é recusada', safeConversionRate(-3) === 1);
+ok('conversão vazia fica 1', safeConversionRate(undefined) === 1);
 
 console.log(`\n--- RESULTADO: ${passou} testes passaram, ${falhou} falharam ---`);
 if (falhou > 0) process.exit(1);
