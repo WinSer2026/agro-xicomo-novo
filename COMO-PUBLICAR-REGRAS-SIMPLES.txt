@@ -1,0 +1,95 @@
+════════════════════════════════════════════════════════════
+  COMO PUBLICAR AS REGRAS — VERSÃO SIMPLES (v2)
+  O botão "Desenvolver e testar" era o errado: abre uma janela
+  sobre emuladores. Feche essa janela no X e faça assim:
+════════════════════════════════════════════════════════════
+
+
+ANTES — se quiser tentar acabar na página onde está
+  Na captura, o painel do texto é mais largo do que a janela: há uma barra
+  de deslocamento em baixo. Isso significa que os botões de edição podem
+  estar fora do ecrã, à direita.
+  a) Aperte Ctrl e "-" duas vezes (a página fica mais pequena).
+  b) Maximize a janela do navegador.
+  c) Arraste a barra de baixo para a direita.
+  Se aparecer "Editar" (pencil) ou "Publicar", use: clique em Editar, cole o
+  texto, Publicar.
+  Se continuar sem botão de publicar, siga para o PASSO 1 abaixo.
+
+
+PASSO 1 — Abrir outra consola (a do Google Cloud)
+  Cole este endereço no navegador:
+
+      https://console.cloud.google.com/databases?project=gen-lang-client-0896153566
+
+  Se pedir para escolher projeto, escolha:  gen-lang-client-0896153566
+
+
+PASSO 2 — Escolher a base de dados
+  Clique no nome comprido que começa por:
+
+      ai-studio-remixagroxicomoe-5bee6408-...
+
+
+PASSO 3 — Abrir as regras
+  No menu do lado esquerdo, clique em "Segurança" (Security).
+  Depois clique no separador "Firestore Rules".
+
+
+PASSO 4 — Criar uma versão nova para editar
+  Clique no botão "Novo conjunto de regras" (New ruleset).
+  Se aparecer a opção "Clonar conjunto de regras" (Clone ruleset), também
+  serve — clone, e siga igual.
+
+
+PASSO 5 — Colocar o nosso texto  (ATENÇÃO: copie O FICHEIRO CERTO)
+  a) Abra o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt  (na pasta do sistema).
+     Tem de começar assim, na primeira linha:
+
+         rules_version = '2';
+
+     e tem 104 linhas. A última linha é só:  }
+     Se o ficheiro que abriu começa com "====" ou com "PASSO A PASSO" ou com
+     "COMO PUBLICAR", está no ficheiro ERRADO — esse é o guia, não as regras.
+
+  b) Aperte Ctrl+A e depois Ctrl+C.
+
+  c) Volte à consola. Clique dentro do editor de texto.
+     Aperte Ctrl+A (seleciona tudo o que lá está) e depois Delete/Backspace.
+     Confirme que a caixa ficou VAZIA.
+     Só então Ctrl+V.
+
+  d) Confirme, no texto colado:
+       primeira linha .... rules_version = '2';
+       última linha ...... }
+       existe a linha .... match /cash_sessions/{docId}
+
+
+PASSO 6 — Publicar
+  Clique em "Publicar" (Publish).
+  Espere a mensagem a dizer que publicou.
+
+
+PASSO 7 — Ver se funcionou
+  Abra o programa.
+  Aperte Ctrl+Shift+R (atualiza a página).
+  Clique no botão do turno e abra um turno.
+  Se abrir, está feito.
+
+
+ERRO "Missing 'match' keyword" OU "token recognition error"
+  Isto significa que foi colado o texto errado (o guia, não as regras).
+  Os guias têm setas, "&", "·", "==", endereços https — tudo isso é inválido
+  dentro das regras.
+  Solução: apague tudo (Ctrl+A, Delete) e cole só o conteúdo de
+  REGRAS-FIRESTORE-PARA-COLAR.txt, que começa em rules_version.
+
+
+SE ALGO CORRER MAL
+  Na mesma página "Firestore Rules" há uma lista/timeline das versões
+  anteriores. Escolha a versão de 24/08/2026 e publique-a de novo.
+  Depois envie-me uma mensagem a dizer o que aconteceu.
+
+SE NÃO ENCONTRAR ALGUM BOTÃO
+  Tire uma foto do ecrã e envie. Diga em que passo parou.
+════════════════════════════════════════════════════════════

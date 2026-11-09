@@ -1,0 +1,307 @@
+══════════════════════════════════════════════════════════════════════════════
+  PASSO A PASSO — PUBLICAR AS REGRAS DO FIRESTORE
+  AGRO - XICOMO & SERVIÇOS, LDA  ·  versão 3 (09/11/2026)
+  Revista depois de se ver o ecrã real da consola.
+══════════════════════════════════════════════════════════════════════════════
+
+  ESTADO: ✔ REGRAS PUBLICADAS PELO DONO EM 09/11/2026 (confirmado).
+  Este documento fica como registo do procedimento e para a próxima alteração.
+  Falta apenas a verificação final: abrir o sistema, abrir e fechar um turno.
+
+  A RESPOSTA CURTA
+  ----------------
+  O separador já não se chama "Regras". Na consola nova chama-se
+
+        S E G U R A N Ç A
+
+  Está na barra de separadores, ao lado de "Dados":
+
+        Dados  |  Segurança  |  Índices  |  Recuperação de desastres  |  Uso
+
+  É lá dentro que fica o editor das regras (e o simulador). Não é preciso
+  procurar mais nada nem mudar de página.
+
+  [CONFIRMADO] pela captura de ecrã do seu posto: a base de dados já está
+  escolhida (ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335),
+  a barra de separadores é a que está acima, e o separador "Regras" não existe
+  com esse nome nesta versão da consola.
+  [CONFIRMADO] segunda captura (09/11/2026): o menu lateral tem também uma
+  entrada "Segurança" que NÃO serve para isto — abre App Check, Authentication
+  e Phone Verification. O editor das regras está no separador do TOPO.
+
+    Projeto ........: gen-lang-client-0896153566
+    Base de dados ...: ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
+    Ficheiro a colar .: REGRAS-FIRESTORE-PARA-COLAR.txt  (pasta do sistema)
+
+  ✔ LOGIN "ANÓNIMO" — CONFIRMADO LIGADO PELO DONO EM 09/11/2026.
+    Pré-requisito cumprido: pode publicar. (Se algum dia desligar este
+    fornecedor, o sistema perde acesso aos dados — é a única dependência
+    externa das regras.)
+    Verificação, se precisar: Authentication → Sign-in method → Anónimo.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  CHECKLIST CURTA — PARA FAZER AGORA (login anónimo já confirmado)
+══════════════════════════════════════════════════════════════════════════════
+
+  [ ] 1. Está na página do Firestore, base ai-studio-remixagroxicomoe-…
+  [ ] 2. Separador do TOPO "Segurança" (não o menu lateral)
+  [ ] 3. Botão azul "Desenvolver e testar" → entra em modo de edição
+  [ ] 4. Guardar o texto atual: Ctrl+A, Ctrl+C → Notepad → REGRAS-ANTERIORES.txt
+  [ ] 5. Abrir REGRAS-FIRESTORE-PARA-COLAR.txt → Ctrl+A, Ctrl+C
+  [ ] 6. No editor: Ctrl+A, Ctrl+V
+  [ ] 7. Conferir: rules_version = '2';  ·  match /cash_sessions/{docId}  ·  última linha }
+  [ ] 8. Publicar → confirmar versão nova com a data de hoje no histórico
+  [ ] 9. Provar: products sem auth = Denied / com auth = Allowed
+  [ ] 10. No programa: abrir turno, fechar turno com a mesma contagem,
+           diferença 0,00 MT e turno seguinte aberto
+
+  Depois de publicar: recarregue o sistema com Ctrl+Shift+R (limpa a versão
+  antiga da página que está em cache).
+
+
+══════════════════════════════════════════════════════════════════════════════
+  OS 8 PASSOS (detalhe)
+══════════════════════════════════════════════════════════════════════════════
+
+  PASSO 1 — Abrir a página onde já está.
+  -------------------------------------
+  A página da captura serve. Se precisar de voltar a ela, o atalho é:
+
+      https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore
+
+  Confirme, no seletor por cima do título (o campo com o nome comprido), que
+  está escolhida:
+
+      ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335
+
+  Na captura já está. ✔
+
+
+  ══════════════════════════════════════════════════════════════════════════
+   ATENÇÃO MÁXIMA — O QUE ESTÁ PUBLICADO AGORA (visto na 3.ª captura)
+  ══════════════════════════════════════════════════════════════════════════
+
+  A captura mostra o editor já aberto, com a versão de 24/08/2026 · 00:37.
+  Dois factos que mudam o plano:
+
+  1) [CONFIRMADO pela captura] O texto publicado diz, nos próprios comentários:
+       "as coleções operacionais permanecem legíveis/escrevíveis sem um token
+        Firebase Auth. A protecção definitiva exige a FASE 2"
+     Isto significa que as regras que estão AGORA em produção NÃO exigem
+     autenticação nas colecções de operação. Ou seja: a base está aberta a
+     quem tiver o endereço do projeto.
+
+     Consequência prática: repor esta versão "para voltar atrás" REABRE a base.
+     Só o faça se o sistema ficar inutilizável e por poucos minutos.
+
+  2) [CONFIRMADO pela captura] O histórico à esquerda existe (4 versões: 24/08
+     e três de 07/08). A reversão por histórico É possível nesta consola —
+     mas o ponto 1 continua a valer: a versão anterior é a aberta.
+
+  3) [CONSEQUÊNCIA IMPORTANTE] O teste "o sistema funciona agora" NÃO prova
+     que o login anónimo está ligado — hoje funciona precisamente porque as
+     regras não pedem autenticação. A verificação do login anónimo deixa de
+     ser recomendável e passa a ser OBRIGATÓRIA antes de publicar:
+
+       https://console.firebase.google.com/project/gen-lang-client-0896153566/authentication/providers
+       → fornecedor "Anónimo" tem de estar ATIVADO.
+       → e em "Users"/"Utilizadores" deve haver utilizadores anónimos.
+
+     Se publicar as regras novas com o login anónimo desligado, o sistema
+     fica sem acesso aos dados (listas vazias, erros "permission-denied").
+
+  Bom sinal: há versão de hoje? Não. A última é de 24/08 — confirma que as
+  regras que preparei nunca foram publicadas. É isso que vamos corrigir.
+
+
+  PASSO 2 — Carregar em "Segurança" — O SEPARADOR DO TOPO, NÃO O DO MENU.
+  ---------------------------------------------------------------------
+  ⚠ ATENÇÃO, É AQUI QUE SE PERDE TEMPO:
+
+     Há DOIS sítios com o nome "Segurança":
+       • o MENU LATERAL (coluna da esquerda) — "Segurança" é uma CATEGORIA
+         de produtos e abre App Check / Authentication / Phone Verification.
+         NÃO é o que queremos.
+       • o SEPARADOR DO TOPO — na barra horizontal imediatamente à direita de
+         "Dados":  Dados | Segurança | Índices | Recuperação de desastres | Uso
+         É ESTE. Está na mesma linha de "Dados", por cima do painel de dados.
+
+  [CONFIRMADO] Captura de ecrã de 09/11/2026: o ponteiro foi para o item
+  "Segurança" do menu lateral e abriu a lista App Check / Authentication /
+  Phone Verification. Esse caminho é o errado.
+
+  O que fazer:
+     • ignore a coluna da esquerda;
+     • clique na palavra "Segurança" que está na barra do topo, ao lado de
+       "Dados" (a que fica sublinhada quando selecionada).
+
+  Depois disso deve aparecer o editor das regras (texto parecido com o do
+  ficheiro REGRAS-FIRESTORE-PARA-COLAR.txt) e, ao lado ou por cima, o
+  simulador.
+
+  Se a página de "Segurança" abrir como um resumo com cartões (App Check,
+  Authentication, Firestore Rules…), clique no cartão/ligação das REGRAS do
+  Firestore ("Firestore Rules" / "Regras").
+
+  [CONFIRMADO] 3.ª captura: já está no sítio certo. Vê o histórico de versões
+  à esquerda e o texto das regras à direita.
+
+  ⚠ CORRIGIDO NA 4.ª CAPTURA: o botão azul "Desenvolver e testar" NÃO abre o
+  editor — abre uma janela sobre o Pacote de emuladores (testar localmente).
+  Feche-a no X. O editor desta consola nova não está identificado com certeza;
+  o caminho documentado e explícito é o da consola do Google Cloud
+  (opção A abaixo, agora recomendada).
+
+  Nota: a vista que está a ver parece ser a de consulta/histórico. Se
+  conseguir escrever dentro do texto (clique e tente), pode editar já; se não,
+  use o botão "Desenvolver e testar".
+
+  Atalho direto, se preferir colar no endereço:
+  [PROVÁVEL] https://console.firebase.google.com/project/gen-lang-client-0896153566/firestore/databases/ai-studio-remixagroxicomoe-5bee6408-7aeb-4603-9bb5-b56ad6507335/security/rules
+  (o formato do endereço segue o mesmo padrão do "/data" que está na captura;
+   se der "página não encontrada", use o separador — é o caminho garantido)
+
+  Se dentro de "Segurança" houver sub-separadores, o que interessa é
+  "Regras" / "Rules". O "Simulador" será usado no Passo 7.
+
+
+  PASSO 3 — Guardar as regras que lá estão (1 minuto).
+  ---------------------------------------------------
+  • Clique dentro do texto das regras.
+  • Ctrl+A (seleciona tudo) e Ctrl+C (copia).
+  • Abra o Notepad / Bloco de notas, cole e grave no Ambiente de Trabalho
+    como  REGRAS-ANTERIORES.txt
+  • Serve para voltar exatamente ao que estava, se algo correr mal.
+    (Nesta consola, o histórico de versões pode não estar disponível para
+     bases de dados com nome — a cópia é a rede de segurança.)
+
+
+  PASSO 4 — Copiar as regras novas.
+  ---------------------------------
+  • Abra na pasta do sistema o ficheiro  REGRAS-FIRESTORE-PARA-COLAR.txt
+  • Confirme que a PRIMEIRA linha é     rules_version = '2';
+    e que o ficheiro tem 104 linhas, com a última linha a ser  }
+  • Ctrl+A e Ctrl+C.
+
+  ⚠ O ficheiro é cópia PURA das regras: não tem cabeçalho nem instruções.
+    Se o ficheiro aberto começar com "====", "PASSO A PASSO" ou "COMO
+    PUBLICAR", é o guia errado. As regras do Firestore só aceitam comentários
+    de uma linha (//); colar texto de guia produz erros como "Missing 'match'
+    keyword" e "token recognition error".
+
+
+  PASSO 5 — Colar por cima das antigas.
+  ------------------------------------
+  • No editor da consola: Ctrl+A (seleciona as antigas) e Ctrl+V.
+  • Confirme três coisas antes de publicar:
+       – a primeira instrução é   rules_version = '2';
+       – existe a linha           match /cash_sessions/{docId}
+       – a última linha é         }
+
+
+  PASSO 6 — Publicar.
+  -------------------
+  • Botão "Publicar" / "Publish" (por cima ou por baixo do editor).
+  • Espera-se uma confirmação com a hora: "Regras publicadas" /
+    "Rules published".
+  • Se der erro de sintaxe: o texto foi colado incompleto. Repita o Passo 4.
+  • Enquanto a publicação não for aceite, as regras antigas continuam a valer.
+
+
+  PASSO 7 — Provar (não salte).
+  -----------------------------
+  No simulador da própria página ("Simulador" / "Rules Playground"):
+      a) products · get · SEM autenticação  → deve dar DENIED
+      b) products · get · COM autenticação  → deve dar ALLOWED
+
+  No programa:
+      c) abrir o sistema → botão do turno → abrir turno com a contagem da
+         gaveta → deve abrir sem erro;
+      d) fechar o turno com a mesma contagem → diferença 0,00 MT e turno
+         seguinte já aberto.
+
+  Se (c) ou (d) derem "permission-denied" no F12 → as regras de cash_sessions
+  não foram publicadas. Volte ao Passo 5.
+
+
+  PASSO 8 — Ver o aviso amarelo da captura.
+  -----------------------------------------
+  A faixa azul "Este banco de dados está sujeito aos limites de cota
+  compartilhada de IA" não é um erro nem tem a ver com as regras. Diz apenas
+  que o projeto está no plano gratuito (Spark) e que pode migrar para um plano
+  pago se precisar de mais quota. Não precisa de fazer nada agora.
+
+
+══════════════════════════════════════════════════════════════════════════════
+  SE ALGO CORRER MAL — VOLTAR ATRÁS
+══════════════════════════════════════════════════════════════════════════════
+
+  Sintoma: o sistema abre mas as listas vêm vazias e o F12 mostra
+  "Missing or insufficient permissions".
+
+  Opção 1 (segura): Segurança → Ctrl+A → colar o REGRAS-ANTERIORES.txt
+  (Passo 3) → Publicar.
+
+  Opção 2: histórico de versões, se existir na sua consola (ícone de relógio
+  no editor) → escolher a versão anterior → Publicar.
+
+  ATENÇÃO: se as regras que estavam publicadas eram as antigas e abertas
+  ("allow read, write: if true"), repô-las reabre a base a qualquer pessoa.
+  Nesse caso é preferível corrigir o problema e publicar as regras novas.
+
+  Causas mais frequentes de falha:
+   1. login "Anónimo" desligado (verificar sempre primeiro);
+   2. texto colado incompleto;
+   3. texto errado (o guia em vez das regras) -> erro de sintaxe na linha 3-27
+      com "Missing 'match' keyword" / "token recognition error";
+   4. o separador usado não era "Segurança" (ou era outra base de dados);
+   5. regras ainda a propagar (esperar 2-3 minutos).
+
+
+══════════════════════════════════════════════════════════════════════════════
+  ALTERNATIVAS (só se a consola não abrir)
+══════════════════════════════════════════════════════════════════════════════
+
+  A) CONSOLA DO GOOGLE CLOUD — CAMINHO RECOMENDADO AGORA
+     [CONFIRMADO] documentação de 07/11/2026 ("Getting started with security
+     rules"): Databases → ID da base → Security → Firestore Rules → New
+     ruleset / Clone ruleset → Publish; a timeline permite clonar/restaurar.
+     Passo a passo simples em COMO-PUBLICAR-REGRAS-SIMPLES.txt.
+     https://console.cloud.google.com/databases?project=gen-lang-client-0896153566
+
+  B) LINHA DE COMANDOS (na pasta do sistema, precisa de Node.js e internet)
+     npx firebase-tools login
+     npx firebase-tools deploy --only firestore:rules --project gen-lang-client-0896153566
+     Tem de terminar com  ✔  firestore: released rules
+     (a documentação oficial confirma o suporte a bases de dados com nome)
+
+
+══════════════════════════════════════════════════════════════════════════════
+  FONTES
+══════════════════════════════════════════════════════════════════════════════
+
+  [CONFIRMADO] Captura de ecrã do seu posto: separadores "Dados",
+  "Segurança", "Índices", "Recuperação de desastres", "Uso", "Query Insights";
+  base de dados correta já escolhida.
+
+  [CONFIRMADO] Firebase, "Manage Cloud Firestore with the Firebase Console"
+  (atualizada 05/11/2026) — https://firebase.google.com/docs/firestore/using-console
+  (a página ainda descreve um separador "Rules"; a consola nova, mais recente
+   do que a documentação, chama-lhe "Segurança" — é o tipo de desvio que
+   acontece entre a documentação e o produto).
+
+  [CONFIRMADO] Google Cloud, "Getting started with security rules"
+  (atualizada 20/08/2026) — https://docs.cloud.google.com/firestore/native/docs/security/get-started
+  (seletor de base de dados na consola Firebase; caminho da consola Google
+   Cloud para bases com nome).
+
+  [CONFIRMADO] Firebase, "Manage and deploy Firebase Security Rules" —
+  https://firebase.google.com/docs/rules/manage-deploy
+  (publicação por base de dados pela CLI).
+
+  [NÃO CONSEGUI VERIFICAR] O endereço exato com /security/rules marcado como
+  [PROVÁVEL] no Passo 2 — não tenho acesso à sua sessão. O separador
+  "Segurança" é o caminho garantido.
+
+══════════════════════════════════════════════════════════════════════════════

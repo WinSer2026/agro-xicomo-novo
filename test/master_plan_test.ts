@@ -210,7 +210,13 @@ async function runTests() {
   const secondItem = { ...discountItem, productId: 'prod-002', quantity: 2, unitPrice: 50, discountType: 'per_unit' as const, discountValue: 5 };
   const historicTotals = getSaleTotals([discountedItem, secondItem]);
   assert(historicTotals.subtotal === 400 && historicTotals.discount === 40 && historicTotals.total === 360, 'Historic sale totals account for both line discounts');
-  assert(getSaleTotals([discountedItem, secondItem], 10, true).total === 406, 'Regular sale and paused-cart totals share discount + IVA logic');
+  // D1: o preço de revenda já inclui IVA. O total NÃO cresce ao ligar o IVA;
+  // o que muda é apenas a discriminação: 360 de total contêm 49,66 de IVA.
+  const totaisComIva = getSaleTotals([discountedItem, secondItem], 10, true);
+  assert(totaisComIva.total === 350, 'D1: total = subtotal 400 − descontos 50, com IVA incluído no preço');
+  assert(Math.abs(totaisComIva.ivaAmount - 48.28) < 0.01, 'D1: IVA extraído do total (350 − 350/1,16 = 48,28)');
+  assert(Math.abs(totaisComIva.netTotal - 301.72) < 0.02, 'D1: base tributável = total − IVA');
+  assert(getSaleTotals([discountedItem, secondItem]).total === 360, 'Regular sale and paused-cart totals share the same discount logic');
   assert(getSaleTotals([{ ...discountItem, discountValue: 999 }]).total === 0, 'Excess fixed discount cannot create a negative sale');
 
   // TEST 10: Older/retroactive sales appear in finance; audit errors cannot hide them.

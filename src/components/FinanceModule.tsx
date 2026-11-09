@@ -7,6 +7,7 @@ import { isFinancialSale, isDebtSale, isCancelledSale } from '../utils/saleStatu
 import { Sale, LossRecord, Product, AuditLog, SystemSettings, ProductTransformation, PayrollPayment, CashMovement } from '../types';
 import { cashBalance, sumRefunds, CASH_METHODS, toCashDay } from '../utils/cashBox';
 import { verifyAuthorizationPassword } from '../utils/authorization';
+import { currentShiftId } from '../utils/shifts';
 import { getClientIp } from '../utils/clientInfo';
 import { splitSalesForReport, periodDayRange, stockBeforePeriod, buildProductPerformance, formatMT, type ReportPeriod } from '../utils/reporting';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
@@ -153,11 +154,14 @@ export default function FinanceModule({ currentUser }: FinanceModuleProps = {}) 
     try {
       const agora = new Date().toISOString();
       const operador = currentUser?.username || 'Gestor';
+      // Sangria/entrada ficam no turno em que aconteceram, para o fecho as contar.
+      const shiftId = await currentShiftId();
       await dbService.addCashMovement({
         id: `cx-${cashForm.type.toLowerCase()}-${Date.now()}`,
         date: agora,
         day: toCashDay(agora),
         type: cashForm.type,
+        cashSessionId: shiftId,
         amount: cashForm.type === 'Sangria' ? -Math.abs(valor) : Math.abs(valor),
         method: cashForm.method,
         operator: operador,

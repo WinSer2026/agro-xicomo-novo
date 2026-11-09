@@ -1,20 +1,48 @@
 import { SystemSettings } from '../types';
-import { verifyPassword } from './securityHelper';
+import { verifyPassword, hashPassword } from './securityHelper';
 
 /**
- * Palavra-passe de autorização de stock (gestor).
+ * Código de autorização de operações sensíveis (stock, anulações, sangrias).
  *
- * Antes existiam três palavras-passe universais em texto simples no bundle
- * (`05082`, `0147`, `admin`), aceites em qualquer módulo. `0147` abria ainda o
- * login como Técnico. Isso foi removido: agora só é aceite a palavra-passe
- * configurada nas definições — em hash (`sha256:salt:hash`) quando disponível,
- * ou em texto simples apenas para instalações legadas.
- *
- * O valor por omissão só se aplica quando NÃO existe nenhuma palavra-passe
- * configurada (primeira instalação), e deve ser alterado imediatamente.
+ * Regras (SEG-03):
+ *  - NÃO existe código por omissão. Antes, `05082` era aceite em qualquer
+ *    instalação e estava escrito no repositório; agora, sem código definido, as
+ *    operações sensíveis são recusadas e a interface deve pedir a configuração.
+ *  - O código vive em settings.stockPasswordHash. Formato suportado:
+ *      `pbkdf2:...` (actual, gerado por hashPassword)
+ *      `sha256:...` (legado, ainda verificável)
+ *      texto simples (instalações antigas — aceite para não bloquear a loja,
+ *      mas deve ser migrado; ver migrationStatus)
+ *  - O código de stock é independente da palavra-passe de login: é um PIN de
+ *    operação, não uma conta.
  */
-export const DEFAULT_AUTHORIZATION_PASSWORD = '05082';
 
+/** Já existe um código configurado (qualquer formato)? */
+export function isAuthorizationConfigured(settings?: Partial<SystemSettings> | null): boolean {
+  const configured = (settings as Record<string, unknown> | null | undefined)?.stockPasswordHash;
+  return typeof configured === 'string' && configured.trim().length > 0;
+}
+
+export type AuthorizationStorageState = 'none' | 'legacy-plain' | 'legacy-sha256' | 'modern';
+
+export function getAuthorizationStorageState(
+  settings?: Partial<SystemSettings> | null
+): AuthorizationStorageState {
+  const configured = (settings as Record<string, unknown> | null | undefined)?.stockPasswordHash;
+  const stored = typeof configured === 'string' ? configured.trim() : '';
+  if (!stored) return 'none';
+  if (stored.startsWith('pbkdf2:')) return 'modern';
+  if (stored.startsWith('sha256:')) return 'legacy-sha256';
+  return 'legacy-plain';
+}
+
+/**
+ * Verifica o código introduzido.
+ *
+ * Sem código configurado devolve SEMPRE false — a operação é recusada e a
+ * interface mostra "defina primeiro o código de gestor". Isto é deliberado:
+ * melhor uma operação bloqueada do que uma operação aberta a todos.
+ */
 export async function verifyAuthorizationPassword(
   input: string,
   settings?: Partial<SystemSettings> | null
@@ -22,24 +50,32 @@ export async function verifyAuthorizationPassword(
   const typed = (input || '').trim();
   if (!typed) return false;
 
-  const configured = (settings as Record<string, unknown> | null | undefined)?.stockPasswordHash;
-  const stored = typeof configured === 'string' ? configured.trim() : '';
+  const state = getAuthorizationStorageState(settings);
+  if (state === 'none') return false;
 
-  if (!stored) {
-    return typed === DEFAULT_AUTHORIZATION_PASSWORD;
-  }
+  const stored = String(
+    (settings as Record<string, unknown> | null | undefined)?.stockPasswordHash ?? ''
+  ).trim();
 
-  // Formato moderno: hash com salt.
-  if (stored.startsWith('sha256:')) {
+  if (state === 'modern' || state === 'legacy-sha256') {
     return verifyPassword(typed, stored);
   }
 
-  // Instalações antigas guardavam a palavra-passe em texto simples.
+  // Legado em texto simples: compara, mas avisa (a migração é feita no próximo
+  // gravar das definições, em TechnicalModule).
+  console.warn('[Authorization] Código de gestor guardado em texto simples. Migre no Painel Técnico.');
   return typed === stored;
 }
 
-/** Indica se a palavra-passe configurada já está protegida por hash. */
-export function isAuthorizationPasswordHashed(settings?: Partial<SystemSettings> | null): boolean {
-  const configured = (settings as Record<string, unknown> | null | undefined)?.stockPasswordHash;
-  return typeof configured === 'string' && configured.trim().startsWith('sha256:');
+/**
+ * Preparado para gravar: devolve o valor a guardar em stockPasswordHash.
+ * - vazio -> '' (código removido: operações sensíveis ficam bloqueadas)
+ * - já em hash -> devolve igual (não re-hash)
+ * - texto -> gera hash PBKDF2
+ */
+export async function prepareAuthorizationPassword(raw: string): Promise<string> {
+  const value = (raw || '').trim();
+  if (!value) return '';
+  if (value.startsWith('pbkdf2:') || value.startsWith('sha256:')) return value;
+  return hashPassword(value);
 }

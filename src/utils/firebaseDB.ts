@@ -43,6 +43,7 @@ import {
   ProductTransformation,
   StockMovement,
   CashMovement,
+  CashSession,
   Debt,
   DebtPayment
 } from '../types';
@@ -549,6 +550,31 @@ export class FirebaseDBService {
     }
   }
 
+  /**
+   * Leitura que NÃO transforma falha em "vazio" (BD-01/02/03).
+   *
+   * Antes, qualquer erro de getDocs devolvia [] e o chamador interpretava isso
+   * como "colecção vazia" — o que levava a reescrever o catálogo, as definições
+   * e as credenciais com valores de fábrica. Aqui o erro é propagado e quem
+   * chama decide (mostrar erro, usar cache, abortar).
+   */
+  private async getAllOrFail<T>(colName: string): Promise<T[]> {
+    await this.ensureAuth();
+    const snapshot = await getDocs(collection(db, colName));
+    return snapshot.docs.map(d => d.data() as T);
+  }
+
+  /** Existe pelo menos uma venda? Nunca semeia nada que já tenha história. */
+  private async hasAnySales(): Promise<boolean> {
+    try {
+      const snap = await getDocs(query(collection(db, 'sales'), limit(1)));
+      return !snap.empty;
+    } catch {
+      // Sem certeza de que não há vendas, assume-se que há: melhor não semear.
+      return true;
+    }
+  }
+
   /** Convert a Firestore document to an app record while preserving its document ID. */
   private recordFromSnapshot<T>(snapshot: QueryDocumentSnapshot<DocumentData>): T {
     const data = snapshot.data() as T & { id?: string };
@@ -699,9 +725,16 @@ export class FirebaseDBService {
         }
       } catch (e) {}
     }
-    const rawProducts = await this.getAll<Product>('products');
+    // Se a leitura falhar, o erro sobe: NUNCA se trata como "catálogo vazio".
+    const rawProducts = await this.getAllOrFail<Product>('products');
     if (rawProducts.length === 0) {
-      console.log('[FirebaseDBService] getProducts() found 0 products in Firestore. Seeding initial products...');
+      // Instalação nova = leitura com sucesso + zero produtos + nenhuma venda.
+      // Se já existe histórico, uma base vazia é anomalia, não instalação.
+      if (await this.hasAnySales()) {
+        console.error('[FirebaseDBService] getProducts() leu 0 produtos mas existem vendas: não semeia. Verificar regras/índices/permissões.');
+        throw new Error('Não foi possível ler o catálogo, mas existem vendas registadas. Nada foi alterado. Verifique a ligação e tente novamente.');
+      }
+      console.log('[FirebaseDBService] Instalação nova confirmada. A semear catálogo inicial...');
       const seeded = INITIAL_PRODUCTS.map(p => this.sanitizeProduct({ ...p }));
       await this.upsertBatch('products', seeded);
       this.productsCache = seeded;
@@ -2538,6 +2571,77 @@ export class FirebaseDBService {
     window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_movements', action: 'add' } }));
   }
 
+  // --- Turnos de caixa (fecho por turno — decisão D5) -----------------------
+  //
+  // Um turno é um documento em `cash_sessions`. Nasce com status 'Aberto' e é
+  // fechado uma única vez. A regra do Firestore só permite actualizar enquanto
+  // estiver 'Aberto'; no código, closeCashSession recusa fechar duas vezes. Um
+  // fecho errado corrige-se com um movimento contrário, nunca reescrevendo o
+  // documento — é dinheiro que alguém assinou.
+
+  /** Turnos, do mais recente para o mais antigo. */
+  public async getCashSessions(maxCount: number = 200): Promise<CashSession[]> {
+    await this.ensureAuth();
+    const snapshot = await getDocs(
+      query(collection(db, 'cash_sessions'), orderBy('number', 'desc'), limit(maxCount))
+    );
+    return snapshot.docs.map(d => this.recordFromSnapshot<CashSession>(d));
+  }
+
+  /** O turno aberto, se existir. Devolve null quando a leitura funcionou e não há nenhum. */
+  public async getOpenCashSession(): Promise<CashSession | null> {
+    await this.ensureAuth();
+    // Se a leitura falhar, o erro sobe: assumir "não há turno" abriria um turno
+    // a dobrar sobre um que já existe.
+    const snapshot = await getDocs(
+      query(collection(db, 'cash_sessions'), where('status', '==', 'Aberto'), limit(1))
+    );
+    if (snapshot.empty) return null;
+    return this.recordFromSnapshot<CashSession>(snapshot.docs[0]);
+  }
+
+  /** Cria um turno novo. Recusa criar um segundo turno aberto ao mesmo tempo. */
+  public async createCashSession(session: CashSession): Promise<void> {
+    await this.ensureAuth();
+    const aberto = await this.getOpenCashSession();
+    if (aberto) {
+      throw new Error(`Já existe um turno aberto (n.º ${aberto.number}). Feche-o antes de abrir outro.`);
+    }
+    await setDoc(doc(db, 'cash_sessions', session.id), this.sanitizeData(session));
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_sessions', action: 'add' } }));
+  }
+
+  /**
+   * Fecha um turno. Transacção: relê o documento, exige status 'Aberto' e grava
+   * o fecho. Se outra pessoa fechou entretanto, aborta em vez de sobrepor.
+   */
+  public async closeCashSession(
+    sessionId: string,
+    closure: Partial<CashSession>
+  ): Promise<CashSession> {
+    await this.ensureAuth();
+    const ref = doc(db, 'cash_sessions', sessionId);
+    const fechado = await runTransaction(db, async transaction => {
+      const atual = await transaction.get(ref);
+      if (!atual.exists()) throw new Error('Turno não encontrado.');
+      const dados = atual.data() as CashSession;
+      if (dados.status !== 'Aberto') {
+        throw new Error('Este turno já foi fechado. Um fecho não se reabre.');
+      }
+      const registo: CashSession = {
+        ...dados,
+        ...closure,
+        id: dados.id || sessionId,
+        status: 'Fechado',
+        closedAt: closure.closedAt || new Date().toISOString()
+      };
+      transaction.set(ref, this.sanitizeData(registo), { merge: false });
+      return registo;
+    });
+    window.dispatchEvent(new CustomEvent('db-update', { detail: { table: 'cash_sessions', action: 'update' } }));
+    return fechado;
+  }
+
   // --- Losses ---
   public async getLosses(): Promise<LossRecord[]> {
     if (this.lossesCache && this.lossesCache.length >= 0) {
@@ -3285,7 +3389,10 @@ export class FirebaseDBService {
   // --- Settings ---
   private getDefaultSettings(): SystemSettings {
     return {
-      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '05082',
+      // Código de gestor vazio: tem de ser definido no Painel Técnico. O valor
+      // '05082' estava publicado no repositório e abria todas as operações de
+      // stock (SEG-03).
+      mode: 'Online', companyName: 'AGRO - XICOMO & SERVIÇOS, LDA', logoUrl: '', stockPasswordHash: '',
       vodacom1: '845197072', vodacom2: '84 94 23 241', vodacom3: '', movitel1: '86 36 99900', movitel2: '', movitel3: '',
       fixo1: '', fixo2: '', email: 'agroxicomo1@gmail.com', banco: 'First Capital Bank, S.A.', numero_conta: '99466610001',
       nib: '001000000099466610196', banco2: '', numero_conta2: '', nib2: '', mpesa: '', emola: '',
@@ -3315,10 +3422,17 @@ export class FirebaseDBService {
         safeStorage.setItem('agro_settings_cache', JSON.stringify(s));
         return s;
       }
-    } catch(e) {}
-    const def = this.getDefaultSettings();
-    await this.saveSettings(def);
-    return def;
+      // Documento inexistente e leitura bem-sucedida: instalação nova.
+      const def = this.getDefaultSettings();
+      await this.saveSettings(def);
+      return def;
+    } catch (e) {
+      // Leitura falhou: usar as definições em memória/cache e NÃO escrever por
+      // cima das reais (BD-02). Escrever aqui apagava NUIT, contactos, bancos e
+      // o código de gestor.
+      console.error('[FirebaseDBService] Leitura de settings falhou; a usar cache/omissões sem gravar:', e);
+      return this.settingsCache ?? this.getDefaultSettings();
+    }
   }
 
   public async saveSettings(s: SystemSettings): Promise<void> {
@@ -3343,30 +3457,17 @@ export class FirebaseDBService {
       } catch (e) {}
     }
 
-    const list = await this.getAll<UserCredentials>('credentials');
-    if (list && list.length > 0) {
-      this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
-      safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
-      return this.credentialsCache;
-    }
-
-    // Se a base de dados estiver completamente vazia, criamos um utilizador administrador inicial
-    const initialAdmin: UserCredentials[] = [
-      {
-        id: 'usr-admin-inicial',
-        username: 'admin',
-        passwordHash: 'sha256:AXadmin2026:ffe6646a86429864a103ddd12a441381390e88eee2e1d639268c4360b0e67e02',
-        role: 'Técnico',
-        roles: ['Técnico'],
-        mfaEnabled: false,
-        mustChangePassword: true,
-        passwordResetVersion: 2
-      }
-    ];
-    await this.upsertBatch('credentials', initialAdmin);
-    this.credentialsCache = initialAdmin;
-    safeStorage.setItem('agro_credentials_cache', JSON.stringify(initialAdmin));
-    return initialAdmin;
+    // Leitura que falha NÃO pode significar "sem utilizadores": aqui o erro
+    // sobe, para não recriar contas (BD-03).
+    //
+    // A criação da conta inicial deixou de acontecer aqui. É feita uma única vez
+    // em utils/credentialsReset.ts, com palavra-passe temporária ALEATÓRIA, e
+    // apenas em instalação nova confirmada. O hash fixo que existia neste ponto
+    // estava publicado no repositório.
+    const list = await this.getAllOrFail<UserCredentials>('credentials');
+    this.credentialsCache = list.sort((a, b) => a.username.localeCompare(b.username));
+    safeStorage.setItem('agro_credentials_cache', JSON.stringify(this.credentialsCache));
+    return this.credentialsCache;
   }
 
   public async saveCredential(c: UserCredentials): Promise<void> {

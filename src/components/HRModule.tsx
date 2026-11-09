@@ -842,10 +842,10 @@ export default function HRModule() {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(6.5);
     doc.setTextColor(71, 85, 105);
-    doc.text('Nota de Isenção de Responsabilidade Fiscal:', 18, currentY + 4);
+    doc.text('Nota:', 18, currentY + 4);
     doc.setFont('helvetica', 'normal');
-    doc.text('Esta folha de vencimento foi gerada em total conformidade com o Regulamento INSS e as tabelas oficiais de Retenção de IRPS', 18, 7.5 + currentY);
-    doc.text('estabelecidas pelo Ministério de Economia e Finanças de Moçambique.', 18, 10 + currentY);
+    doc.text('Esta folha de vencimento foi preparada segundo o Regulamento do INSS e a tabela de Retenção de IRPS em uso na empresa.', 18, 7.5 + currentY);
+    doc.text('Os valores devem ser conferidos com a tabela oficial em vigor e com o contabilista antes do pagamento.', 18, 10 + currentY);
 
     currentY += 18;
 

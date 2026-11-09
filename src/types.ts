@@ -86,6 +86,12 @@ export interface Sale {
   amountReceived?: number;
   /** Troco devolvido ao cliente. Guardado para auditoria do troco. */
   changeGiven?: number;
+  /**
+   * Turno de caixa em que a venda entrou.
+   * Ausente = venda anterior à existência de turnos; o fecho do turno trata-a
+   * pela hora (ver utils/cashSessions.ts) e nunca a reatribui a um turno antigo.
+   */
+  cashSessionId?: string;
   /** Estado anterior ao cancelamento, para que o restauro seja fiel. */
   previousStatus?: 'Paga' | 'Pendente' | 'Crédito';
   /** Número da nota de crédito emitida aquando da anulação (E-06). */
@@ -489,6 +495,72 @@ export interface CashMovement {
   receiptNumber?: string;
   notes?: string;
   terminalId?: string;
+  /** Turno de caixa em que o movimento entrou (ver types CashSession). */
+  cashSessionId?: string;
+}
+
+/**
+ * Turno de caixa (sessão de operação da gaveta).
+ *
+ * Porque existe: o fecho era por dia, assinado por uma só pessoa e comparado
+ * contra um saldo calculado a partir de vendas — sem contar o que estava
+ * realmente na gaveta. Não havia como provar quem abriu, quem contou, quem
+ * conferiu, nem quanto transitou para o turno seguinte.
+ *
+ * Regras (decisão D5 do dono):
+ *  - fecho POR TURNO, obrigatório;
+ *  - sem fundo de maneio fixo: o dinheiro que fica é o CONTADO no fecho anterior;
+ *  - sem tolerância: qualquer diferença é registada e justificada;
+ *  - assinado por quem conta e por quem confere;
+ *  - contagem por método de pagamento;
+ *  - reembolsos descontam; salários não passam por aqui.
+ *
+ * O fecho é imutável: depois de gravado não se corrige o documento; corrige-se
+ * com um movimento contrário e uma nota.
+ */
+export type CashSessionStatus = 'Aberto' | 'Fechado';
+
+/** Contagem por método de pagamento, em MT. Ex.: { Dinheiro: 4500, 'M-Pesa': 1200 }. */
+export type CashCounts = Record<string, number>;
+
+export interface CashSession {
+  id: string;
+  /** Número sequencial do turno (1, 2, 3…) para o pessoal falar a mesma língua. */
+  number: number;
+  status: CashSessionStatus;
+  openedAt: string;
+  openedBy: string;
+  /** Dia local de Maputo do fecho (AAAA-MM-DD) — usado se o turno atravessar a meia-noite. */
+  day: string;
+  /**
+   * Valores com que a gaveta começou, por método. Para o dinheiro, é o contado
+   * no fecho do turno anterior; no primeiro turno do sistema, é a contagem
+   * física assinada (não se inventa um fundo).
+   */
+  openingCounts: CashCounts;
+  /** Primeiro turno alguma vez aberto nesta instalação? Exige contagem física. */
+  isFirstSession?: boolean;
+  openingNote?: string;
+  closedAt?: string;
+  closedBy?: string;
+  /** Quem contou o dinheiro no fecho. */
+  countedBy?: string;
+  /** Quem conferiu a contagem. Pode ser a mesma pessoa — fica registado. */
+  verifiedBy?: string;
+  countedSamePerson?: boolean;
+  /** Contagem física no fecho, por método. */
+  closingCounts?: CashCounts;
+  /** O que o sistema esperava, por método, no momento do fecho. */
+  expectedCounts?: CashCounts;
+  /** Contado − esperado, por método. Negativo = falta; positivo = sobra. */
+  differenceCounts?: CashCounts;
+  /** Diferença total (soma dos métodos). Zero é o normal. */
+  difference?: number;
+  /** Obrigatória sempre que a diferença não é zero (sem tolerância). */
+  justification?: string;
+  terminalId?: string;
+  /** Turno seguinte criado automaticamente no fecho (se houver). */
+  nextSessionId?: string;
 }
 
 /**

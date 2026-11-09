@@ -103,7 +103,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
   const [showNewProdLinkInput, setShowNewProdLinkInput] = useState(false);
   const [showEditLinkInput, setShowEditLinkInput] = useState(false);
 
-  // Stock Adjustment States (Expanded to all product fields, password code: "05082")
+  // Stock Adjustment States (Expanded to all product fields, protected by settings.stockPasswordHash)
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [stockPassword, setStockPassword] = useState('');
@@ -1727,7 +1727,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
 
 
 
-  // Secure Manual Stock Adjustments (Requires secondary code: "05082")
+  // Secure Manual Stock Adjustments (requires settings.stockPasswordHash)
   const handleAdjustStock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -3863,7 +3863,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
         </div>
       )}
 
-      {/* --- Stock Adjust Security Modal (Password check "05082") --- */}
+      {/* --- Stock Adjust Security Modal (checks settings.stockPasswordHash) --- */}
       {showAdjustModal && selectedProduct && (
         <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto p-2 sm:p-4 flex min-h-full items-center justify-center">
           <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[92vh] my-auto flex flex-col overflow-hidden border border-gray-200">
@@ -4099,7 +4099,7 @@ export default function StockModule({ currentUser }: StockModuleProps = {}) {
                       data-lpignore="true"
                       value={stockPassword}
                       onChange={(e) => setStockPassword(e.target.value)}
-                      placeholder="Senha do Stock (Ex: 05082)"
+                      placeholder="Senha do Stock"
                       className="w-full border border-red-300 rounded px-2.5 py-1.5 text-[11px] text-center focus:border-red-500 focus:outline-none font-extrabold bg-white"
                     />
                   </div>

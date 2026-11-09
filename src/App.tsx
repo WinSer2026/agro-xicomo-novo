@@ -8,6 +8,9 @@ import { runCredentialsReset } from './utils/credentialsReset';
 import LoginPanel from './components/LoginPanel';
 import { InlineHeaderSearch } from './components/InlineHeaderSearch';
 import { verifyPassword } from './utils/securityHelper';
+import ShiftChangeModal from './components/ShiftChangeModal';
+import { loadShiftOverview } from './utils/shifts';
+import { describeSession } from './utils/cashSessions';
 import './index.css';
 // Lazy-loaded modules
 const PDVModule = lazy(() => import('./components/PDVModule'));
@@ -34,6 +37,33 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const [settings, setSettings] = useState<SystemSettings | null>(null);
+
+  // Turno de caixa: etiqueta no cabeçalho + ecrã de troca de turno.
+  // A troca é manual (botão) porque a empresa ainda não definiu horários.
+  const [showShiftModal, setShowShiftModal] = useState(false);
+  const [shiftLabel, setShiftLabel] = useState('Turno de caixa');
+
+  const refreshShiftLabel = React.useCallback(async () => {
+    try {
+      const overview = await loadShiftOverview();
+      setShiftLabel(describeSession(overview.session));
+    } catch (erro) {
+      console.warn('[Turnos] Sem leitura do turno no cabeçalho:', erro);
+      setShiftLabel('Turno: sem leitura');
+    }
+  }, []);
+
+  useEffect(() => {
+    // Só depois do login: antes disso não há operador nem motivo para ler a caixa.
+    if (!currentUser) return;
+    void refreshShiftLabel();
+    const onDbUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<{ table?: string }>).detail;
+      if (detail?.table === 'cash_sessions') void refreshShiftLabel();
+    };
+    window.addEventListener('db-update', onDbUpdate as EventListener);
+    return () => window.removeEventListener('db-update', onDbUpdate as EventListener);
+  }, [refreshShiftLabel, currentUser]);
   
   // Persistent Theme State (Claro/Escuro)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -754,6 +784,16 @@ export default function App() {
               <InlineHeaderSearch onNavigateModule={(mod) => selectModule(mod)} />
             )}
 
+            {/* Troca de turno da caixa: sempre à vista, em qualquer módulo. */}
+            <button
+              onClick={() => setShowShiftModal(true)}
+              className="hidden sm:flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition-colors shrink-0"
+              title="Trocar de turno da caixa (contagem e fecho)"
+            >
+              <span className="material-symbols-outlined text-[18px]">swap_horiz</span>
+              <span className="text-[10px] font-bold max-w-[150px] truncate">{shiftLabel}</span>
+            </button>
+
             {/* Critical Stock Alerts Bell */}
             <div className="relative">
               <button
@@ -919,6 +959,14 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {showShiftModal && currentUser && (
+        <ShiftChangeModal
+          currentUser={currentUser.username}
+          onClose={() => { setShowShiftModal(false); void refreshShiftLabel(); }}
+          onChanged={() => void refreshShiftLabel()}
+        />
+      )}
 
     </div>
   );
