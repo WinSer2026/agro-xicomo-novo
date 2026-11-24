@@ -3435,6 +3435,21 @@ export class FirebaseDBService {
     }
   }
 
+  /**
+   * Read settings from Firestore without falling back to browser cache/defaults.
+   * Startup migrations must use this method so an offline device cannot treat
+   * local defaults as authoritative cloud state.
+   */
+  public async getSettingsFromCloud(): Promise<SystemSettings | null> {
+    const snapshot = await getDoc(doc(db, 'settings', 'global'));
+    if (!snapshot.exists()) return null;
+
+    const settings = snapshot.data() as SystemSettings;
+    this.settingsCache = settings;
+    safeStorage.setItem('agro_settings_cache', JSON.stringify(settings));
+    return settings;
+  }
+
   public async saveSettings(s: SystemSettings): Promise<void> {
     this.settingsCache = s;
     safeStorage.setItem('agro_settings_cache', JSON.stringify(s));
