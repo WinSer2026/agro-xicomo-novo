@@ -30,7 +30,14 @@ export const runStockListUpdate = async () => {
   }
 
   try {
-    const settings = await dbService.getSettings();
+    // Never use getSettings() here: it may fall back to local defaults, which
+    // are not valid migration state when the browser is offline.
+    const settings = await dbService.getSettingsFromCloud();
+    if (!settings) {
+      console.warn('[StockListUpdate] Settings document missing; migration aborted safely.');
+      return;
+    }
+
     if ((settings?.stockListVersion || 0) >= STOCK_LIST_VERSION) {
       return; // já aplicada globalmente (uma única vez para todos os dispositivos)
     }
